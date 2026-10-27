@@ -141,7 +141,7 @@ export function createMarketauxProvider(
       if (!token) throw new ProviderError('not_configured');
       checkCooldown();
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
+      const timeout = setTimeout(() => controller.abort(), 15000);
       try {
         const entity = await resolve(company, token, controller.signal);
         const rows = dataArray(await request('/v1/news/all', {
@@ -191,6 +191,13 @@ export function createMarketauxProvider(
       } catch (error) {
         if (error instanceof ProviderError) throw error;
         // fetch errors may contain the URL (and api_token); never propagate them.
+        if (env.VERCEL) {
+          const cause = error instanceof Error ? error.cause as { code?: unknown } | undefined : undefined;
+          const code = typeof cause?.code === 'string' &&
+            ['ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT'].includes(cause.code)
+            ? cause.code : 'NETWORK_ERROR';
+          console.warn('Marketaux transport failed', { timedOut: controller.signal.aborted, code });
+        }
         throw new ProviderError('error');
       } finally { clearTimeout(timeout); }
     },

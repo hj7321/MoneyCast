@@ -17,7 +17,7 @@ function providerLabel(value: string | null): string {
 
 async function readJson(endpoint: string): Promise<unknown> {
   const response = await fetch(endpoint, {
-    signal: AbortSignal.timeout(15000), redirect: 'error', headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(20000), redirect: 'error', headers: { Accept: 'application/json' },
   });
   if (!response.ok || !response.headers.get('content-type')?.toLowerCase().includes('application/json')) {
     throw new Error('invalid_response');

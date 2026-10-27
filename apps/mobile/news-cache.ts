@@ -15,7 +15,7 @@ export const mobileNewsCache = createNewsCache({
       throw new Error('설정한 API 주소 형식이 올바르지 않습니다.');
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12000);
+    const timer = setTimeout(() => controller.abort(), 20000);
     try {
       const response = await fetch(`${API_URL}/api/news?companyId=${encodeURIComponent(companyId)}`, { signal: controller.signal });
       if (!response.ok) throw new Error(response.status === 429

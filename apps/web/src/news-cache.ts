@@ -6,7 +6,7 @@ const cache = createNewsCache({
   storage: () => typeof window === 'undefined' ? undefined : window.localStorage,
   load: async companyId => {
     const response = await fetch(`/api/news?companyId=${encodeURIComponent(companyId)}`, {
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(20000),
     });
     if (!response.ok) throw new Error(`뉴스 요청을 처리하지 못했습니다. (${response.status})`);
     try { return await response.json(); }

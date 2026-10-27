@@ -247,12 +247,12 @@ test('network failures, invalid JSON, missing JSON metadata and oversized respon
   await rejects(failure.getArticles(apple, now), 'error');
 });
 
-test('entity lookup and article request share one total eight-second timeout', async t => {
+test('entity lookup and article request share one total fifteen-second timeout', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let newsSignal: AbortSignal | null = null;
   const provider = createMarketauxProvider(env, mockedFetch(async (input, init) => {
     if (new URL(String(input)).pathname === '/v1/entity/search') {
-      t.mock.timers.tick(7000);
+      t.mock.timers.tick(14000);
       return json({ data: [samsungEntity] });
     }
     newsSignal = init?.signal ?? null;
