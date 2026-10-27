@@ -2,7 +2,7 @@
 
 저장소 루트에서 `npm install` 후 `npm run mobile` 또는 이 폴더에서 `npm start`로 Metro를 실행합니다. Expo SDK 54와 호환되는 Expo Go 또는 개발 빌드에서 QR을 열 수 있습니다. 최신 Expo Go가 SDK 54를 지원하지 않으면 SDK 54용 Android Expo Go 또는 개발 빌드를 사용하세요. Android 에뮬레이터는 `npm run android`, macOS의 iOS 시뮬레이터는 `npm run ios`를 사용합니다. iOS 네이티브 빌드는 macOS/Xcode가 필요합니다.
 
-`apps/mobile/.env.example`를 `.env`로 복사하고 `EXPO_PUBLIC_API_URL`에 백엔드 주소를 입력하세요. Android 에뮬레이터에서는 `http://10.0.2.2:8787`, 실제 기기에서는 같은 네트워크의 개발 PC IP를 사용합니다. 실제 기기에서 접근하려면 서버를 `HOST=0.0.0.0`으로 시작하고 해당 포트의 로컬 접근을 허용해야 합니다. 배포 시에는 HTTPS 주소를 사용합니다. 환경변수 수정 후 Metro를 다시 시작하세요.
+`apps/mobile/.env.example`를 `.env`로 복사하고 `EXPO_PUBLIC_API_URL`에 백엔드 주소를 입력하세요. 배포된 뉴스 API는 `https://moneycast.vercel.app`입니다. 로컬 Android 에뮬레이터에서는 `http://10.0.2.2:8787`, 실제 기기에서는 같은 네트워크의 개발 PC IP를 사용합니다. 실제 기기에서 로컬 서버에 접근하려면 서버를 `HOST=0.0.0.0`으로 시작하고 해당 포트의 로컬 접근을 허용해야 합니다. 환경변수 수정 후 Metro를 다시 시작하세요.
 
 공개 API 주소만 앱에 포함됩니다. `MARKETAUX_API_TOKEN`과 선택적 게이트웨이의 `NEWS_API_KEY`는 루트 서버 `.env`에만 설정합니다. 웹과 앱은 같은 Marketaux 서버 어댑터를 사용합니다. API 주소 미설정, 키 미설정, 인증·이용 권한 오류, 호출 제한, 응답 오류와 근거 부족을 각각 표시하며 예시 뉴스를 넣지 않습니다. 뉴스 탭을 처음 열 때만 요청을 시작하고 이후 탭 전환 시 상태를 유지합니다. 기사 언어·제공자 감성 분류·미분류·원문 출처를 그대로 표시하며, 뉴스 감성 점수는 상승 확률이 아닙니다. 서버 설정과 무료 한도는 [루트 안내](../../README.md#뉴스-연결과-환경변수)를 확인하세요.
 
