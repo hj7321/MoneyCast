@@ -32,3 +32,44 @@
 .assumptions-note p,
 .assumptions-note button,
 .assumptions-note .note-icon { color: var(--supporting-text); }
+
+/* Separate the action surface from computed output without adding visual noise. */
+.surface-label { display: block; margin-bottom: 10px; color: #467b5a; font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+.result-label { margin: 2px 0 -4px; color: #7c8b83; }
+.calculator-card { background: #f2f7f0; border-color: #d5e4d5; }
+.calculator-card .section-heading { margin-bottom: 18px; }
+.results-column { background: #fbfcfa; border: 1px solid #e8ede8; border-radius: 10px; padding: 18px; }
+.results-column .chart-card, .results-column .goal-result { background: #fff; }
+.goal-picker button { border: 1px solid #d9e3d8; background: #fbfdf9; color: #40584a; }
+.goal-picker button:hover { border-color: #8db79a; background: #f1f8f1; }
+.goal-picker button.chosen { border-color: #478760; background: #dcefe0; color: #1f6040; box-shadow: inset 0 0 0 1px #478760; }
+.goal-picker button svg { color: #3d8a5a; }
+.goal-picker button.chosen svg { color: #246c43; }
+.goal-result { border-color: #d9e4da; }
+.goal-result-icon { display: none; }
+
+/* Korean market convention: positive up, negative down, neutral caution. */
+.sentiment.positive, .status-positive { background: #fae6e6; color: #c53d3d; }
+.sentiment.negative, .status-negative { background: #e7effb; color: #3569ad; }
+.sentiment.neutral, .status-neutral { background: #fff3cc; color: #9a7415; }
+.factor-grid > div { position: relative; border: 1px solid #e5ebe5; border-radius: 8px; padding: 17px 18px 15px; background: #fbfcfa; }
+.factor-grid > div:first-child { border-top: 2px solid #d65353; }
+.factor-grid > div:last-child { border-top: 2px solid #4c7fc2; }
+.factor-grid > div::after { position: absolute; right: 16px; top: 15px; font-size: 20px; font-weight: 700; line-height: 1; }
+.factor-grid > div:first-child::after { content: '↑'; color: #c53d3d; animation: factor-up 1.8s ease-in-out infinite; }
+.factor-grid > div:last-child::after { content: '↓'; color: #3569ad; animation: factor-down 1.8s ease-in-out infinite; }
+.factor-grid h4 { padding-right: 30px; }
+.article-list { display: grid; gap: 10px; }
+.article-list article { border: 1px solid #e4eae4; border-radius: 8px; background: #fff; padding: 16px 17px; }
+.article-list article p { line-height: 1.65; }
+.risk-box p { line-height: 1.65; margin-top: 5px; }
+.feature-intro .fi-sentiment-row > span:first-child { background: #fae6e6; color: #c53d3d; }
+.feature-intro .fi-sentiment-row > span:nth-child(2) { background: #e7effb; color: #3569ad; }
+.feature-intro .fi-sentiment-row > span:nth-child(3) { background: #fff3cc; color: #9a7415; }
+@keyframes factor-up { 50% { transform: translateY(-3px); } }
+@keyframes factor-down { 50% { transform: translateY(3px); } }
+@media (prefers-reduced-motion: reduce) { .factor-grid > div::after { animation: none; } }
+@media (max-width: 760px) { .results-column { padding: 13px; } .surface-label { margin-bottom: 8px; } .article-list article { padding: 14px; } }
+
+/* The four goal labels are the only override to the v0 Latest design. */
+.calculator-card .goal-picker button > .goal-type-label { font-size: 14px; }

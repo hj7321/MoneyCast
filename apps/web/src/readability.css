@@ -27,6 +27,8 @@
 .goal-picker legend { font-size: 16px; }
 .goal-picker legend > span { display: block; font-size: 13px; margin: 3px 0 0; }
 .goal-picker button { font-size: 14px; padding: 10px 2px; }
+.goal-material-icon { width: 22px; height: 22px; flex: 0 0 22px; }
+.goal-material-icon--plane { transform: rotate(90deg); }
 .calculator-fields { gap: 20px; }
 .field label { font-size: 16px; }
 .field-tag { font-size: 12px; }
@@ -149,7 +151,7 @@
   .calculator-card { padding: 22px 18px 0; }
   .section-heading h2, .chart-card .section-heading h2 { font-size: 21px; }
   .goal-picker > div { grid-template-columns: 1fr 1fr; }
-  .goal-picker button { flex-direction: row; gap: 8px; font-size: 15px; min-height: 48px; }
+  .goal-picker button { flex-direction: row; gap: 8px; font-size: 14px; min-height: 48px; }
   .calculator-fields { gap: 20px 16px; }
   .input-wrap { padding-inline: 10px; }
   .input-wrap input { font-size: 20px; }
