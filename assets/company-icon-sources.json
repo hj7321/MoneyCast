@@ -1,0 +1,93 @@
+{
+  "retrievedAt": "2026-10-27T18:33:11.262743+00:00",
+  "sources": {
+    "samsung": {
+      "website": "https://www.samsung.com/sec/",
+      "source": "https://www.samsung.com/sec/static/_images/favicon.ico",
+      "retrievalUrl": "https://www.samsung.com/sec/static/_images/favicon.ico",
+      "finalUrl": "https://www.samsung.com/sec/static/_images/favicon.ico",
+      "retrieval": "official_site",
+      "width": 32,
+      "height": 32,
+      "bytes": 1317,
+      "sha256": "a7f9e2453e753cf32b641f464f8d1f85ec4df30001f1170303fc5c019693dbe3"
+    },
+    "sk-hynix": {
+      "website": "https://www.skhynix.com/",
+      "source": "https://mis-prod-koce-skhynixhomepage-cdn-01-ep.azureedge.net/img/favicon.ico",
+      "retrievalUrl": "https://mis-prod-koce-skhynixhomepage-cdn-01-ep.azureedge.net/img/favicon.ico",
+      "finalUrl": "https://mis-prod-koce-skhynixhomepage-cdn-01-ep.azureedge.net/img/favicon.ico",
+      "retrieval": "official_site",
+      "width": 16,
+      "height": 16,
+      "bytes": 339,
+      "sha256": "ac1cd6501cc8d952154c0bf69f6cefcfd726210a5ac10d3a26a8b32fb5058471"
+    },
+    "naver": {
+      "website": "https://www.navercorp.com/main",
+      "source": "https://www.navercorp.com/img/favicon.ico",
+      "retrievalUrl": "https://www.navercorp.com/img/favicon.ico",
+      "finalUrl": "https://www.navercorp.com/img/favicon.ico",
+      "retrieval": "official_site",
+      "width": 256,
+      "height": 256,
+      "bytes": 2439,
+      "sha256": "f6c6b6b75f7d7f1ebcff84e6eae4de934c63b4a38be9b459fc9e30f0086e973f"
+    },
+    "hyundai": {
+      "website": "https://www.hyundai.com/worldwide/en",
+      "source": "https://www.hyundai.com/etc/designs/hyundai/ww/favicon.ico",
+      "retrievalUrl": "https://www.hyundai.com/etc/designs/hyundai/ww/favicon.ico",
+      "finalUrl": "https://www.hyundai.com/etc/designs/hyundai/ww/favicon.ico",
+      "retrieval": "official_site",
+      "width": 64,
+      "height": 64,
+      "bytes": 2269,
+      "sha256": "df0ec78054a7124d0980e12bf2323537eb66edb4fa155786546cf2700e1e0790"
+    },
+    "apple": {
+      "website": "https://www.apple.com/",
+      "source": "https://www.apple.com/favicon.ico",
+      "retrievalUrl": "https://www.apple.com/favicon.ico",
+      "finalUrl": "https://www.apple.com/favicon.ico",
+      "retrieval": "official_site",
+      "width": 64,
+      "height": 64,
+      "bytes": 2323,
+      "sha256": "116c7dd931bdbc78c2cf5ca4e3e19ab600a6d3db24f6313815e80e6f7f5427fb"
+    },
+    "nvidia": {
+      "website": "https://www.nvidia.com/en-us/",
+      "source": "https://www.nvidia.com/favicon.ico",
+      "retrievalUrl": "https://www.nvidia.com/favicon.ico",
+      "finalUrl": "https://www.nvidia.com/favicon.ico",
+      "retrieval": "official_site",
+      "width": 48,
+      "height": 48,
+      "bytes": 785,
+      "sha256": "ff82af7f92e1210baa037facd81dc733cffc84c7bcf0b9e6829dcf2181315e85"
+    },
+    "microsoft": {
+      "website": "https://www.microsoft.com/",
+      "source": "https://www.microsoft.com/favicon.ico?v2",
+      "retrievalUrl": "https://www.microsoft.com/favicon.ico?v2",
+      "finalUrl": "https://www.microsoft.com/favicon.ico?v2",
+      "retrieval": "official_site",
+      "width": 128,
+      "height": 128,
+      "bytes": 329,
+      "sha256": "6002cc3d86dffd229dd4995352d55c66a58619762ce438f027644e895744e00e"
+    },
+    "tesla": {
+      "website": "https://www.tesla.com/",
+      "source": "https://www.tesla.com/favicon.ico",
+      "retrievalUrl": "https://www.google.com/s2/favicons?domain=tesla.com&sz=128",
+      "finalUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://tesla.com&size=128",
+      "retrieval": "google_favicon_cache_for_official_domain",
+      "width": 128,
+      "height": 128,
+      "bytes": 3315,
+      "sha256": "7d4f9e65d60dbfcf97fda77729ffb0ff05c28d8658e018b01b9c1f357e452d2f"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "lib": ["ES2022", "DOM"],
+    "module": "ESNext", "moduleResolution": "Bundler",
+    "strict": true, "noEmit": true, "skipLibCheck": true, "jsx": "react-jsx",
+    "esModuleInterop": true, "allowImportingTsExtensions": true,
+    "types": ["node"]
+  },
+  "include": ["api/**/*.ts", "server/**/*.ts", "scripts/**/*.ts", "packages/core/src/**/*.ts"]
+}

@@ -1,0 +1,50 @@
+/* The desktop preference lives only in sessionStorage for this browser tab. */
+.sidebar[hidden] { display: none; }
+.sidebar-collapsed { --sidebar: 0px; }
+.sidebar-collapsed .main-shell { margin-left: 0; }
+.topbar-start { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.sidebar-toggle { flex-shrink: 0; color: #4f705c; background: #f4f7ef; }
+.sidebar-toggle:hover { background: #e7efdf; }
+@media (max-height: 940px) and (min-width: 761px) {
+  .sidebar-journey { display: none; }
+}
+.breadcrumb { min-width: 0; }
+.breadcrumb strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-feature-group { display: grid; gap: 4px; }
+.nav-feature-group + .nav-feature-group { margin-top: 8px; }
+.nav-intro-link {
+  display: flex; align-items: center; gap: 7px; width: calc(100% - 34px);
+  margin-left: 34px; padding: 7px 8px; border-radius: 6px; text-align: left;
+  background: transparent; color: #adbfaf; font-size: 14px; line-height: 1.5;
+}
+.nav-intro-link > svg:last-child { margin-left: auto; }
+.nav-intro-link:hover, .nav-intro-link.active { color: #e4f2dc; background: #29443e; }
+.page-heading-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-shrink: 0; flex-wrap: wrap; }
+.page-heading > div:first-child { flex: 1; min-width: 0; }
+.page-heading h1, .page-heading p { max-width: none; }
+.feature-help-button { color: #57744b; }
+.sidebar-collapsed .calculator-layout { grid-template-columns: 340px minmax(0, 1fr); }
+
+@media (max-width: 1280px) {
+  .topbar .breadcrumb > span { display: none; }
+  .topbar .breadcrumb > svg { display: none; }
+  .page-heading { flex-wrap: wrap; }
+  .page-heading-actions { justify-content: flex-start; }
+}
+
+@media (max-width: 1040px) {
+  .sidebar-collapsed .calculator-layout { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  .sidebar-toggle { display: none; }
+  .topbar-start { gap: 0; }
+  .page-heading { display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
+  .page-heading > div:first-child { width: 100%; }
+  .page-heading-actions { gap: 10px; }
+  .page-heading-actions:empty { display: none; }
+  .page-heading-actions .outline-button { font-size: 14px; gap: 7px; margin-top: 0; padding: 9px 12px; }
+  .page-heading-actions .outline-button svg { width: 17px; }
+  .mobile-nav button { flex: 1 1 0; min-width: 0; gap: 4px; padding-inline: 4px; }
+  .mobile-nav button span { white-space: normal; word-break: keep-all; text-align: center; line-height: 1.4; }
+}

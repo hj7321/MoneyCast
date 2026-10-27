@@ -1,0 +1,216 @@
+/* Comfortable reading sizes and a full-width workspace, including laptops. */
+:root { font-size: 16px; --sidebar: 240px; }
+.main-shell main { max-width: none; margin: 0; padding: 28px 16px 0; }
+.topbar { padding-inline: 16px; }
+.sidebar { padding-inline: 18px; overflow-y: auto; }
+.brand { font-size: 25px; gap: 8px; }
+.workspace-label { font-size: 13px; letter-spacing: .4px; margin-bottom: 28px; }
+.nav-item { font-size: 16px; padding: 14px 12px; gap: 10px; }
+.sidebar-bottom .nav-item { font-size: 14px; }
+.sidebar-journey { margin-top: 32px; flex-shrink: 0; }
+.sidebar-journey .eyebrow { font-size: 11px; letter-spacing: 1px; }
+.sidebar-journey h3 { font-size: 20px; }
+.sidebar-journey p, .sidebar-journey button { font-size: 14px; }
+.sidebar-footer strong, .sidebar-footer div > span { font-size: 13px; }
+.breadcrumb, .breadcrumb strong, .local-status { font-size: 14px; }
+.page-heading { margin-bottom: 26px; }
+.page-heading h1 { font-size: 36px; }
+.page-heading p { font-size: 16px; line-height: 1.8; }
+.page-kicker, .eyebrow, .section-heading .eyebrow { font-size: 12px; letter-spacing: 1.5px; }
+.outline-button, .dashboard-tabs button { font-size: 16px; }
+.outline-button { padding: 10px 14px; min-height: 42px; }
+.dashboard-tabs { gap: 28px; }
+.tabs-note { font-size: 13px; }
+.calculator-layout { grid-template-columns: 340px minmax(0, 1fr); gap: 18px; }
+.calculator-card { padding: 24px 22px 0; }
+.section-heading h2, .chart-card .section-heading h2 { font-size: 22px; line-height: 1.5; }
+.goal-picker legend { font-size: 16px; }
+.goal-picker legend > span { display: block; font-size: 13px; margin: 3px 0 0; }
+.goal-picker button { font-size: 14px; padding: 10px 2px; }
+.calculator-fields { gap: 20px; }
+.field label { font-size: 16px; }
+.field-tag { font-size: 12px; }
+.input-wrap { min-height: 50px; }
+.input-wrap input { min-width: 0; flex: 1; font-size: 22px; padding-block: 9px; }
+.input-wrap > span { flex-shrink: 0; white-space: nowrap; font-size: 14px; line-height: 1.6; }
+.field-hint, .period-field .field-hint { font-size: 14px; line-height: 1.6; white-space: normal; }
+.range-labels { font-size: 13px; }
+.form-note { font-size: 14px; margin: 22px -22px 0; padding: 14px 22px; }
+.stat-card, .stat-card.featured { padding: 20px; min-height: 145px; }
+.stat-label { font-size: 16px; white-space: normal; align-items: flex-start; }
+.stat-value, .stat-card.featured .stat-value { font-size: clamp(26px, 2.2vw, 36px); line-height: 1.35; margin-top: 10px; letter-spacing: -1px; }
+.stat-note, .stat-card.featured .stat-note { position: relative; inset: auto; font-size: 14px; margin-top: 8px; }
+.stat-decoration { width: 120px; }
+.chart-card { padding: 24px 24px 0; }
+.chart-toolbar { flex-wrap: wrap; gap: 12px; }
+.chart-toolbar > span { font-size: 15px; max-width: none; }
+.scenario-toggle { font-size: 14px; gap: 8px; }
+.icon-button { width: 40px; height: 40px; }
+.chart-current > span { font-size: 15px; }
+.chart-current strong { font-size: 28px; }
+.chart-svg { margin-top: 10px; }
+.chart-svg text { font-size: 14px; }
+.chart-bottom { flex-wrap: wrap; row-gap: 8px; }
+.legend, .chart-hint, .chart-slider, .chart-detail { font-size: 14px; }
+.legend { flex-wrap: wrap; gap: 16px; }
+.chart-detail { line-height: 1.9; }
+.principal-summary { margin-inline: -24px; padding: 16px 24px; font-size: 15px; flex-wrap: wrap; }
+.principal-summary strong { font-size: 18px; }
+.principal-summary > span { gap: 12px; }
+.goal-result h3 { font-size: 20px; }
+.goal-result .eyebrow { font-size: 12px; }
+.goal-result p { font-size: 15px; line-height: 1.8; }
+.scenario, .scenario small, .scenario-results > p { font-size: 14px; }
+.scenario strong { font-size: 18px; }
+.scenario-results { gap: 10px; }
+.assumptions-note h4 { font-size: 16px; }
+.assumptions-note p, .assumptions-note button { font-size: 14px; }
+.news-promo { padding: 22px; }
+.news-promo small, .news-promo > span > span { font-size: 14px; }
+.news-promo strong { font-size: 18px; }
+.page-footer { font-size: 13px; }
+.news-layout { grid-template-columns: 340px minmax(0, 1fr); gap: 18px; }
+.company-picker .section-heading h2 { font-size: 22px; }
+.search-input { padding: 12px; }
+.search-input input { font-size: 16px; }
+.company-picker > .muted, .catalog-note, .company-option small { font-size: 14px; }
+.company-option { gap: 12px; padding: 12px 10px; }
+.company-option strong { font-size: 17px; }
+.company-logo { width: 38px; height: 38px; font-size: 16px; }
+.company-logo.company-logo-image { padding: 5px; background: #fff; border: 1px solid #e5ebe4; overflow: hidden; }
+.company-logo-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.company-option > span:nth-child(2) { min-width: 0; }
+.analysis-header h2, .guide-card h2 { font-size: 28px; }
+.company-symbol { font-size: 16px; }
+.empty-state h3 { font-size: 26px; }
+.empty-state p, .connection-notice, .setup-details, .setup-details summary, .setup-details p { font-size: 16px; }
+.setup-details { max-width: 620px; }
+.news-provider-note { margin: 16px 0; color: #687d68; font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; }
+.article-list .article-provenance { font-size: 14px; color: #687d68; overflow-wrap: anywhere; }
+.sentiment.unclassified { background: #edf0ef; color: #65736d; }
+.analysis-footer > span { overflow-wrap: anywhere; }
+.status-badge, .analysis-footer, .article-meta, .investment-notice { font-size: 14px; }
+.evidence-summary h3, .article-list h3 { font-size: 20px; }
+.evidence-summary p, .factor-grid h4, .factor-grid p, .article-list p, .risk-box h4, .risk-box p { font-size: 16px; }
+.guide-card > p, .guide-card dt, .guide-card dd { font-size: 16px; }
+.guide-card dt { font-weight: 650; }
+.guide-grid { gap: 18px; }
+.mobile-nav button { font-size: 13px; }
+
+@media (max-width: 1280px) {
+  :root { --sidebar: 216px; }
+  .sidebar { padding-inline: 14px; }
+  .brand { font-size: 22px; }
+  .brand svg { width: 28px; }
+  .nav-item { font-size: 15px; padding-inline: 10px; }
+  .workspace-label { font-size: 12px; margin-left: 4px; }
+  .calculator-layout { grid-template-columns: 310px minmax(0, 1fr); }
+  .stat-grid { grid-template-columns: 1fr 1fr; }
+  .stat-card.featured { grid-column: 1 / -1; }
+  .stat-card.featured .stat-value { font-size: 36px; }
+  .stat-value { font-size: 28px; }
+  .tabs-note { display: none; }
+  .page-heading h1 { font-size: 32px; }
+  .principal-summary { flex-direction: column; align-items: stretch; }
+  .principal-summary > span { justify-content: space-between; }
+  .news-layout { grid-template-columns: 300px minmax(0, 1fr); }
+  .bottom-grid { grid-template-columns: 1fr; gap: 20px; }
+}
+
+@media (max-width: 1040px) {
+  .calculator-layout, .news-layout { grid-template-columns: 1fr; }
+  .calculator-fields { grid-template-columns: 1fr 1fr; gap: 20px 24px; }
+  .calculator-fields > .field:last-child { grid-column: 1 / -1; }
+  .goal-picker > div { max-width: 540px; gap: 10px; }
+  .goal-picker button { min-height: 64px; }
+  .stat-grid { grid-template-columns: 1fr 1fr; }
+  .stat-card.featured { grid-column: 1 / -1; }
+  .company-list { grid-template-columns: 1fr 1fr; max-height: 320px; overflow-y: auto; }
+  .company-option small { font-size: 13px; }
+  .company-symbol { display: block; margin-left: 0; }
+  .chart-hint { display: none; }
+  .guide-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  :root { --sidebar: 0px; }
+  .main-shell main { padding: 22px 12px 90px; }
+  .topbar { padding-inline: 12px; }
+  .mobile-brand .brand { font-size: 22px; }
+  .page-heading { gap: 10px; margin-bottom: 22px; }
+  .page-heading h1 { font-size: 28px; }
+  .page-heading p { font-size: 16px; }
+  .page-kicker { font-size: 11px; }
+  .local-status { font-size: 12px; }
+  .outline-button { font-size: 0; min-width: 38px; padding: 10px; }
+  .dashboard-tabs { gap: 22px; }
+  .dashboard-tabs button { font-size: 15px; gap: 7px; }
+  .tab-new { font-size: 10px; }
+  .calculator-card { padding: 22px 18px 0; }
+  .section-heading h2, .chart-card .section-heading h2 { font-size: 21px; }
+  .goal-picker > div { grid-template-columns: 1fr 1fr; }
+  .goal-picker button { flex-direction: row; gap: 8px; font-size: 15px; min-height: 48px; }
+  .calculator-fields { gap: 20px 16px; }
+  .input-wrap { padding-inline: 10px; }
+  .input-wrap input { font-size: 20px; }
+  .form-note { margin-inline: -18px; padding-inline: 18px; }
+  .stat-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat-card, .stat-card.featured { padding: 18px; min-height: 128px; }
+  .stat-label { font-size: 15px; }
+  .stat-note, .stat-card.featured .stat-note { font-size: 14px !important; }
+  .stat-value { font-size: 27px; }
+  .stat-card.featured .stat-value { font-size: 34px; white-space: normal; }
+  .chart-card { padding: 22px 16px 0; }
+  .chart-toolbar > span { font-size: 14px; }
+  .chart-current strong { font-size: 27px; }
+  .principal-summary { margin-inline: -16px; padding-inline: 16px; font-size: 15px; }
+  .principal-summary strong { font-size: 17px; }
+  .goal-result { padding: 18px 15px; align-items: flex-start; }
+  .goal-result h3 { font-size: 19px; }
+  .goal-result p { font-size: 15px; }
+  .goal-result .eyebrow { font-size: 11px; }
+  .scenario-results { grid-template-columns: 1fr; }
+  .scenario { flex-direction: row; justify-content: space-between; align-items: center; }
+  .scenario strong { margin-top: 0; }
+  .chart-detail { text-align: left; }
+  .company-list { grid-template-columns: 1fr; max-height: 300px; }
+  .company-option strong { font-size: 17px; }
+  .company-option small { font-size: 14px; }
+  .empty-state { padding-inline: 0; }
+  .empty-state h3 { font-size: 24px; }
+  .analysis-card, .company-picker, .guide-card { padding: 22px 18px; }
+  .analysis-header h2, .guide-card h2 { font-size: 26px; }
+  .company-symbol { display: block; margin-left: 0; font-size: 15px; }
+  .analysis-footer { font-size: 14px; }
+  .investment-notice { font-size: 15px; }
+  .news-promo strong { font-size: 18px; }
+  .page-footer { font-size: 12px; line-height: 1.8; }
+  .mobile-nav { height: 76px; }
+  .mobile-nav button { font-size: 13px; padding: 9px 8px; min-width: 65px; }
+}
+
+@media (max-width: 480px) {
+  .calculator-fields { grid-template-columns: 1fr; }
+  .calculator-fields > .field:last-child { grid-column: auto; }
+  .stat-card:not(.featured) { padding: 16px 12px; }
+  .stat-value { font-size: 23px; }
+  .stat-card.featured .stat-value { font-size: 32px; }
+  .stat-label { font-size: 14px; }
+  .chart-slider { flex-wrap: wrap; gap: 8px; }
+  .chart-slider input { flex: 1 1 100%; }
+  .goal-result-icon { width: 34px; height: 34px; }
+  .goal-result { gap: 10px; }
+  .dashboard-tabs { gap: 16px; }
+  .dashboard-tabs button { font-size: 14px; }
+  .local-status { display: none; }
+}
+
+@media (max-height: 820px) and (min-width: 761px) {
+  .sidebar-journey { display: none; }
+  .sidebar-footer { padding-block: 16px; }
+}
+
+@media (max-width: 360px) {
+  .stat-grid { grid-template-columns: 1fr; }
+  .stat-value { font-size: 28px; }
+}

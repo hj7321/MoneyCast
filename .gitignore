@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.expo/
+.vercel/
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+artifacts/
+apps/mobile/ios/
+apps/mobile/android/
+
+.vercel
+.env*
+# Public configuration examples remain part of the repository.
+!.env.example
+!**/.env.example

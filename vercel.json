@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build",
+  "outputDirectory": "apps/web/dist",
+  "regions": ["icn1"],
+  "functions": {
+    "api/index.ts": { "maxDuration": 15 }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/index?__moneycast_route=:path*" }
+  ]
+}

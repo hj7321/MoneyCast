@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "MoneyCast",
+    "slug": "moneycast",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "backgroundColor": "#f5f7f8",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.moneycast.app"
+    },
+    "android": {
+      "package": "com.moneycast.app",
+      "edgeToEdgeEnabled": true,
+      "adaptiveIcon": {
+        "backgroundColor": "#123b36"
+      }
+    },
+    "extra": {
+      "description": "목표 자산 계산과 뉴스 근거를 한곳에서"
+    }
+  }
+}

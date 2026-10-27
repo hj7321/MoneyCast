@@ -1,0 +1,34 @@
+/* Typography sizes and weights remain in their existing component rules. */
+:root { --supporting-text: #68717a; }
+
+/* Keep the supplied financial results and news evidence in neutral black. */
+.stat-card .stat-label,
+.stat-card .stat-value,
+.stat-card.featured .stat-value,
+.stat-card .stat-note,
+.evidence-summary,
+.evidence-summary h3,
+.evidence-summary p,
+.evidence-summary .status-badge,
+.factor-grid h4,
+.factor-grid p,
+.article-meta,
+.article-meta .sentiment,
+.article-list h3,
+.article-list h3 a,
+.article-list p,
+.article-list .article-provenance,
+.risk-box h4,
+.risk-box p { color: #111; }
+
+/* Supporting data and calculation notices use gray rather than the green accent. */
+.news-provider-note,
+.analysis-footer,
+.investment-notice,
+.investment-notice p,
+.investment-notice svg,
+.assumptions-note,
+.assumptions-note h4,
+.assumptions-note p,
+.assumptions-note button,
+.assumptions-note .note-icon { color: var(--supporting-text); }
