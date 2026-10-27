@@ -24,7 +24,7 @@ npm run build
 npm start
 ```
 
-이때 웹 주소는 <http://127.0.0.1:8787>입니다. `npm start`는 현재 Node 환경에서 TypeScript 서버를 실행합니다. 이 저장소에는 클라우드 배포를 만들지 않았습니다.
+이때 웹 주소는 <http://127.0.0.1:8787>입니다. `npm start`는 현재 Node 환경에서 TypeScript 서버를 실행합니다. 공개 웹 주소는 <https://moneycast.vercel.app>입니다.
 
 ## 모바일
 
@@ -50,7 +50,7 @@ Copy-Item apps/mobile/.env.example apps/mobile/.env
 - Android 에뮬레이터: `http://10.0.2.2:8787`
 - iOS 시뮬레이터: `http://127.0.0.1:8787`
 - 실제 기기: 같은 네트워크 개발 PC의 LAN 주소, 예: `http://192.168.0.10:8787`
-- 배포 환경: 운영 백엔드의 HTTPS 주소
+- 배포 환경: `https://moneycast.vercel.app`
 
 실제 기기 연결은 신뢰하는 로컬 네트워크에서 API를 `HOST=0.0.0.0`으로 실행하고 해당 포트 접근을 허용해야 합니다. 기본값은 PC 내부 전용 `127.0.0.1`입니다. 설정 변경 후 Metro를 재시작하세요. 계산기는 서버 없이 작동합니다. **MARKETAUX_API_TOKEN과 NEWS_API_KEY를 EXPO_PUBLIC_* 또는 VITE_* 변수에 넣지 마세요.** 자세한 내용은 [모바일 안내](apps/mobile/README.md)를 참고하세요.
 
@@ -132,7 +132,7 @@ Marketaux에는 최근 7일의 기사 최대 3건을 요청하며, 같은 회사
 - 서버는 성공·근거 부족 결과를 6시간, 오류·미설정 상태를 5초 캐시합니다. 호출 제한은 최소 1분 또는 제공자가 지정한 시각까지 기다립니다.
 - Vercel CDN에는 정상 뉴스만 원래 만료 시각까지 캐시하며, 오류·호출 제한 응답은 저장하지 않습니다. 여러 지역의 첫 요청이나 캐시 초기화 때는 추가 호출이 발생할 수 있으므로 전역 API 쿼터를 보장하는 영구 저장소는 아닙니다.
 
-Vercel 프로젝트 루트는 이 저장소 루트입니다. vercel.json이 웹 빌드와 Node API 진입점을 설정합니다. 빌드는 npm ci → npm run build, 출력은 apps/web/dist이며, api/index.ts가 기존 서버와 같은 API 로직을 사용합니다. 실제 뉴스는 Vercel 프로덕션의 NEWS_PROVIDER=marketaux와 암호화된 MARKETAUX_API_TOKEN 서버 환경변수로 연결합니다. 키와 .env 파일은 GitHub·업로드 산출물에 포함하지 않습니다.
+Vercel 프로젝트 루트는 이 저장소 루트입니다. vercel.json이 웹 빌드와 Node API 진입점을 설정합니다. 빌드는 npm ci → npm run build, 출력은 apps/web/dist이며, api/index.ts가 기존 서버와 같은 API 로직을 사용합니다. 서버는 공용 코어의 실제 소스 경로와 ESM 확장자를 참조하므로 서버리스 배포에도 npm workspace 심볼릭 링크 없이 모듈을 포함합니다. 실제 뉴스는 Vercel 프로덕션의 NEWS_PROVIDER=marketaux와 암호화된 MARKETAUX_API_TOKEN 서버 환경변수로 연결합니다. 키와 .env 파일은 GitHub·업로드 산출물에 포함하지 않습니다.
 
 현재 배포는 Vercel CLI를 사용합니다. 향후 GitHub 커밋마다 자동 배포하려면 Vercel 계정의 GitHub 로그인 연결 및 저장소 연동을 별도로 설정하세요. 기존 GitHub LICENSE와 이력은 유지합니다.
 

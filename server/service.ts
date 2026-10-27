@@ -1,4 +1,4 @@
-import type { Company, NewsAnalysis } from '@moneycast/core';
+import type { Company, NewsAnalysis } from '../packages/core/src/index.js';
 import { ProviderError, type NewsProvider } from './provider.js';
 
 export const ANALYSIS_VERSION = 'news-evidence-v2';

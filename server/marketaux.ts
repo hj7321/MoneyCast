@@ -1,4 +1,4 @@
-import { NEWS_CACHE_TTL_MS, type Company, type NewsArticle } from '@moneycast/core';
+import { NEWS_CACHE_TTL_MS, type Company, type NewsArticle } from '../packages/core/src/index.js';
 import { boundedJson, parseProviderResponse, ProviderError, type NewsProvider, type NewsProviderResult } from './provider.js';
 
 const API = 'https://api.marketaux.com';

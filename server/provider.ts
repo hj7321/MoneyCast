@@ -1,4 +1,4 @@
-import { isNewsArticle, type Company, type NewsArticle } from '@moneycast/core';
+import { isNewsArticle, type Company, type NewsArticle } from '../packages/core/src/index.js';
 
 export interface NewsProviderResult {
   provider: string;

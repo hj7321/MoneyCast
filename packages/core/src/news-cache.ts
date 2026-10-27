@@ -1,4 +1,4 @@
-import { companies, isNewsAnalysis, type NewsAnalysis } from './index';
+import { companies, isNewsAnalysis, type NewsAnalysis } from './index.js';
 
 export const NEWS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 export const NEWS_CACHE_ANALYSIS_VERSION = 'news-evidence-v2';

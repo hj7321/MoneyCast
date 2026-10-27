@@ -367,4 +367,4 @@ export function isNewsAnalysis(value: unknown, expectedCompanyId?: string): valu
 
 export const INVESTMENT_NOTICE = '뉴스는 미래 주가의 방향이나 원인을 증명하지 않습니다. 이 정보는 투자 참고용이며 개인 맞춤형 매수·매도 권유가 아닙니다. 투자 판단과 손실의 책임은 투자자 본인에게 있습니다.';
 
-export { createNewsCache, NEWS_CACHE_TTL_MS, NEWS_CACHE_ANALYSIS_VERSION, type NewsCacheStorage } from './news-cache';
+export { createNewsCache, NEWS_CACHE_TTL_MS, NEWS_CACHE_ANALYSIS_VERSION, type NewsCacheStorage } from './news-cache.js';

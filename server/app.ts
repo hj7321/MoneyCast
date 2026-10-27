@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { companies, searchCompanies, NEWS_CACHE_TTL_MS, type NewsAnalysis } from '@moneycast/core';
+import { companies, searchCompanies, NEWS_CACHE_TTL_MS, type NewsAnalysis } from '../packages/core/src/index.js';
 import { createNewsProvider } from './news-provider.js';
 import { createNewsService } from './service.js';
 import { DEFAULT_STATIC_DIRECTORY, serveWeb } from './static.js';
