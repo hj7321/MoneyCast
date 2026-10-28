@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspaces --if-present",
     "test": "node --import tsx --test packages/core/src/*.test.ts server/*.test.ts apps/web/src/*.test.tsx",
     "news:check": "tsx scripts/check-news.ts",
+    "ai:check": "tsx scripts/check-ai.ts",
     "build": "npm run build --workspace @moneycast/web",
     "start": "tsx server/index.ts",
     "mobile:export": "npm run export --workspace @moneycast/mobile"

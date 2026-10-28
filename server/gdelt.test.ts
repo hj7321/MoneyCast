@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { companies, isNewsArticle } from '@moneycast/core';
-import { createGdeltProvider, GDELT_NOTES, parseSeenDate } from './gdelt.js';
+import { createGdeltProvider, GDELT_NOTES, gdeltTimeoutMs, parseSeenDate } from './gdelt.js';
 import { ProviderError } from './provider.js';
 
 const now = new Date('2026-10-27T00:00:00Z');
@@ -79,7 +79,9 @@ test('GDELT keeps only https articles that name the company and stay inside the 
   assert.ok(result.notes?.some(note => /다른 회사로 보이는 GDELT 기사 2건/.test(note)));
 });
 
-test('GDELT empty results, bounded rows, plain-text throttling and HTTP 429 are handled distinctly', async () => {
+test('GDELT empty results, bounded rows, plain-text throttling and HTTP 429 are handled distinctly', async t => {
+  const warnings: string[] = [];
+  t.mock.method(console, 'warn', (message: string) => { warnings.push(message); });
   assert.deepEqual((await gdelt(async () => json({})).getArticles(apple, now)).articles, []);
   await rejects(gdelt(async () => json({ articles: 'not a list' })).getArticles(apple, now), 'error');
   await rejects(gdelt(async () => json({ articles: Array.from({ length: 251 }, () => row()) })).getArticles(apple, now), 'error');
@@ -95,6 +97,22 @@ test('GDELT empty results, bounded rows, plain-text throttling and HTTP 429 are 
   instant += 30_000;
   await rejects(limited.getArticles(apple, now), 'rate_limited');
   assert.equal(calls, 1);
+  // One line per failure, naming only its kind.
+  assert.deepEqual(warnings, [
+    'GDELT response had an unexpected shape', 'GDELT response had an unexpected shape',
+    'GDELT request throttled: one request every 5 seconds, paused for 60s', 'GDELT response was not JSON',
+    'GDELT response could not be read', 'GDELT request failed: HTTP 500', 'GDELT request failed: network error',
+    'GDELT request failed: HTTP 429, paused for 60s',
+  ]);
+});
+
+test('GDELT waits as long as the caller allows, within three to thirty seconds', () => {
+  const at = now.getTime();
+  assert.equal(gdeltTimeoutMs(undefined, at), 8_000);
+  assert.equal(gdeltTimeoutMs(Number.NaN, at), 8_000);
+  assert.equal(gdeltTimeoutMs(at + 10_000, at), 10_000);
+  assert.equal(gdeltTimeoutMs(at + 35_000, at), 30_000);
+  assert.equal(gdeltTimeoutMs(at - 1_000, at), 3_000);
 });
 
 test('GDELT requests from one process are spaced five seconds apart and a long queue skips the source', async () => {

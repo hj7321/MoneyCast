@@ -8,11 +8,16 @@ export interface NewsProviderResult {
   sources?: NewsSourceState[];
 }
 
+/** How long the caller can wait; sources with slow APIs use it instead of a short fixed timeout. */
+export interface NewsRequestOptions {
+  deadline?: number;
+}
+
 export interface NewsProvider {
   name?: string;
   setupMessage?: string;
   cacheTtlMs?: number;
-  getArticles(company: Company, now: Date): Promise<NewsProviderResult>;
+  getArticles(company: Company, now: Date, options?: NewsRequestOptions): Promise<NewsProviderResult>;
 }
 
 export class ProviderError extends Error {

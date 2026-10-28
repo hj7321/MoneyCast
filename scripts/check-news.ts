@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { companies, isNewsAnalysis, type AiJudgement, type AiProviderId, type NewsAnalysis } from '@moneycast/core';
+import { terminalText } from './terminal-text.js';
 
 const messages = {
   not_configured: '연결 미완료: 서버에 뉴스 제공자 설정이 필요합니다.',
@@ -22,13 +23,6 @@ function modelLabel(value: string): string {
 
 const VERDICTS = { positive: '긍정', negative: '부정', neutral: '중립', uncertain: '판단 불가' } as const;
 const CONSENSUS = { confirmed: '합의', provisional: '잠정', withheld: '유보', pending: '대기' } as const;
-
-/** Article text is external: no control or direction-override characters reach the terminal. */
-function terminalText(value: string, max: number): string {
-  const clean = value.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
-  const chars = [...clean];
-  return chars.length <= max ? clean : `${chars.slice(0, max - 1).join('')}…`;
-}
 
 const verdict = (judgement: AiJudgement | undefined) =>
   !judgement ? '없음' : judgement.relevant ? VERDICTS[judgement.sentiment] : '관련 없음';

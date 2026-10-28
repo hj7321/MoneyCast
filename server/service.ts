@@ -33,8 +33,14 @@ export const STALE_RESULT_LIMIT_MS = 7 * 86_400_000;
 export const SNAPSHOT_REWRITE_MS = 6 * 3_600_000;
 /** Clients give up after 20 seconds, so an on-demand refresh, models included, ends sooner. */
 export const ON_DEMAND_BUDGET_MS = 18_000;
-/** Scheduled collection may wait longer for the models; nobody is waiting on the response. */
+/** Sources get the first 10 seconds on demand, so the models still have time to answer. */
+export const ON_DEMAND_SOURCE_MS = 10_000;
+/** Scheduled collection may wait longer for slow sources and the models; nobody is waiting on it. */
 export const SCHEDULED_BUDGET_MS = 60_000;
+export const SCHEDULED_SOURCE_MS = 35_000;
+
+/** Absolute deadlines for one refresh: sources first, then the models until `total`. */
+interface RefreshBudget { sources: number; total: number }
 const AI_RISK = 'AI 요약·분류는 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다. 본문과 사실 여부는 확인하지 않았습니다.';
 
 function snapshotDigest(analysis: NewsAnalysis, pool: NewsArticle[]): string {
@@ -87,7 +93,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
     }
   }
 
-  async function analyze(company: Company, snapshot: CompanySnapshot | null, deadline: number): Promise<{ analysis: NewsAnalysis; pool: NewsArticle[] }> {
+  async function analyze(company: Company, snapshot: CompanySnapshot | null, budget: RefreshBudget): Promise<{ analysis: NewsAnalysis; pool: NewsArticle[] }> {
     const now = clock();
     const base: NewsAnalysis = {
       company, status: 'insufficient', articles: [], asOf: now.toISOString(), period: nextAnalysisWeek(now),
@@ -96,7 +102,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       newsWindow: { start: new Date(now.getTime() - 7 * 86400000).toISOString(), end: now.toISOString() },
     };
     try {
-      const result = await provider.getArticles(company, now);
+      const result = await provider.getArticles(company, now, { deadline: budget.sources });
       const inWindow = (article: NewsArticle) => {
         const publishedAt = Date.parse(article.publishedAt);
         return publishedAt >= now.getTime() - 7 * 86400000 && publishedAt <= now.getTime();
@@ -106,7 +112,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       const current = result.articles.map(article => carryAiState(article, earlier.get(article.id)));
       // Articles from earlier refreshes stay for the rest of their week; current copies win.
       const merged = snapshot ? mergeArticles([current, snapshot.pool.filter(inWindow)], SNAPSHOT_POOL_LIMIT) : current;
-      const judged = await judge(company, merged, deadline, inWindow);
+      const judged = await judge(company, merged, budget.total, inWindow);
       const articles = judged.articles;
       const fresh = articles.filter(inWindow);
       const classified = fresh.filter(article => article.sentiment !== 'unclassified');
@@ -171,8 +177,8 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
   }
 
   /** Runs a provider refresh, caches it, saves the snapshot and falls back to the last good result. */
-  async function complete(company: Company, snapshot: CompanySnapshot | null, forceWrite: boolean, deadline: number): Promise<NewsAnalysis> {
-    const { analysis: value, pool } = await analyze(company, snapshot, deadline);
+  async function complete(company: Company, snapshot: CompanySnapshot | null, forceWrite: boolean, budget: RefreshBudget): Promise<NewsAnalysis> {
+    const { analysis: value, pool } = await analyze(company, snapshot, budget);
     if (cache.size >= 100 && !cache.has(company.id)) cache.delete(cache.keys().next().value!);
     const completedAt = clock().getTime();
     const succeeded = value.status === 'ready' || value.status === 'insufficient';
@@ -217,7 +223,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       const inflight = pending.get(company.id);
       if (inflight) return inflight;
       const request = (async () => {
-        const deadline = now + ON_DEMAND_BUDGET_MS;
+        const budget = { sources: now + ON_DEMAND_SOURCE_MS, total: now + ON_DEMAND_BUDGET_MS };
         const snapshot = await readSnapshot(company.id);
         if (snapshot && isFresh(snapshot.analysis, clock().getTime())) {
           // A collected result is still fresh: serve it without calling any provider.
@@ -225,15 +231,15 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
           remember(company, snapshot.analysis);
           return snapshot.analysis;
         }
-        return complete(company, snapshot, false, deadline);
+        return complete(company, snapshot, false, budget);
       })().finally(() => pending.delete(company.id));
       pending.set(company.id, request);
       return request;
     },
     /** Scheduled collection: always queries providers and always saves a successful snapshot. */
     async refresh(company: Company): Promise<NewsAnalysis> {
-      const deadline = clock().getTime() + SCHEDULED_BUDGET_MS;
-      return complete(company, await readSnapshot(company.id), true, deadline);
+      const start = clock().getTime();
+      return complete(company, await readSnapshot(company.id), true, { sources: start + SCHEDULED_SOURCE_MS, total: start + SCHEDULED_BUDGET_MS });
     },
   };
 }

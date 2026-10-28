@@ -36,6 +36,8 @@ export interface JudgeItem {
   source: string;
   language?: string;
   summarize: boolean;
+  /** False when only a summary is wanted, as for articles that already carry a provider score. */
+  judge?: boolean;
 }
 
 export interface JudgeRequest {
@@ -168,6 +170,17 @@ function validateItem(entry: Record<string, unknown>, input: JudgeItem, request:
   const sentiment = entry.sentiment as AiSentiment;
   const source = `${input.title}\n${input.description ?? ''}`;
   const unknownNumbers = (text: string) => numbersIn(text).some(value => !allowedNumbers.has(value));
+  const checkedSummary = () => {
+    const summary = input.summarize && typeof entry.summary === 'string' ? plainText(entry.summary, MAX_SUMMARY) : undefined;
+    if (summary && unknownNumbers(summary)) { note('summary_numbers'); return undefined; }
+    if (summary && guarded(summary, source)) { note('summary_advice'); return undefined; }
+    return summary;
+  };
+  // The model's view of an already scored article is never used, so it cannot cost the summary.
+  if (input.judge === false) {
+    const summary = checkedSummary();
+    return { relevant: entry.relevant, sentiment, ...(summary ? { summary } : {}) };
+  }
   const evidence = typeof entry.evidence === 'string' ? plainText(entry.evidence, 1000) : undefined;
   // Evidence must be the article's own words; an invented quote discards the whole judgement.
   if (evidence && [...evidence].length > MAX_EVIDENCE) { note('evidence_too_long'); return null; }
@@ -176,9 +189,7 @@ function validateItem(entry: Record<string, unknown>, input: JudgeItem, request:
   const reason = typeof entry.reason === 'string' ? plainText(entry.reason, MAX_REASON) : undefined;
   if (reason && unknownNumbers(reason)) { note('reason_numbers'); return null; }
   if (reason && guarded(reason, source)) { note('reason_advice'); return null; }
-  let summary = input.summarize && typeof entry.summary === 'string' ? plainText(entry.summary, MAX_SUMMARY) : undefined;
-  if (summary && unknownNumbers(summary)) { note('summary_numbers'); summary = undefined; }
-  else if (summary && guarded(summary, source)) { note('summary_advice'); summary = undefined; }
+  const summary = checkedSummary();
   const topic = request.topics && isNewsTopicKey(entry.topic) ? entry.topic : undefined;
   return {
     relevant: entry.relevant, sentiment,
@@ -383,7 +394,7 @@ export function createAiClassifier(
           items: [...byKey].map(([key, article]) => ({
             key, title: article.title, ...(article.description ? { description: article.description } : {}),
             source: article.source, ...(article.language ? { language: article.language } : {}),
-            summarize: judge === summarizer && !article.summary,
+            summarize: judge === summarizer && !article.summary, judge: judgeTargets.includes(article),
           })),
         };
         const controller = new AbortController();

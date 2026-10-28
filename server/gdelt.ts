@@ -8,7 +8,10 @@ const DAY = 86_400_000;
 // GDELT asks clients to send at most one request every five seconds.
 const REQUEST_INTERVAL_MS = 5_000;
 const COOLDOWN_MS = 60_000;
+/** GDELT often takes 10–16 seconds, so a caller with time to spare lends it up to 30. */
 const TIMEOUT_MS = 8_000;
+const MIN_TIMEOUT_MS = 3_000;
+const MAX_TIMEOUT_MS = 30_000;
 const MAX_ROWS = 50;
 const MAX_ARTICLES = 15;
 const LANGUAGES: Record<string, string> = {
@@ -32,6 +35,12 @@ function safeHttps(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The request timeout: the caller's remaining time within 3–30 seconds, or 8 seconds without a deadline. */
+export function gdeltTimeoutMs(deadline: number | undefined, now: number): number {
+  if (deadline === undefined || !Number.isFinite(deadline)) return TIMEOUT_MS;
+  return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.floor(deadline - now)));
 }
 
 /** GDELT seendate (YYYYMMDDTHHMMSSZ) as an ISO timestamp, or null when malformed. */
@@ -69,7 +78,7 @@ export function createGdeltProvider(
   let blockedUntil = 0;
   return {
     name: 'GDELT', cacheTtlMs: NEWS_CACHE_TTL_MS,
-    async getArticles(company, now): Promise<NewsProviderResult> {
+    async getArticles(company, now, options): Promise<NewsProviderResult> {
       const identity = COMPANY_NEWS_IDENTITY[company.id];
       if (!identity) throw new ProviderError('error', 'identity_unverified');
       if (blockedUntil > clock()) throw new ProviderError('rate_limited', undefined, blockedUntil - clock());
@@ -84,34 +93,51 @@ export function createGdeltProvider(
         startdatetime: gdeltTime(new Date(now.getTime() - 7 * DAY)), enddatetime: gdeltTime(now),
       })) url.searchParams.set(key, value);
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+      const timeoutMs = gdeltTimeoutMs(options?.deadline, clock());
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       let payload: unknown;
+      // Failures are logged once, by kind only; responses are never echoed.
+      let reported = false;
+      let received = false;
+      const report = (message: string) => { reported = true; console.warn(message); };
       try {
         const response = await fetcher(url, { method: 'GET', redirect: 'error', signal: controller.signal, headers: { Accept: 'application/json' } });
+        received = true;
         if (response.status === 429) {
           blockedUntil = clock() + COOLDOWN_MS;
+          report(`GDELT request failed: HTTP 429, paused for ${COOLDOWN_MS / 1000}s`);
           throw new ProviderError('rate_limited', undefined, COOLDOWN_MS);
         }
-        if (!response.ok) throw new ProviderError('error');
+        if (!response.ok) {
+          report(`GDELT request failed: HTTP ${response.status}`);
+          throw new ProviderError('error');
+        }
         if (!response.headers.get('content-type')?.toLowerCase().includes('json')) {
           // Throttling and query errors arrive as short plain-text bodies.
           if (/limit requests/i.test(await boundedText(response))) {
             blockedUntil = clock() + COOLDOWN_MS;
+            report(`GDELT request throttled: one request every 5 seconds, paused for ${COOLDOWN_MS / 1000}s`);
             throw new ProviderError('rate_limited', undefined, COOLDOWN_MS);
           }
+          report('GDELT response was not JSON');
           throw new ProviderError('error');
         }
         // Re-labelled so boundedJson's size limit also covers variants such as text/json.
         payload = await boundedJson(new Response(response.body, { headers: { 'content-type': 'application/json' } }));
       } catch (error) {
-        if (error instanceof ProviderError) throw error;
-        throw new ProviderError('error');
+        if (!reported) {
+          report(controller.signal.aborted ? `GDELT request failed: timeout after ${Math.round(timeoutMs / 1000)}s`
+            : received ? 'GDELT response could not be read' : 'GDELT request failed: network error');
+        }
+        throw error instanceof ProviderError ? error : new ProviderError('error');
       } finally {
         clearTimeout(timeout);
       }
-      if (!record(payload)) throw new ProviderError('error');
-      const rows = payload.articles === undefined ? [] : payload.articles;
-      if (!Array.isArray(rows) || rows.length > 250) throw new ProviderError('error');
+      const rows = record(payload) ? payload.articles === undefined ? [] : payload.articles : null;
+      if (!Array.isArray(rows) || rows.length > 250) {
+        console.warn('GDELT response had an unexpected shape');
+        throw new ProviderError('error');
+      }
       const articles: NewsArticle[] = [];
       let insecure = 0;
       let unmatched = 0;

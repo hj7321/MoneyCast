@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { companies, isNewsAnalysis, NEWS_CACHE_TTL_MS, type NewsArticle } from '@moneycast/core';
-import { createNewsService, nextAnalysisWeek, STALE_RESULT_LIMIT_MS } from './service.js';
+import { createNewsService, nextAnalysisWeek, ON_DEMAND_SOURCE_MS, SCHEDULED_SOURCE_MS, STALE_RESULT_LIMIT_MS } from './service.js';
 import { ProviderError, type NewsProvider } from './provider.js';
 
 const company = companies[0]!;
@@ -305,4 +305,18 @@ test('when every source fails the last successful result is shown as stale and r
   const expired = await service.getAnalysis(company);
   assert.equal(expired.status, 'error');
   assert.equal(expired.servedFrom, undefined);
+});
+
+test('sources get ten seconds on demand and thirty-five seconds during scheduled collection', async () => {
+  const deadlines: Array<number | undefined> = [];
+  const provider = { name: 'Test', cacheTtlMs: 60_000, async getArticles(_company: unknown, _now: Date, options?: { deadline?: number }) {
+    deadlines.push(options?.deadline);
+    return { provider: 'Test', articles: [] };
+  } };
+  const at = new Date('2026-10-27T00:00:00Z');
+  const service = createNewsService(provider, () => at);
+  await service.getAnalysis(companies[0]!);
+  await service.refresh(companies[0]!);
+  assert.deepEqual(deadlines, [at.getTime() + ON_DEMAND_SOURCE_MS, at.getTime() + SCHEDULED_SOURCE_MS]);
+  assert.deepEqual([ON_DEMAND_SOURCE_MS, SCHEDULED_SOURCE_MS], [10_000, 35_000]);
 });

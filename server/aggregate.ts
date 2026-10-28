@@ -115,8 +115,8 @@ export function createMultiSourceProvider(entries: NewsSourceEntry[]): NewsProvi
     name: entries.map(entry => entry.label).join(' · '),
     setupMessage: entries.map(entry => entry.provider.setupMessage).find(Boolean),
     ...(ttls.length ? { cacheTtlMs: Math.min(...ttls) } : {}),
-    async getArticles(company, now): Promise<NewsProviderResult> {
-      const settled = await Promise.allSettled(entries.map(entry => entry.provider.getArticles(company, now)));
+    async getArticles(company, now, options): Promise<NewsProviderResult> {
+      const settled = await Promise.allSettled(entries.map(entry => entry.provider.getArticles(company, now, options)));
       const sources: NewsSourceState[] = settled.map((outcome, i) => {
         const { id, label } = entries[i]!;
         if (outcome.status === 'fulfilled') {

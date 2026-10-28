@@ -215,6 +215,8 @@ test('the time budget, the per-call cap and provider-scored articles limit what 
     ['삼성전자 소식 15', true], ['삼성전자 소식 16', true], ['삼성전자 실적 발표', true],
   ]);
   assert.equal(next.articles.find(item => item.id === 'mx')!.summary?.basis, 'title_description');
+  assert.equal(gemini.requests[1]!.items.find(item => item.title === '삼성전자 실적 발표')?.judge, false);
+  assert.equal(gemini.requests[1]!.items.find(item => item.title === '삼성전자 소식 15')?.judge, true);
   const untouched = next.articles.find(item => item.id === 'old')!;
   assert.equal(untouched.aiConsensus, undefined);
   assert.deepEqual(untouched.rationaleLines, outside.rationaleLines);
@@ -252,6 +254,13 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
   assert.equal(valid.get('a6')!.summary, undefined);
   assert.equal([...valid.get('a8')!.summary!].length, 160);
   assert.equal(valid.get('a8')!.topic, undefined);
+  // Only a summary was wanted: an invented quote or number in the unused judgement does not cost it.
+  const summaryOnly: JudgeRequest = { company, topics: false, items: [{ key: 'b1', title: '삼성전자 3분기 실적 발표', source: 'a', summarize: true, judge: false }] };
+  const kept = validateJudgements({ items: [{ id: 'b1', relevant: true, sentiment: 'positive', evidence: '사상 최대 실적',
+    reason: '10조 원 흑자입니다.', summary: '삼성전자가 3분기 실적을 발표했다는 기사입니다.' }] }, summaryOnly);
+  assert.equal(kept.get('b1')?.summary, '삼성전자가 3분기 실적을 발표했다는 기사입니다.');
+  assert.equal(validateJudgements({ items: [{ id: 'b1', relevant: true, sentiment: 'neutral', evidence: '', reason: '',
+    summary: '10조 원 흑자라는 기사입니다.' }] }, summaryOnly).get('b1')?.summary, undefined);
   assert.throws(() => validateJudgements({ answers: [] }, request), LlmError);
   assert.throws(() => validateJudgements({ items: Array.from({ length: 17 }, () => ({})) }, request), LlmError);
   assert.deepEqual(parseModelJson('<think>먼저 생각</think>\n```json\n{"items":[]}\n```'), { items: [] });
