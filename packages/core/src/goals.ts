@@ -3,6 +3,7 @@
  * amount is the user's own entry, or a sum, difference or share of their
  * entries; nothing here knows or estimates a price.
  */
+import { particle } from './korean.js';
 
 export type GoalType = 'free' | 'home' | 'car' | 'travel';
 
@@ -167,15 +168,6 @@ export function createGoalDrafts(formatAmount: (amount: number) => string = Stri
 export function parseGoalNumber(text: string): number | null {
   const cleaned = text.replace(/[,\s]/g, '');
   return cleaned === '' ? null : Number(cleaned);
-}
-
-/** 을/를 and 은/는 follow whether the label's last Hangul syllable ends in a consonant. */
-function particle(label: string, withFinal: string, withoutFinal: string): string {
-  for (let index = label.length - 1; index >= 0; index -= 1) {
-    const code = label.charCodeAt(index) - 0xac00;
-    if (code >= 0 && code <= 11171) return code % 28 === 0 ? withoutFinal : withFinal;
-  }
-  return withFinal;
 }
 
 function collector() {
