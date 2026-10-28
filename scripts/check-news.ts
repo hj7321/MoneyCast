@@ -12,7 +12,7 @@ const messages = {
 function providerLabel(value: string | null): string {
   if (!value) return '미연결';
   // Diagnostic output never includes arbitrary URLs, query strings or control characters.
-  return /^[\p{L}\p{N} ._()\-]{1,100}$/u.test(value) ? value : '연결됨 (표시명 생략)';
+  return /^[\p{L}\p{N} ._()·\-]{1,100}$/u.test(value) ? value : '연결됨 (표시명 생략)';
 }
 
 async function readJson(endpoint: string): Promise<unknown> {
@@ -77,6 +77,12 @@ async function main(): Promise<void> {
   if (analysis.cachedUntil) console.log(`캐시 만료: ${analysis.cachedUntil}`);
   if (analysis.retryAt) console.log(`재시도 가능 시각: ${analysis.retryAt}`);
   console.log(`분류된 기사: ${analysis.articles.filter(article => article.sentiment !== 'unclassified').length}건`);
+  for (const source of analysis.sources ?? []) {
+    console.log(`출처 ${providerLabel(source.label)}: ${source.status} · 기사 ${source.articleCount}건${source.retryAt ? ` · 재시도 ${source.retryAt}` : ''}`);
+  }
+  const mirrored = analysis.articles.reduce((sum, article) => sum + (article.alsoReportedBy?.length ?? 0), 0);
+  if (mirrored) console.log(`중복 제거로 합친 다른 출처: ${mirrored}건`);
+  if (analysis.servedFrom === 'stale') console.log(`새로 고침 실패: ${analysis.refreshAttemptedAt ?? '시각 미상'} 시도, 이전 결과를 표시합니다.`);
   console.log(messages[analysis.status]);
   if (analysis.status === 'insufficient' && analysis.articles.length === 0) {
     console.log('표시할 기사는 없습니다. 빈 결과 수신과 분석 근거 확보는 서로 다른 상태입니다.');

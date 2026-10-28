@@ -353,3 +353,27 @@ test('runtime news validator requires factor sentences to cite rendered articles
     null, [],
   ]) assert.equal(isNewsAnalysis({ ...valid, factorSummary: invalid }), false, JSON.stringify(invalid));
 });
+
+test('runtime news validator checks source labels, time kinds, identity, mirrors and per-source states', () => {
+  const valid = validAnalysis();
+  const article = valid.articles[0]!;
+  assert.equal(isNewsAnalysis({
+    ...valid, servedFrom: 'stale', refreshAttemptedAt: '2026-10-27T00:00:00Z',
+    sources: [{ id: 'marketaux', label: 'Marketaux', status: 'rate_limited', articleCount: 0, retryAt: '2026-10-27T00:15:00Z' },
+      { id: 'gdelt', label: 'GDELT', status: 'ok', articleCount: 3 }],
+    articles: [{ ...article, sourceProvider: 'GDELT', timeKind: 'seen', identity: 'name_match',
+      alsoReportedBy: [{ source: 'b.example', url: 'https://b.example/a' }] }],
+  }), true);
+  for (const invalid of [
+    { sourceProvider: '' }, { sourceProvider: 'x'.repeat(41) }, { timeKind: 'guessed' }, { identity: 'probably' },
+    { alsoReportedBy: [{ source: 'b.example', url: 'http://b.example/a' }] }, { alsoReportedBy: [{ source: '', url: 'https://b.example/a' }] },
+    { alsoReportedBy: Array.from({ length: 11 }, (_, i) => ({ source: 's', url: `https://b.example/${i}` })) }, { alsoReportedBy: {} },
+  ]) assert.equal(isNewsAnalysis({ ...valid, articles: [{ ...article, ...invalid }] }), false, JSON.stringify(invalid));
+  for (const invalid of [
+    { servedFrom: 'cache' }, { refreshAttemptedAt: 'yesterday' }, { sources: {} },
+    { sources: [{ id: 'x', label: 'X', status: 'great', articleCount: 0 }] },
+    { sources: [{ id: 'x', label: 'X', status: 'ok', articleCount: -1 }] },
+    { sources: [{ id: 'x', label: 'X', status: 'ok', articleCount: 1.5 }] },
+    { sources: [{ id: 'x', label: 'X', status: 'rate_limited', articleCount: 0, retryAt: 'soon' }] },
+  ]) assert.equal(isNewsAnalysis({ ...valid, ...invalid }), false, JSON.stringify(invalid));
+});

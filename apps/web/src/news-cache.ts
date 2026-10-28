@@ -16,3 +16,4 @@ const cache = createNewsCache({
 
 export const loadCachedNews = cache.getAnalysis;
 export const peekCachedNews = cache.peek;
+export const peekLastGoodNews = cache.peekLastGood;

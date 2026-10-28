@@ -387,6 +387,77 @@ test('factor boxes show synthesized sentences that jump to cards holding the sum
   assert.equal(within(second!).queryByText(/제공자 분류 ·/), null);
 });
 
+test('combined sources show per-source states, GDELT attribution, first-seen times and other publishers', async () => {
+  const fixture = marketauxFixture();
+  fixture.provider = 'Marketaux · GDELT';
+  fixture.sources = [
+    { id: 'marketaux', label: 'Marketaux', status: 'rate_limited', articleCount: 0, retryAt: '2026-10-27T00:15:00.000Z' },
+    { id: 'gdelt', label: 'GDELT', status: 'ok', articleCount: 1 },
+  ];
+  fixture.articles = [{ ...fixture.articles[0]!, id: 'gdelt-test', sentiment: 'unclassified', classificationMethod: 'unavailable', sentimentScore: undefined,
+    providerEntity: undefined, sourceProvider: 'GDELT', timeKind: 'seen', identity: 'name_match',
+    alsoReportedBy: [{ source: 'b.example.test', url: 'https://b.example.test/a' }, { source: 'c.example.test', url: 'https://c.example.test/a' }] }];
+  delete fixture.articles[0]!.sentimentScore;
+  delete fixture.articles[0]!.providerEntity;
+  globalThis.fetch = (async () => response(fixture)) as typeof fetch;
+  open('news');
+  assert.ok(await screen.findByText(/출처 상태: Marketaux 호출 제한\(재시도 .*\) · GDELT 정상 1건/));
+  assert.ok(screen.getByRole('link', { name: 'GDELT Project' }));
+  const card = document.querySelector('.article-list article') as HTMLElement;
+  assert.ok(within(card).getByText(/GDELT 확인:/));
+  assert.equal(within(card).queryByText(/게시:/), null);
+  assert.ok(within(card).getByText('수집: GDELT'));
+  assert.ok(within(card).getByText('같은 내용 다른 출처 2곳: b.example.test, c.example.test'));
+});
+
+test('a stale server result and a failed refresh with a saved result both show an explicit old-result banner', async () => {
+  const stale = marketauxFixture();
+  stale.servedFrom = 'stale';
+  stale.refreshAttemptedAt = new Date().toISOString();
+  stale.asOf = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  stale.message = '테스트 전용: 모든 출처가 응답하지 않았습니다.';
+  globalThis.fetch = (async () => response(stale)) as typeof fetch;
+  let view = open('news');
+  // The loading state also uses role="status"; wait for the banner itself.
+  const banner = (await screen.findByText('이전 결과')).closest('.stale-banner') as HTMLElement;
+  assert.equal(banner.getAttribute('role'), 'status');
+  assert.ok(within(banner).getByText(/기준 결과\(3시간 전\)를 보여드립니다\. 테스트 전용: 모든 출처가 응답하지 않았습니다\./));
+  assert.ok(screen.getByRole('link', { name: 'Test fixture: Samsung research update' }));
+  view.unmount();
+
+  // A successful result saved in this browser covers a later failed refresh. Tesla keeps the
+  // module-level last-good copy away from the default company used by other tests.
+  window.localStorage.clear();
+  const now = Date.now();
+  const tesla = { id: 'nasdaq:TSLA', name: '테슬라', symbol: 'TSLA', exchange: 'NASDAQ', region: 'US' };
+  const good: NewsAnalysis = { ...marketauxFixture(), company: tesla, analysisVersion: NEWS_CACHE_ANALYSIS_VERSION,
+    asOf: new Date(now - 60_000).toISOString(), cachedUntil: new Date(now + 1).toISOString() };
+  let teslaCalls = 0;
+  globalThis.fetch = (async (url: Parameters<typeof fetch>[0]) => {
+    if (!String(url).includes('nasdaq%3ATSLA')) return response(newsFixture());
+    teslaCalls++;
+    if (teslaCalls === 1) return response(good);
+    throw new Error('테스트 전용 연결 실패');
+  }) as typeof fetch;
+  const pickTesla = async () => {
+    await screen.findByText('데이터 연동 대기');
+    fireEvent.click(screen.getByRole('button', { name: /테슬라.*TSLA.*NASDAQ/ }));
+  };
+  view = open('news');
+  await pickTesla();
+  await screen.findByRole('link', { name: 'Test fixture: Samsung research update' });
+  view.unmount();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  open('news');
+  await pickTesla();
+  const fallback = (await screen.findByText('이전 결과')).closest('.stale-banner') as HTMLElement;
+  assert.ok(within(fallback).getByText(/테스트 전용 연결 실패/));
+  assert.ok(screen.getByRole('link', { name: 'Test fixture: Samsung research update' }));
+  assert.equal(screen.queryByText('뉴스를 불러오지 못했어요'), null);
+  fireEvent.click(within(fallback).getByRole('button', { name: '다시 시도' }));
+  await waitFor(() => assert.equal(teslaCalls, 3));
+});
+
 test('missing provider sentiment stays unclassified with no invented neutral label or score', async () => {
   const fixture = marketauxFixture();
   delete fixture.articles[0]!.sentimentScore;

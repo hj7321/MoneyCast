@@ -260,6 +260,24 @@ export interface NewsArticle {
   rationaleLines?: string[];
   /** Fixed topic keys used to group the factor summary. */
   topics?: NewsTopicKey[];
+  /** The API that delivered the article, distinct from the publisher in `source`. */
+  sourceProvider?: string;
+  /** 'seen' is a crawler's first-seen time, not the publisher's timestamp. */
+  timeKind?: 'published' | 'seen';
+  /** Company match: provider entity tags, or the company name in the title. */
+  identity?: 'entity_verified' | 'name_match';
+  /** Other publishers carrying the same story after URL/title de-duplication. */
+  alsoReportedBy?: Array<{ source: string; url: string }>;
+}
+
+export type NewsSourceStatus = 'ok' | 'empty' | 'not_configured' | 'rate_limited' | 'error';
+/** Per-source outcome of one refresh, shown so partial failures stay visible. */
+export interface NewsSourceState {
+  id: string;
+  label: string;
+  status: NewsSourceStatus;
+  articleCount: number;
+  retryAt?: string;
 }
 
 export type FactorBoxState = 'none' | 'single' | 'repeated' | 'mixed';
@@ -300,6 +318,11 @@ export interface NewsAnalysis {
   cachedUntil?: string;
   retryAt?: string;
   factorSummary?: FactorSummary;
+  sources?: NewsSourceState[];
+  /** 'stale': every source failed, so the last successful result is shown instead. */
+  servedFrom?: 'live' | 'stale';
+  /** When the failed refresh behind a stale result was attempted. */
+  refreshAttemptedAt?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -369,7 +392,19 @@ function hasValidArticleMetadata(article: Record<string, unknown>): boolean {
   if (article.rationaleLines !== undefined && !isBoundedTextArray(article.rationaleLines, 1, 5, 300)) return false;
   if (article.topics !== undefined && !(Array.isArray(article.topics) && article.topics.length >= 1 &&
       article.topics.length <= 3 && article.topics.every(isNewsTopicKey))) return false;
+  if (article.sourceProvider !== undefined && !isBoundedText(article.sourceProvider, 40)) return false;
+  if (article.timeKind !== undefined && article.timeKind !== 'published' && article.timeKind !== 'seen') return false;
+  if (article.identity !== undefined && article.identity !== 'entity_verified' && article.identity !== 'name_match') return false;
+  if (article.alsoReportedBy !== undefined && !(Array.isArray(article.alsoReportedBy) && article.alsoReportedBy.length <= 10 &&
+      article.alsoReportedBy.every(item => isRecord(item) && isBoundedText(item.source, 100) && isSafeHttpsUrl(item.url)))) return false;
   return true;
+}
+
+function isSourceState(value: unknown): boolean {
+  return isRecord(value) && isBoundedText(value.id, 40) && isBoundedText(value.label, 60) &&
+    typeof value.status === 'string' && ['ok', 'empty', 'not_configured', 'rate_limited', 'error'].includes(value.status) &&
+    typeof value.articleCount === 'number' && Number.isSafeInteger(value.articleCount) && value.articleCount >= 0 &&
+    (value.retryAt === undefined || isTimestamp(value.retryAt));
 }
 
 function isFactorBox(value: unknown, articleIds: ReadonlySet<string>): boolean {
@@ -420,11 +455,15 @@ export function isNewsAnalysis(value: unknown, expectedCompanyId?: string): valu
   if (value.newsWindow !== undefined && (!isRecord(value.newsWindow) ||
       !isTimestamp(value.newsWindow.start) || !isTimestamp(value.newsWindow.end) ||
       Date.parse(value.newsWindow.start) > Date.parse(value.newsWindow.end))) return false;
+  if (value.sources !== undefined && !(Array.isArray(value.sources) && value.sources.length <= 8 && value.sources.every(isSourceState))) return false;
+  if (value.servedFrom !== undefined && value.servedFrom !== 'live' && value.servedFrom !== 'stale') return false;
+  if (value.refreshAttemptedAt !== undefined && !isTimestamp(value.refreshAttemptedAt)) return false;
   if (!value.articles.every(isNewsArticle)) return false;
   return value.factorSummary === undefined || isFactorSummary(value.factorSummary, value.articles);
 }
 
 export const INVESTMENT_NOTICE = '뉴스는 미래 주가의 방향이나 원인을 증명하지 않습니다. 이 정보는 투자 참고용이며 개인 맞춤형 매수·매도 권유가 아닙니다. 투자 판단과 손실의 책임은 투자자 본인에게 있습니다.';
 
-export { createNewsCache, NEWS_CACHE_TTL_MS, NEWS_CACHE_ANALYSIS_VERSION, type NewsCacheStorage } from './news-cache.js';
+export { createNewsCache, NEWS_CACHE_TTL_MS, NEWS_CACHE_ANALYSIS_VERSION, NEWS_LAST_GOOD_MAX_AGE_MS, type NewsCacheStorage } from './news-cache.js';
 export { NEWS_TOPICS, NEWS_TOPIC_KEYS, classifyNewsTopics, isNewsTopicKey, newsTopicLabel, type NewsTopicKey } from './news-topics.js';
+export { COMPANY_NEWS_IDENTITY, matchesCompanyTitle, type CompanyNewsIdentity } from './news-identity.js';

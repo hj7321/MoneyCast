@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { companies, isNewsAnalysis, NEWS_CACHE_TTL_MS, type NewsArticle } from '@moneycast/core';
-import { createNewsService, nextAnalysisWeek } from './service.js';
+import { createNewsService, nextAnalysisWeek, STALE_RESULT_LIMIT_MS } from './service.js';
 import { ProviderError, type NewsProvider } from './provider.js';
 
 const company = companies[0]!;
@@ -251,4 +251,58 @@ test('a six-hour provider TTL does not trap missing keys or rate limits for six 
   } }, () => now).getAnalysis(company);
   assert.equal(limited.retryAt, '2026-10-27T00:15:00.000Z');
   assert.equal(limited.cachedUntil, limited.retryAt);
+});
+
+test('partial results keep per-source states and refresh sooner than complete results', async () => {
+  const sources = [
+    { id: 'marketaux', label: 'Marketaux', status: 'rate_limited' as const, articleCount: 0, retryAt: '2026-10-27T00:15:00.000Z' },
+    { id: 'gdelt', label: 'GDELT', status: 'ok' as const, articleCount: 1 },
+  ];
+  const partial = await createNewsService({ name: 'Marketaux · GDELT', cacheTtlMs: NEWS_CACHE_TTL_MS,
+    getArticles: async () => ({ provider: 'GDELT', articles: [article('g1', 'unclassified')], sources }),
+  }, () => now).getAnalysis(company);
+  assert.deepEqual(partial.sources, sources);
+  assert.equal(partial.cachedUntil, '2026-10-27T00:30:00.000Z');
+  assert.equal(isNewsAnalysis(partial, company.id), true);
+  const unconfigured = await createNewsService({ name: 'Marketaux · GDELT', cacheTtlMs: NEWS_CACHE_TTL_MS,
+    getArticles: async () => ({ provider: 'GDELT', articles: [], sources: [{ ...sources[0]!, status: 'not_configured' as const }, sources[1]!] }),
+  }, () => now).getAnalysis(company);
+  assert.equal(unconfigured.cachedUntil, '2026-10-27T06:00:00.000Z');
+});
+
+test('when every source fails the last successful result is shown as stale and retried on the failure schedule', async () => {
+  let instant = now;
+  let mode: 'ok' | 'error' | 'rate_limited' | 'not_configured' = 'ok';
+  const service = createNewsService({ name: 'Test', cacheTtlMs: 60000, getArticles: async () => {
+    if (mode === 'ok') return { provider: 'Test', articles: [article('1'), article('2')] };
+    const failure = new ProviderError(mode, undefined, mode === 'rate_limited' ? 600000 : undefined);
+    failure.sources = [{ id: 'test', label: 'Test', status: mode, articleCount: 0 }];
+    throw failure;
+  } }, () => instant);
+  const good = await service.getAnalysis(company);
+  mode = 'error';
+  instant = new Date(now.getTime() + 61000);
+  const stale = await service.getAnalysis(company);
+  assert.equal(stale.servedFrom, 'stale');
+  assert.equal(stale.status, good.status);
+  assert.equal(stale.asOf, good.asOf);
+  assert.deepEqual(stale.articles, good.articles);
+  assert.equal(stale.refreshAttemptedAt, instant.toISOString());
+  assert.equal(stale.cachedUntil, new Date(instant.getTime() + 5000).toISOString());
+  assert.deepEqual(stale.sources?.map(source => source.status), ['error']);
+  assert.ok(stale.message);
+  assert.equal(isNewsAnalysis(stale, company.id), true);
+  mode = 'rate_limited';
+  instant = new Date(instant.getTime() + 5000);
+  const limited = await service.getAnalysis(company);
+  assert.equal(limited.servedFrom, 'stale');
+  assert.equal(limited.retryAt, new Date(instant.getTime() + 600000).toISOString());
+  mode = 'not_configured';
+  instant = new Date(instant.getTime() + 600000);
+  assert.equal((await service.getAnalysis(company)).status, 'not_configured');
+  mode = 'error';
+  instant = new Date(now.getTime() + STALE_RESULT_LIMIT_MS + 1);
+  const expired = await service.getAnalysis(company);
+  assert.equal(expired.status, 'error');
+  assert.equal(expired.servedFrom, undefined);
 });

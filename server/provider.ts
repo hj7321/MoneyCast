@@ -1,9 +1,11 @@
-import { isNewsArticle, type Company, type NewsArticle } from '../packages/core/src/index.js';
+import { isNewsArticle, type Company, type NewsArticle, type NewsSourceState } from '../packages/core/src/index.js';
 
 export interface NewsProviderResult {
   provider: string;
   articles: NewsArticle[];
   notes?: string[];
+  /** Per-source outcomes when several sources were combined. */
+  sources?: NewsSourceState[];
 }
 
 export interface NewsProvider {
@@ -22,6 +24,9 @@ export class ProviderError extends Error {
     super(code);
     this.name = 'ProviderError';
   }
+
+  /** Set when every combined source failed, so each outcome can still be shown. */
+  sources?: NewsSourceState[];
 }
 
 const MAX_BYTES = 1_048_576;
@@ -96,6 +101,10 @@ export function parseProviderResponse(value: unknown, company: Company, now: Dat
       ...(article.description === undefined ? {} : { description: article.description }),
       ...(article.rationaleLines === undefined ? {} : { rationaleLines: [...article.rationaleLines] }),
       ...(article.topics === undefined ? {} : { topics: [...article.topics] }),
+      ...(article.sourceProvider === undefined ? {} : { sourceProvider: article.sourceProvider }),
+      ...(article.timeKind === undefined ? {} : { timeKind: article.timeKind }),
+      ...(article.identity === undefined ? {} : { identity: article.identity }),
+      ...(article.alsoReportedBy === undefined ? {} : { alsoReportedBy: article.alsoReportedBy.map(item => ({ source: item.source, url: item.url })) }),
     });
   }
   return { provider: payload.provider.trim(), articles: articles.sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)) };

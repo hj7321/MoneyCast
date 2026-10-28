@@ -274,11 +274,14 @@ test('entity lookup and article request share one total fifteen-second timeout',
 
 test('provider factory honors explicit modes, supports old gateways and rejects unknown modes', async () => {
   const fetcher = mockedFetch(async () => { throw new Error('must not call'); });
-  assert.equal(createNewsProvider({}, fetcher).name, 'Marketaux');
-  assert.equal(createNewsProvider({ NEWS_PROVIDER: 'marketaux', NEWS_PROVIDER_URL: 'https://example.test' }, fetcher).name, 'Marketaux');
+  assert.equal(createNewsProvider({}, fetcher).name, 'Marketaux · GDELT');
+  assert.equal(createNewsProvider({ NEWS_SOURCES: 'marketaux' }, fetcher).name, 'Marketaux');
+  assert.equal(createNewsProvider({ NEWS_SOURCES: ' GDELT ' }, fetcher).name, 'GDELT');
+  assert.equal(createNewsProvider({ NEWS_PROVIDER: 'marketaux', NEWS_PROVIDER_URL: 'https://example.test' }, fetcher).name, 'Marketaux · GDELT');
   assert.equal(createNewsProvider({ NEWS_PROVIDER_URL: 'https://example.test' }, fetcher).name, '사용자 뉴스 게이트웨이');
   assert.equal(createNewsProvider({ NEWS_PROVIDER: 'gateway' }, fetcher).name, '사용자 뉴스 게이트웨이');
   await rejects(createNewsProvider({ NEWS_PROVIDER: 'typo' }, fetcher).getArticles(apple, now), 'error');
+  await rejects(createNewsProvider({ NEWS_SOURCES: 'marketaux,unknown' }, fetcher).getArticles(apple, now), 'error');
 });
 
 test('publisher descriptions become bounded plain text while body snippets and highlights are dropped', async () => {

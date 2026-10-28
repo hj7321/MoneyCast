@@ -1,19 +1,11 @@
-import { NEWS_CACHE_TTL_MS, type Company, type NewsArticle } from '../packages/core/src/index.js';
+import { COMPANY_NEWS_IDENTITY, NEWS_CACHE_TTL_MS, type Company, type NewsArticle } from '../packages/core/src/index.js';
 import { boundedJson, parseProviderResponse, plainText, ProviderError, type NewsProvider, type NewsProviderResult } from './provider.js';
 
 const API = 'https://api.marketaux.com';
 const DAY = 86_400_000;
 const ENTITY_TTL = 6 * 3_600_000;
-const NAMES: Record<string, string[]> = {
-  'krx:005930': ['삼성전자', 'Samsung Electronics'],
-  'krx:000660': ['SK하이닉스', '에스케이하이닉스', 'SK Hynix'],
-  'krx:035420': ['NAVER', '네이버'],
-  'krx:005380': ['현대자동차', 'Hyundai Motor'],
-  'nasdaq:AAPL': ['Apple'],
-  'nasdaq:NVDA': ['Nvidia'],
-  'nasdaq:MSFT': ['Microsoft'],
-  'nasdaq:TSLA': ['Tesla'],
-};
+const NAMES: Record<string, readonly string[]> = Object.fromEntries(
+  Object.entries(COMPANY_NEWS_IDENTITY).map(([id, identity]) => [id, identity.entityNames]));
 const EXCHANGES: Record<string, Set<string>> = {
   NASDAQ: new Set(['NASDAQ', 'XNAS', 'NASDAQGS', 'NASDAQGM', 'NASDAQCM', 'NMS', 'NGM', 'NCM',
     'NASDAQGLOBALSELECTMARKET', 'NASDAQGLOBALMARKET', 'NASDAQCAPITALMARKET']),
@@ -183,6 +175,7 @@ export function createMarketauxProvider(
             ...(scored ? { sentimentScore: score } : {}),
             ...(typeof row.language === 'string' ? { language: row.language } : {}),
             ...(description ? { description } : {}),
+            sourceProvider: 'Marketaux', timeKind: 'published', identity: 'entity_verified',
             providerEntity: { symbol: match.symbol, name: match.name, country: match.country, exchange: match.exchange },
           });
         }

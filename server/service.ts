@@ -22,8 +22,14 @@ const RISKS = [
   '분석 기간은 서울 기준 다음 월~금입니다. 거래소별 휴장일과 시차는 별도 시장 달력이 필요합니다.',
 ];
 
+/** Results missing a failed source are refreshed sooner than complete ones. */
+export const PARTIAL_RESULT_TTL_MS = 30 * 60_000;
+/** A successful result older than this is no longer offered when every source fails. */
+export const STALE_RESULT_LIMIT_MS = 7 * 86_400_000;
+
 export function createNewsService(provider: NewsProvider, clock: () => Date = () => new Date()) {
   const cache = new Map<string, { expiresAt: number; value: NewsAnalysis }>();
+  const lastGood = new Map<string, NewsAnalysis>();
   const pending = new Map<string, Promise<NewsAnalysis>>();
   const configuredTtl = provider.cacheTtlMs;
   const cacheTtlMs = typeof configuredTtl === 'number' && Number.isFinite(configuredTtl) && configuredTtl > 0
@@ -64,6 +70,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
         evidence: sufficient ? 'moderate' : fresh.length > 0 ? 'low' : 'none', summary,
         positiveFactors: factors.positiveFactors, negativeFactors: factors.negativeFactors,
         factorSummary: factors.factorSummary,
+        ...(result.sources ? { sources: result.sources } : {}),
         risks: [...new Set([
           ...base.risks, ...(result.notes ?? []),
           ...(unclassifiedCount > 0 ? [`분류 미확인 기사 ${unclassifiedCount}건은 긍정·부정·중립 집계에 포함하지 않았습니다.`] : []),
@@ -77,6 +84,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
         ? requestedBackoff : 60000;
       return {
         ...base, status: code,
+        ...(error instanceof ProviderError && error.sources ? { sources: error.sources } : {}),
         ...(code === 'rate_limited' ? { retryAt: new Date(clock().getTime() + backoffMs).toISOString() } : {}),
         message: code === 'not_configured'
           ? provider.setupMessage || '뉴스 제공자 연결을 기다리고 있습니다. 서버의 뉴스 제공자 환경변수를 설정해 주세요.'
@@ -103,14 +111,30 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       const request = analyze(company).then(value => {
         if (cache.size >= 100) cache.delete(cache.keys().next().value!);
         const completedAt = clock().getTime();
-        const lifetime = value.status === 'ready' || value.status === 'insufficient' ? cacheTtlMs
+        const succeeded = value.status === 'ready' || value.status === 'insufficient';
+        const partial = succeeded && value.sources?.some(source => source.status === 'rate_limited' || source.status === 'error');
+        const lifetime = succeeded ? partial ? Math.min(cacheTtlMs, PARTIAL_RESULT_TTL_MS) : cacheTtlMs
           : value.status === 'rate_limited' ? 60000 : 5000;
         const expiresAt = Math.max(completedAt + lifetime,
           value.status === 'rate_limited' && value.retryAt ? Date.parse(value.retryAt) : 0);
-        const cached = {
+        let cached: NewsAnalysis = {
           ...value, cachedUntil: new Date(expiresAt).toISOString(),
           ...(value.status === 'rate_limited' ? { retryAt: new Date(expiresAt).toISOString() } : {}),
         };
+        const previous = lastGood.get(company.id);
+        if (succeeded) {
+          if (lastGood.size >= 100 && !previous) lastGood.delete(lastGood.keys().next().value!);
+          lastGood.set(company.id, cached);
+        } else if ((value.status === 'error' || value.status === 'rate_limited') && previous &&
+            completedAt - Date.parse(previous.asOf) <= STALE_RESULT_LIMIT_MS) {
+          // Every source failed: show the last successful result, labelled, and retry on the failure's schedule.
+          cached = {
+            ...previous, servedFrom: 'stale', refreshAttemptedAt: value.asOf, cachedUntil: cached.cachedUntil,
+            ...(cached.retryAt ? { retryAt: cached.retryAt } : {}),
+            ...(value.sources ? { sources: value.sources } : {}),
+            ...(value.message ? { message: value.message } : {}),
+          };
+        }
         cache.set(company.id, { expiresAt, value: cached });
         return cached;
       }).finally(() => pending.delete(company.id));

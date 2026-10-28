@@ -17,7 +17,7 @@ function send(response: ServerResponse, status: number, body: unknown, cdnCacheC
 
 /** Public news may be shared at the edge, but its original expiry never moves. */
 export function newsCdnCacheControl(analysis: NewsAnalysis, now: number = Date.now()): string {
-  if (!['ready', 'insufficient'].includes(analysis.status) || !analysis.cachedUntil) return 'no-store';
+  if (!['ready', 'insufficient'].includes(analysis.status) || !analysis.cachedUntil || analysis.servedFrom === 'stale') return 'no-store';
   const asOf = Date.parse(analysis.asOf);
   const expiresAt = Math.min(Date.parse(analysis.cachedUntil), asOf + NEWS_CACHE_TTL_MS);
   if (!Number.isFinite(asOf) || !Number.isFinite(expiresAt) || asOf > now + 60_000) return 'no-store';

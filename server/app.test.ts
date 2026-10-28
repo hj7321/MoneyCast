@@ -44,7 +44,7 @@ test('Marketaux metadata flows through the HTTP API with no token exposure and c
         exchange: null, exchange_long: null, sentiment_score: score }],
     })) }), { headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
-  const provider = createNewsProvider({ NEWS_PROVIDER: 'marketaux', MARKETAUX_API_TOKEN: token }, upstream);
+  const provider = createNewsProvider({ NEWS_PROVIDER: 'marketaux', NEWS_SOURCES: 'marketaux', MARKETAUX_API_TOKEN: token }, upstream);
   const app = createApp(createNewsService(provider, () => now), { staticDirectory: null });
   app.listen(0, '127.0.0.1');
   await once(app, 'listening');
@@ -71,7 +71,7 @@ test('Marketaux HTTP authentication and quota failures return safe empty states'
   const now = new Date('2026-10-27T00:00:00.000Z');
   for (const [upstreamStatus, expected] of [[401, 'error'], [403, 'error'], [402, 'rate_limited'], [429, 'rate_limited']] as const) {
     const token = 'only-a-fixture-secret-never-real';
-    const provider = createNewsProvider({ NEWS_PROVIDER: 'marketaux', MARKETAUX_API_TOKEN: token },
+    const provider = createNewsProvider({ NEWS_PROVIDER: 'marketaux', NEWS_SOURCES: 'marketaux', MARKETAUX_API_TOKEN: token },
       (async () => new Response(`private error with ${token}`, { status: upstreamStatus, headers: { 'retry-after': '600' } })) as typeof fetch);
     const app = createApp(createNewsService(provider, () => now), { staticDirectory: null });
     app.listen(0, '127.0.0.1');
@@ -161,4 +161,41 @@ test('serverless entry handles public and rewritten API URLs without a listening
   }
   const method = await fetch(`${base}/api/index?__moneycast_route=health`, { method: 'POST' });
   assert.equal(method.status, 405);
+});
+
+test('default sources combine Marketaux and GDELT; an exhausted Marketaux quota still returns GDELT articles', async t => {
+  const now = new Date('2026-10-27T00:00:00.000Z');
+  const token = 'only-a-fixture-token-never-real';
+  const hosts: string[] = [];
+  const upstream = (async (input: Parameters<typeof fetch>[0]) => {
+    const url = new URL(String(input));
+    hosts.push(url.host);
+    if (url.host === 'api.marketaux.com') return new Response('quota', { status: 402 });
+    return new Response(JSON.stringify({ articles: [{ url: 'https://news.example/apple-1', title: 'Apple 테스트 기사', seendate: '20261026T010000Z',
+      domain: 'news.example', language: 'English' }] }), { headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const app = createApp(createNewsService(createNewsProvider({ MARKETAUX_API_TOKEN: token }, upstream), () => now),
+    { staticDirectory: null, clock: () => now.getTime() });
+  app.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+  t.after(() => { app.closeAllConnections(); app.close(); });
+  const response = await fetch(`http://127.0.0.1:${(app.address() as AddressInfo).port}/api/news?companyId=nasdaq%3AAAPL`);
+  const result: unknown = await response.json();
+  assert.ok(isNewsAnalysis(result, 'nasdaq:AAPL'));
+  assert.deepEqual(hosts.sort(), ['api.gdeltproject.org', 'api.marketaux.com']);
+  assert.equal(result.status, 'insufficient');
+  assert.equal(result.provider, 'GDELT');
+  assert.deepEqual(result.articles.map(article => [article.sourceProvider, article.sentiment]), [['GDELT', 'unclassified']]);
+  assert.deepEqual(result.sources?.map(source => [source.id, source.status]), [['marketaux', 'rate_limited'], ['gdelt', 'ok']]);
+  assert.equal(result.cachedUntil, '2026-10-27T00:30:00.000Z');
+  assert.equal(response.headers.get('vercel-cdn-cache-control'), 'public, s-maxage=1800');
+  assert.ok(!JSON.stringify(result).includes(token));
+});
+
+test('stale fallbacks are never cached by the CDN', async () => {
+  const now = Date.parse('2026-10-28T00:00:00.000Z');
+  const analysis = await createNewsService({ name: 'Test', cacheTtlMs: 21600000,
+    getArticles: async () => ({ provider: 'Test', articles: [] }),
+  }, () => new Date(now)).getAnalysis(companies[0]!);
+  assert.equal(newsCdnCacheControl({ ...analysis, servedFrom: 'stale' }, now), 'no-store');
 });
