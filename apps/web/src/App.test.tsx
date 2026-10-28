@@ -344,6 +344,100 @@ test('new calculation returns the goal planner to the free-goal example', () => 
   assert.equal(screen.getByRole('button', { name: '집값 전체' }).getAttribute('aria-pressed'), 'true');
 });
 
+const describe = (value: string) => {
+  fireEvent.change(screen.getByLabelText('설명(선택)'), { target: { value } });
+  fireEvent.click(screen.getByRole('button', { name: '설명에서 정보 찾기' }));
+  return screen.getByRole('region', { name: '설명에서 찾은 정보' });
+};
+const aiOn = { enabled: true, providers: [{ id: 'cloudflare', label: 'Cloudflare Workers AI', model: '@cf/test' }], promptVersion: 'goal-clarify-v1', maxLength: 200 };
+
+test('a free goal description is read on this device and applied only after it is ticked', () => {
+  open();
+  const card = describe('2년 안에 결혼, 예식 2천만 원이랑 신혼여행 500만 원');
+  assert.match(card.textContent!, /이 기기에서 규칙으로 찾았어요/);
+  assert.match(card.textContent!, /분류: 결혼/);
+  assert.equal(targetInput().value, '50,000,000');
+  assert.equal((within(card).getByLabelText('목표 이름: 결혼 자금') as HTMLInputElement).checked, true);
+  assert.ok(within(card).getByLabelText('항목: 예식 2,000만 원 · 신혼여행 500만 원'));
+  assert.ok(within(card).getByLabelText('목표 기간: 2년 (“2년”)'));
+  fireEvent.click(within(card).getByRole('button', { name: '선택한 정보 적용' }));
+  assert.equal((screen.getByLabelText('목표 이름') as HTMLInputElement).value, '결혼 자금');
+  assert.equal(targetInput().value, '25,000,000');
+  assert.equal((screen.getByLabelText('목표 기간') as HTMLInputElement).value, '24');
+  assert.ok(screen.getByRole('img', { name: /^2년 자산 추이/ }));
+  assert.equal(screen.getByRole('button', { name: '항목 합산' }).getAttribute('aria-pressed'), 'true');
+});
+
+test('fixed questions ask only for what the description lacks and can be answered or skipped', () => {
+  open();
+  const card = describe('비상금 모으기');
+  assert.ok(within(card).getByText('설명에서 금액이나 기간을 찾지 못했어요.'));
+  assert.ok(within(card).getByText('한 달 생활비와 몇 개월치를 모을지 알려 주세요.'));
+  assert.ok(within(card).getByText('언제까지 모을까요?'));
+  fireEvent.change(within(card).getByLabelText('한 달 생활비'), { target: { value: '2500000' } });
+  fireEvent.change(within(card).getByLabelText('몇 개월치'), { target: { value: '6' } });
+  fireEvent.click(within(card).getAllByRole('button', { name: '적용' })[0]!);
+  assert.equal(targetInput().value, '15,000,000');
+  assert.ok(screen.getByText('= 한 달 생활비 250만 원 × 6개월 1,500만 원'));
+  fireEvent.change(within(card).getByLabelText('모을 기간'), { target: { value: '18' } });
+  fireEvent.click(within(card).getByRole('button', { name: '적용' }));
+  assert.equal((screen.getByLabelText('목표 기간') as HTMLInputElement).value, '18');
+  assert.equal(within(card).queryByText('언제까지 모을까요?'), null);
+  const again = describe('목돈 모으기');
+  fireEvent.click(within(again).getAllByRole('button', { name: '건너뛰기' })[0]!);
+  assert.equal(within(again).queryByText('모으려는 금액이 정해져 있나요?'), null);
+});
+
+test('a description that matches another goal type offers to move there with its figures filled in', () => {
+  open();
+  const card = describe('오사카 여행 2명 3박 4일');
+  assert.ok(within(card).getByText('인원 2명, 3박, 4일을 채워 둘게요.'));
+  fireEvent.click(within(card).getByRole('button', { name: '‘여행’ 목표로 바꾸기' }));
+  assert.equal(screen.getByRole('button', { name: '여행' }).getAttribute('aria-pressed'), 'true');
+  assert.equal((screen.getByLabelText('인원') as HTMLInputElement).value, '2');
+  assert.equal((screen.getByLabelText('박 수') as HTMLInputElement).value, '3');
+  assert.equal((screen.getByLabelText('일 수') as HTMLInputElement).value, '4');
+  assert.equal(screen.queryByRole('region', { name: '설명에서 찾은 정보' }), null);
+});
+
+test('the AI reading is offered only when rules fall short, sends the description alone and is checked before use', async () => {
+  const posts: string[] = [];
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if ((init?.method ?? 'GET') === 'GET') return response(aiOn);
+    posts.push(String(init!.body));
+    return response({ status: 'ok', promptVersion: 'goal-clarify-v1', provider: aiOn.providers[0], category: 'wedding', title: '결혼 준비',
+      facts: { months: { value: 18, text: '1년 반' } } });
+  }) as typeof fetch;
+  open();
+  const text = '결혼 준비 예산은 3천 정도, 1년 반 뒤';
+  const card = describe(text);
+  const ask = await within(card).findByRole('button', { name: 'AI로 다시 정리하기' });
+  assert.match(card.textContent!, /설명 문장만 MoneyCast 서버를 거쳐 Cloudflare Workers AI로 보내요/);
+  fireEvent.click(ask);
+  await waitFor(() => assert.match(card.textContent!, /AI\(Cloudflare Workers AI\)가 정리했어요/));
+  assert.ok(within(card).getByLabelText('목표 이름: 결혼 준비'));
+  assert.deepEqual(posts.map(body => JSON.parse(body)), [{ text }]);
+  assert.equal(within(card).queryByRole('button', { name: 'AI로 다시 정리하기' }), null);
+});
+
+test('an unchecked AI answer or personal data falls back to the questions and never changes the goal', async () => {
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => (init?.method ?? 'GET') === 'GET'
+    ? response(aiOn)
+    : response({ status: 'ok', promptVersion: 'goal-clarify-v1', provider: aiOn.providers[0], category: 'wedding',
+      facts: { amount: { value: 50_000_000, text: '5천만 원' } } })) as typeof fetch;
+  open();
+  const card = describe('결혼 준비');
+  fireEvent.click(await within(card).findByRole('button', { name: 'AI로 다시 정리하기' }));
+  assert.ok(await within(card).findByText('AI 답을 확인하지 못했어요. 아래 질문에 직접 답해 주세요.'));
+  assert.equal(targetInput().value, '50,000,000');
+  assert.ok(within(card).getByText('모으려는 금액이 정해져 있나요?'));
+  assert.equal(within(card).queryByRole('button', { name: 'AI로 다시 정리하기' }), null);
+  const personal = describe('결혼 준비, 연락처 010-1234-5678');
+  assert.ok(within(personal).getByText(/주민등록번호·카드·계좌번호처럼 보이는 내용이 있어 AI로 보내지 않아요/));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(within(personal).queryByRole('button', { name: 'AI로 다시 정리하기' }), null);
+});
+
 test('malformed news data shows an error instead of crashing the news screen', async () => {
   globalThis.fetch = (async () => response({ ...newsFixture(), status: ['ready'], positiveFactors: null })) as typeof fetch;
   open('news');

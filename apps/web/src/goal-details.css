@@ -57,3 +57,24 @@
   .goal-item-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) 36px; }
   .goal-item-row > .field:first-child, .goal-item-row > .field:nth-child(2), .goal-item-row > .goal-item-remove { grid-column: auto; grid-row: auto; }
 }
+
+/* Description card: found facts to tick, at most two fixed questions, then the optional AI reading. */
+.goal-assist-open { display: inline-flex; align-items: center; justify-self: start; gap: 6px; margin-top: -6px; padding: 7px 12px; border: 1px solid #c9dccb; border-radius: 7px; background: #f3f8f1; color: #2f5f3c; font-size: 14px; font-weight: 550; }
+.goal-assist { display: grid; gap: 10px; padding: 14px; border: 1px solid #cfe0d2; border-radius: 8px; background: #f8fbf6; word-break: keep-all; }
+.goal-assist-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.goal-assist-head h4 { font-size: 15px; font-weight: 600; color: #2f4a37; }
+.goal-assist-close { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 6px; background: transparent; color: #66746a; }
+.goal-assist-facts { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.goal-assist-facts legend { margin-bottom: 4px; padding: 0; font-size: 14px; font-weight: 550; color: #4d5d4b; }
+.goal-assist-facts .goal-check { align-items: flex-start; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.goal-assist-facts .goal-check input { margin-top: 2px; flex-shrink: 0; }
+.goal-assist-apply, .goal-question-actions button, .goal-question-fields > button, .goal-assist-ai button { justify-self: start; min-height: 38px; padding: 7px 12px; border: 1px solid #8db498; border-radius: 7px; background: #f0f7eb; color: #2f5f3c; font-size: 14px; font-weight: 550; }
+.goal-assist-notice { font-size: 14px; line-height: 1.6; color: #6b4b1f; background: #fff7e8; border-radius: 6px; padding: 8px 10px; }
+.goal-question { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid #e1eadf; }
+.goal-question-text { font-size: 15px; font-weight: 550; color: #2f4a37; }
+.goal-question-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.goal-question-actions .field-hint { flex-basis: 100%; }
+.goal-question-fields { display: grid; gap: 10px; }
+.goal-question-fields .field label { font-size: 14px; }
+.goal-question .goal-link { font-size: 13px; }
+.goal-assist-ai { display: grid; gap: 8px; padding-top: 10px; border-top: 1px dashed #d4e1d3; }

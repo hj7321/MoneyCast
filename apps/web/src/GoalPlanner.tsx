@@ -6,6 +6,7 @@ import {
   GOAL_NOTE_MAX_LENGTH, GOAL_SOURCE_LABELS, GOAL_SOURCE_NOTES, GOAL_TYPES, HOME_REGIONS, HOME_SCOPE_LABELS, HOME_SCOPE_NOTES, HOUSING_TYPES,
   type FreeGoalDraft, type GoalDrafts, type GoalItemDraft, type GoalPlannerAction, type GoalType,
 } from '@moneycast/core';
+import { GoalAssist } from './GoalAssist';
 import { GoalIcon, Icon } from './icons';
 
 const formatAmount = (amount: number) => amount.toLocaleString('en-US', { maximumFractionDigits: 2 });
@@ -34,6 +35,9 @@ export function useGoalPlanner() {
     },
     followDetails: () => dispatch({ type: 'followDetails' }),
     reset: () => dispatch({ type: 'reset', drafts: createGoalDrafts(formatAmount) }),
+    /** Applies information the person chose from the description card. */
+    apply: (actions: readonly GoalPlannerAction[]) => actions.forEach(dispatch),
+    formatAmount,
   };
 }
 
@@ -93,7 +97,7 @@ function CostsField({ id, checked, value, error, hint, onToggle, onChange }: {
   </>;
 }
 
-export function GoalPlanner({ planner, targetError }: { planner: GoalPlannerControls; targetError?: string }) {
+export function GoalPlanner({ planner, targetError, onPeriod }: { planner: GoalPlannerControls; targetError?: string; onPeriod: (months: number) => void }) {
   const { goal, drafts, override, resolution, update } = planner;
   const [moreOpen, setMoreOpen] = useState(false);
   const { errors } = resolution;
@@ -109,6 +113,13 @@ export function GoalPlanner({ planner, targetError }: { planner: GoalPlannerCont
         hint="결과에 이 이름으로 표시돼요. 예시를 눌러도 금액은 바뀌지 않아요." onChange={value => update('free', { name: value })}/>
       <div className="goal-suggestions goal-wide" role="group" aria-label="목표 이름 예시">{FREE_GOAL_NAME_SUGGESTIONS.map(suggestion =>
         <button key={suggestion} type="button" onClick={() => update('free', { name: suggestion })}>{suggestion}</button>)}</div>
+      <div className="field goal-wide">
+        <label htmlFor="goal-free-note">설명(선택)</label>
+        <textarea id="goal-free-note" rows={2} maxLength={GOAL_NOTE_MAX_LENGTH} value={free.note} placeholder="예: 내년 10월 결혼, 예식 2천만 원이랑 신혼여행 500만 원"
+          onChange={event => update('free', { note: event.target.value })} aria-describedby="goal-free-note-hint"/>
+        <span id="goal-free-note-hint" className="field-hint">이 기기에서 먼저 정리하고, 새로고침하면 지워져요.</span>
+      </div>
+      <GoalAssist planner={planner} onPeriod={onPeriod}/>
       <Choice legend="금액 정하는 방법" value={free.method} onChange={planner.setFreeMethod}
         options={[['direct', '직접 입력'], ['items', '항목 합산'], ['undecided', '아직 모름']]}
         note={free.method === 'direct' ? '아래 목표 금액 칸에 입력해요.' : free.method === 'items' ? '항목 금액을 더해 목표 금액을 정해요.' : '목표 금액 없이 자산 추이만 계산해요. 정해지면 다른 방법을 골라 주세요.'}/>
@@ -124,11 +135,6 @@ export function GoalPlanner({ planner, targetError }: { planner: GoalPlannerCont
         {free.items.length < GOAL_ITEM_LIMIT && <button type="button" className="goal-link" onClick={() => update('free', { items: [...free.items, { label: '', amount: '' }] })}>+ 항목 추가</button>}
       </div>}
     </>;
-    more = <div className="field goal-wide">
-      <label htmlFor="goal-free-note">메모</label>
-      <textarea id="goal-free-note" rows={3} maxLength={GOAL_NOTE_MAX_LENGTH} value={free.note} onChange={event => update('free', { note: event.target.value })} aria-describedby="goal-free-note-hint"/>
-      <span id="goal-free-note-hint" className="field-hint">이 기기에서만 보관하고, 새로고침하면 지워져요.</span>
-    </div>;
   } else if (goal === 'home' || goal === 'car') {
     const home = goal === 'home';
     const draft = home ? drafts.home : drafts.car;

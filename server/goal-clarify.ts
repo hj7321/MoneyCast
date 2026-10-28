@@ -80,6 +80,8 @@ export function validateGoalAnswer(raw: unknown, description: string, now: Date,
   const quote = (field: string) => typeof raw[field] === 'string' ? (raw[field] as string).trim() : '';
   const fields: Array<[string, (text: string) => boolean]> = [
     ['amountText', text => {
+      // "삼천" alone is spoken shorthand the parser would read as 3,000 won; a money unit removes the doubt.
+      if (!/[만억조원]/.test(text)) return false;
       const value = parseKoreanAmount(text);
       if (value === null || value > 1_000_000_000_000) return false;
       facts.amount = { value, text };

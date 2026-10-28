@@ -14,7 +14,7 @@ import { ProviderError } from './provider.js';
 
 const now = Date.parse('2026-10-28T03:00:00Z');
 const today = seoulToday(now);
-const description = '내년 10월 결혼 예정이라 3천만 원 모으기';
+const description = '내년 10월 결혼 예정이라 3천만 원 모으기, 예산은 삼천 정도';
 const answer = { category: 'wedding', title: '결혼 자금', amountText: '3천만 원', periodText: '내년 10월', travelersText: '', tripText: '' };
 // Model failures log diagnostics; they are collected so tests can check they never carry a description.
 const warnings: string[] = [];
@@ -71,6 +71,7 @@ test('an answer is kept only when every figure is quoted from the description an
   const cases: Array<[Record<string, unknown>, string]> = [
     [{ ...answer, amountText: '5천만 원' }, 'not_in_text'],
     [{ ...answer, amountText: '결혼 예정' }, 'unreadable'],
+    [{ ...answer, amountText: '삼천' }, 'unreadable'],
     [{ ...answer, category: 'luxury' }, 'shape'],
     [{ ...answer, title: '2028 결혼' }, 'title_numbers'],
     [{ ...answer, title: '평균 결혼 비용' }, 'title_wording'],

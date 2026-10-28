@@ -575,5 +575,7 @@ export {
 } from './goal-text.js';
 export {
   GOAL_CLARIFY_PROMPT_VERSION, GOAL_CLARIFY_MAX_LENGTH, GOAL_TITLE_MAX_LENGTH, isQuotedFrom, isGoalAiAvailability, isGoalClarification,
+  GOAL_PERSONAL_DATA_NOTICE, goalAiNotice, goalAiFailure, goalFoundSource,
   type GoalClarifyStatus, type GoalAiProvider, type GoalAiAvailability, type GoalClarification,
 } from './goal-clarify.js';
+export { goalFactActions, goalSwitchActions, livingCostActions, describeSwitchPrefill, type GoalFactSelection } from './goal-assist.js';
