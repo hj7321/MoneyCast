@@ -1,7 +1,12 @@
-import type { Company, NewsAnalysis } from '../packages/core/src/index.js';
+import { NEWS_CACHE_ANALYSIS_VERSION, type AiStatus, type Company, type NewsAnalysis, type NewsArticle } from '../packages/core/src/index.js';
+import { mergeArticles } from './aggregate.js';
+import { carryAiState, type AiClassifier } from './llm.js';
 import { ProviderError, type NewsProvider } from './provider.js';
+import { createSnapshot, SNAPSHOT_POOL_LIMIT, type CompanySnapshot, type SnapshotStore } from './snapshot-store.js';
+import { synthesizeFactors } from './synthesis.js';
 
-export const ANALYSIS_VERSION = 'news-evidence-v2';
+/** One version string for server results and client caches. */
+export const ANALYSIS_VERSION = NEWS_CACHE_ANALYSIS_VERSION;
 
 /** Next calendar Monday–Friday in Seoul; exchange holidays need a market calendar. */
 export function nextAnalysisWeek(now: Date): { start: string; end: string } {
@@ -20,14 +25,75 @@ const RISKS = [
   '분석 기간은 서울 기준 다음 월~금입니다. 거래소별 휴장일과 시차는 별도 시장 달력이 필요합니다.',
 ];
 
-export function createNewsService(provider: NewsProvider, clock: () => Date = () => new Date()) {
+/** Results missing a failed source are refreshed sooner than complete ones. */
+export const PARTIAL_RESULT_TTL_MS = 30 * 60_000;
+/** A successful result older than this is no longer offered when every source fails. */
+export const STALE_RESULT_LIMIT_MS = 7 * 86_400_000;
+/** An unchanged snapshot is rewritten at most this often; Blob writes are a monthly allotment. */
+export const SNAPSHOT_REWRITE_MS = 6 * 3_600_000;
+/** Clients give up after 20 seconds, so an on-demand refresh, models included, ends sooner. */
+export const ON_DEMAND_BUDGET_MS = 18_000;
+/** Sources get the first 10 seconds on demand, so the models still have time to answer. */
+export const ON_DEMAND_SOURCE_MS = 10_000;
+/** Scheduled collection may wait longer for slow sources and the models; nobody is waiting on it. */
+export const SCHEDULED_BUDGET_MS = 60_000;
+export const SCHEDULED_SOURCE_MS = 35_000;
+
+/** Absolute deadlines for one refresh: sources first, then the models until `total`. */
+interface RefreshBudget { sources: number; total: number; scheduled: boolean }
+const AI_RISK = 'AI 요약·분류는 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다. 본문과 사실 여부는 확인하지 않았습니다.';
+
+function snapshotDigest(analysis: NewsAnalysis, pool: NewsArticle[]): string {
+  return JSON.stringify([analysis.status, analysis.sources?.map(source => [source.id, source.status]) ?? [],
+    pool.map(article => [article.id, article.sentiment, article.classificationMethod ?? null,
+      article.aiJudgements?.map(item => item.provider) ?? [], !!article.summary])]);
+}
+
+function isFresh(analysis: NewsAnalysis, now: number): boolean {
+  return (analysis.status === 'ready' || analysis.status === 'insufficient') && analysis.servedFrom !== 'stale' &&
+    !!analysis.cachedUntil && Date.parse(analysis.cachedUntil) > now && Date.parse(analysis.asOf) <= now + 60_000;
+}
+
+export interface NewsServiceOptions {
+  /** Persistent snapshots: pre-collected results, a weekly article pool and a stale fallback. */
+  store?: SnapshotStore | null;
+  /** Two-model judgements for articles without a provider score, and Korean summaries. */
+  classifier?: AiClassifier | null;
+}
+
+export function createNewsService(provider: NewsProvider, clock: () => Date = () => new Date(), options: NewsServiceOptions = {}) {
+  const store = options.store ?? null;
+  const classifier = options.classifier ?? null;
   const cache = new Map<string, { expiresAt: number; value: NewsAnalysis }>();
+  const lastGood = new Map<string, NewsAnalysis>();
   const pending = new Map<string, Promise<NewsAnalysis>>();
   const configuredTtl = provider.cacheTtlMs;
   const cacheTtlMs = typeof configuredTtl === 'number' && Number.isFinite(configuredTtl) && configuredTtl > 0
     ? configuredTtl : 60000;
 
-  async function analyze(company: Company): Promise<NewsAnalysis> {
+  async function readSnapshot(companyId: string): Promise<CompanySnapshot | null> {
+    if (!store) return null;
+    try {
+      return await store.read(companyId);
+    } catch {
+      console.warn('News snapshot read failed');
+      return null;
+    }
+  }
+
+  /** Model judgements are an addition: any failure leaves the articles exactly as the sources sent them. */
+  async function judge(company: Company, articles: NewsArticle[], deadline: number, eligible: (article: NewsArticle) => boolean):
+    Promise<{ articles: NewsArticle[]; status?: AiStatus }> {
+    if (!classifier) return { articles };
+    try {
+      return await classifier.apply(company, articles, { budgetMs: deadline - clock().getTime(), eligible });
+    } catch {
+      console.warn('News AI classification failed');
+      return { articles };
+    }
+  }
+
+  async function analyze(company: Company, snapshot: CompanySnapshot | null, budget: RefreshBudget): Promise<{ analysis: NewsAnalysis; pool: NewsArticle[] }> {
     const now = clock();
     const base: NewsAnalysis = {
       company, status: 'insufficient', articles: [], asOf: now.toISOString(), period: nextAnalysisWeek(now),
@@ -36,14 +102,24 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       newsWindow: { start: new Date(now.getTime() - 7 * 86400000).toISOString(), end: now.toISOString() },
     };
     try {
-      const result = await provider.getArticles(company, now);
-      const articles = result.articles;
-      const fresh = articles.filter(article => {
+      const result = await provider.getArticles(company, now, { deadline: budget.sources, scheduled: budget.scheduled });
+      const inWindow = (article: NewsArticle) => {
         const publishedAt = Date.parse(article.publishedAt);
         return publishedAt >= now.getTime() - 7 * 86400000 && publishedAt <= now.getTime();
-      });
-      const classified = fresh.filter(article => article.sentiment !== 'unclassified');
-      const unclassifiedCount = fresh.length - classified.length;
+      };
+      // Earlier model answers follow the same article, so nothing is judged twice.
+      const earlier = new Map([...(lastGood.get(company.id)?.articles ?? []), ...(snapshot?.pool ?? [])].map(article => [article.id, article]));
+      const current = result.articles.map(article => carryAiState(article, earlier.get(article.id)));
+      // Articles from earlier refreshes stay for the rest of their week; current copies win.
+      const merged = snapshot ? mergeArticles([current, snapshot.pool.filter(inWindow)], SNAPSHOT_POOL_LIMIT) : current;
+      const judged = await judge(company, merged, budget.total, inWindow);
+      const articles = judged.articles;
+      const fresh = articles.filter(inWindow);
+      // Articles both models judged unrelated stay listed, but no count or factor uses them.
+      const related = fresh.filter(article => article.aiRelevance !== 'unrelated');
+      const unrelatedCount = fresh.length - related.length;
+      const classified = related.filter(article => article.sentiment !== 'unclassified');
+      const unclassifiedCount = related.length - classified.length;
       const positive = classified.filter(article => article.sentiment === 'positive');
       const negative = classified.filter(article => article.sentiment === 'negative');
       const conflicting = positive.length > 0 && negative.length > 0;
@@ -51,29 +127,37 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       let summary = base.summary;
       if (articles.length === 0) summary = '관련 기사가 없어 다음 주 방향 판단을 유보합니다.';
       else if (fresh.length === 0) summary = '최근 7일 이내 기사가 없어 다음 주 방향 판단을 유보합니다.';
+      else if (related.length === 0) summary = `최근 기사 ${fresh.length}건이 모두 이 회사와 관련성이 낮아 다음 주 방향 판단을 유보합니다.`;
       else if (conflicting) summary = '긍정·부정 근거가 상충하여 다음 주 방향 판단을 유보합니다.';
-      else if (classified.length < 3 && unclassifiedCount > 0) summary = `최근 기사 ${fresh.length}건 중 ${unclassifiedCount}건은 분류 미확인입니다. 분류된 기사 ${classified.length}건만으로 다음 주 방향을 판단하기에 근거가 부족합니다.`;
-      else if (fresh.length < 3) summary = '최근 기사가 3건 미만으로, 다음 주 방향을 판단하기에 근거가 부족합니다.';
+      else if (classified.length < 3 && unclassifiedCount > 0) summary = `최근 기사 ${related.length}건 중 ${unclassifiedCount}건은 분류 미확인입니다. 분류된 기사 ${classified.length}건만으로 다음 주 방향을 판단하기에 근거가 부족합니다.`;
+      else if (related.length < 3) summary = '최근 기사가 3건 미만으로, 다음 주 방향을 판단하기에 근거가 부족합니다.';
       else if (positive.length === 0 && negative.length === 0) summary = '분류를 확인한 최근 기사가 모두 중립으로 분류되어 다음 주 방향 판단을 유보합니다.';
       else if (sufficient) summary = `${positive.length > 0 ? '긍정' : '부정'}적으로 분류된 뉴스 요인이 있습니다. 다음 주 주가 방향은 불확실하며, 이 요약은 상승·하락 예측이 아닙니다.`;
-      return {
+      const factors = synthesizeFactors(related, now, { ai: !!judged.status, unrelated: unrelatedCount });
+      const aiOutput = articles.some(article => article.summary || article.aiJudgements);
+      // The pool keeps unrelated articles with their judgements, so they are not judged again.
+      const pool = [...fresh].sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)).slice(0, SNAPSHOT_POOL_LIMIT);
+      return { pool, analysis: {
         ...base, provider: result.provider, articles, status: sufficient ? 'ready' : 'insufficient',
-        evidence: sufficient ? 'moderate' : fresh.length > 0 ? 'low' : 'none', summary,
-        positiveFactors: [...new Set(positive.map(article => article.rationale))].slice(0, 4),
-        negativeFactors: [...new Set(negative.map(article => article.rationale))].slice(0, 4),
+        evidence: sufficient ? 'moderate' : related.length > 0 ? 'low' : 'none', summary,
+        positiveFactors: factors.positiveFactors, negativeFactors: factors.negativeFactors,
+        factorSummary: factors.factorSummary,
+        ...(result.sources ? { sources: result.sources } : {}),
+        ...(judged.status ? { ai: judged.status } : {}),
         risks: [...new Set([
-          ...base.risks, ...(result.notes ?? []),
+          ...base.risks, ...(aiOutput ? [AI_RISK] : []), ...(result.notes ?? []),
           ...(unclassifiedCount > 0 ? [`분류 미확인 기사 ${unclassifiedCount}건은 긍정·부정·중립 집계에 포함하지 않았습니다.`] : []),
         ])],
-      };
+      } };
     } catch (error) {
       const code = error instanceof ProviderError ? error.code : 'error';
       const reason = error instanceof ProviderError ? error.reason : undefined;
       const requestedBackoff = error instanceof ProviderError ? error.retryAfterMs : undefined;
       const backoffMs = typeof requestedBackoff === 'number' && Number.isFinite(requestedBackoff) && requestedBackoff > 0
         ? requestedBackoff : 60000;
-      return {
+      return { pool: [], analysis: {
         ...base, status: code,
+        ...(error instanceof ProviderError && error.sources ? { sources: error.sources } : {}),
         ...(code === 'rate_limited' ? { retryAt: new Date(clock().getTime() + backoffMs).toISOString() } : {}),
         message: code === 'not_configured'
           ? provider.setupMessage || '뉴스 제공자 연결을 기다리고 있습니다. 서버의 뉴스 제공자 환경변수를 설정해 주세요.'
@@ -86,8 +170,52 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
                 : reason === 'identity_unverified'
                   ? '선택한 회사의 종목·거래소를 뉴스 제공자에서 정확히 확인하지 못했습니다. 다른 회사를 선택하거나 제공자의 기업 식별 정보를 확인해 주세요.'
                   : '뉴스를 불러오지 못했습니다. 제공자 설정과 응답 형식을 확인한 뒤 다시 시도해 주세요.',
-      };
+      } };
     }
+  }
+
+  function remember(company: Company, value: NewsAnalysis) {
+    if (!lastGood.has(company.id) && lastGood.size >= 100) lastGood.delete(lastGood.keys().next().value!);
+    lastGood.set(company.id, value);
+  }
+
+  /** Runs a provider refresh, caches it, saves the snapshot and falls back to the last good result. */
+  async function complete(company: Company, snapshot: CompanySnapshot | null, forceWrite: boolean, budget: RefreshBudget): Promise<NewsAnalysis> {
+    const { analysis: value, pool } = await analyze(company, snapshot, budget);
+    if (cache.size >= 100 && !cache.has(company.id)) cache.delete(cache.keys().next().value!);
+    const completedAt = clock().getTime();
+    const succeeded = value.status === 'ready' || value.status === 'insufficient';
+    const partial = succeeded && value.sources?.some(source => source.status === 'rate_limited' || source.status === 'error');
+    const lifetime = succeeded ? partial ? Math.min(cacheTtlMs, PARTIAL_RESULT_TTL_MS) : cacheTtlMs
+      : value.status === 'rate_limited' ? 60000 : 5000;
+    const expiresAt = Math.max(completedAt + lifetime,
+      value.status === 'rate_limited' && value.retryAt ? Date.parse(value.retryAt) : 0);
+    let cached: NewsAnalysis = {
+      ...value, cachedUntil: new Date(expiresAt).toISOString(),
+      ...(value.status === 'rate_limited' ? { retryAt: new Date(expiresAt).toISOString() } : {}),
+    };
+    if (succeeded) {
+      remember(company, cached);
+      const changed = !snapshot || snapshotDigest(cached, pool) !== snapshotDigest(snapshot.analysis, snapshot.pool) ||
+        completedAt - Date.parse(snapshot.updatedAt) >= SNAPSHOT_REWRITE_MS;
+      if (store && (forceWrite || changed)) {
+        try { await store.write(createSnapshot(cached, pool, new Date(completedAt))); } catch { console.warn('News snapshot write failed'); }
+      }
+    } else if (value.status === 'error' || value.status === 'rate_limited') {
+      // Every source failed: show the newest successful result, labelled, and retry on the failure's schedule.
+      const candidates = [lastGood.get(company.id), snapshot?.analysis].filter((item): item is NewsAnalysis => !!item);
+      const previous = candidates.sort((a, b) => Date.parse(b.asOf) - Date.parse(a.asOf))[0];
+      if (previous && completedAt - Date.parse(previous.asOf) <= STALE_RESULT_LIMIT_MS) {
+        cached = {
+          ...previous, servedFrom: 'stale', refreshAttemptedAt: value.asOf, cachedUntil: cached.cachedUntil,
+          ...(cached.retryAt ? { retryAt: cached.retryAt } : {}),
+          ...(value.sources ? { sources: value.sources } : {}),
+          ...(value.message ? { message: value.message } : {}),
+        };
+      }
+    }
+    cache.set(company.id, { expiresAt, value: cached });
+    return cached;
   }
 
   return {
@@ -97,22 +225,24 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       if (existing && existing.expiresAt > now) return existing.value;
       const inflight = pending.get(company.id);
       if (inflight) return inflight;
-      const request = analyze(company).then(value => {
-        if (cache.size >= 100) cache.delete(cache.keys().next().value!);
-        const completedAt = clock().getTime();
-        const lifetime = value.status === 'ready' || value.status === 'insufficient' ? cacheTtlMs
-          : value.status === 'rate_limited' ? 60000 : 5000;
-        const expiresAt = Math.max(completedAt + lifetime,
-          value.status === 'rate_limited' && value.retryAt ? Date.parse(value.retryAt) : 0);
-        const cached = {
-          ...value, cachedUntil: new Date(expiresAt).toISOString(),
-          ...(value.status === 'rate_limited' ? { retryAt: new Date(expiresAt).toISOString() } : {}),
-        };
-        cache.set(company.id, { expiresAt, value: cached });
-        return cached;
-      }).finally(() => pending.delete(company.id));
+      const request = (async () => {
+        const budget = { sources: now + ON_DEMAND_SOURCE_MS, total: now + ON_DEMAND_BUDGET_MS, scheduled: false };
+        const snapshot = await readSnapshot(company.id);
+        if (snapshot && isFresh(snapshot.analysis, clock().getTime())) {
+          // A collected result is still fresh: serve it without calling any provider.
+          cache.set(company.id, { expiresAt: Date.parse(snapshot.analysis.cachedUntil!), value: snapshot.analysis });
+          remember(company, snapshot.analysis);
+          return snapshot.analysis;
+        }
+        return complete(company, snapshot, false, budget);
+      })().finally(() => pending.delete(company.id));
       pending.set(company.id, request);
       return request;
+    },
+    /** Scheduled collection: always queries providers and always saves a successful snapshot. */
+    async refresh(company: Company): Promise<NewsAnalysis> {
+      const start = clock().getTime();
+      return complete(company, await readSnapshot(company.id), true, { sources: start + SCHEDULED_SOURCE_MS, total: start + SCHEDULED_BUDGET_MS, scheduled: true });
     },
   };
 }

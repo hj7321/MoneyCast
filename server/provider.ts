@@ -1,16 +1,27 @@
-import { isNewsArticle, type Company, type NewsArticle } from '../packages/core/src/index.js';
+import { isNewsArticle, type Company, type NewsArticle, type NewsSourceState } from '../packages/core/src/index.js';
 
 export interface NewsProviderResult {
   provider: string;
   articles: NewsArticle[];
   notes?: string[];
+  /** Per-source outcomes when several sources were combined. */
+  sources?: NewsSourceState[];
+  /** The source was not queried this time; it neither succeeded nor failed. */
+  skipped?: boolean;
+}
+
+/** How long the caller can wait; sources with slow APIs use it instead of a short fixed timeout. */
+export interface NewsRequestOptions {
+  deadline?: number;
+  /** Daily collection, where nobody waits on the response; slow sources run only then. */
+  scheduled?: boolean;
 }
 
 export interface NewsProvider {
   name?: string;
   setupMessage?: string;
   cacheTtlMs?: number;
-  getArticles(company: Company, now: Date): Promise<NewsProviderResult>;
+  getArticles(company: Company, now: Date, options?: NewsRequestOptions): Promise<NewsProviderResult>;
 }
 
 export class ProviderError extends Error {
@@ -22,6 +33,9 @@ export class ProviderError extends Error {
     super(code);
     this.name = 'ProviderError';
   }
+
+  /** Set when every combined source failed, so each outcome can still be shown. */
+  sources?: NewsSourceState[];
 }
 
 const MAX_BYTES = 1_048_576;
@@ -36,6 +50,18 @@ function validPublishedAt(value: unknown): value is string {
 
 function boundedString(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max;
+}
+
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'", nbsp: ' ' };
+
+/** Provider metadata as display text: no markup, collapsed spaces, bounded length. */
+export function plainText(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.replace(/<[^>]*>/g, ' ').replace(/&(amp|lt|gt|quot|apos|#39|nbsp);/g, (_, name: string) => ENTITIES[name]!)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) return undefined;
+  const chars = [...text];
+  return chars.length <= max ? text : `${chars.slice(0, max - 1).join('')}…`;
 }
 
 function safeArticleUrl(value: unknown): value is string {
@@ -81,6 +107,13 @@ export function parseProviderResponse(value: unknown, company: Company, now: Dat
         symbol: article.providerEntity.symbol, name: article.providerEntity.name,
         exchange: article.providerEntity.exchange, country: article.providerEntity.country,
       } }),
+      ...(article.description === undefined ? {} : { description: article.description }),
+      ...(article.rationaleLines === undefined ? {} : { rationaleLines: [...article.rationaleLines] }),
+      ...(article.topics === undefined ? {} : { topics: [...article.topics] }),
+      ...(article.sourceProvider === undefined ? {} : { sourceProvider: article.sourceProvider }),
+      ...(article.timeKind === undefined ? {} : { timeKind: article.timeKind }),
+      ...(article.identity === undefined ? {} : { identity: article.identity }),
+      ...(article.alsoReportedBy === undefined ? {} : { alsoReportedBy: article.alsoReportedBy.map(item => ({ source: item.source, url: item.url })) }),
     });
   }
   return { provider: payload.provider.trim(), articles: articles.sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)) };

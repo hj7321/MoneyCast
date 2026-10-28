@@ -1,19 +1,11 @@
-import { NEWS_CACHE_TTL_MS, type Company, type NewsArticle } from '../packages/core/src/index.js';
-import { boundedJson, parseProviderResponse, ProviderError, type NewsProvider, type NewsProviderResult } from './provider.js';
+import { COMPANY_NEWS_IDENTITY, NEWS_CACHE_TTL_MS, type Company, type NewsArticle } from '../packages/core/src/index.js';
+import { boundedJson, parseProviderResponse, plainText, ProviderError, type NewsProvider, type NewsProviderResult } from './provider.js';
 
 const API = 'https://api.marketaux.com';
 const DAY = 86_400_000;
 const ENTITY_TTL = 6 * 3_600_000;
-const NAMES: Record<string, string[]> = {
-  'krx:005930': ['삼성전자', 'Samsung Electronics'],
-  'krx:000660': ['SK하이닉스', '에스케이하이닉스', 'SK Hynix'],
-  'krx:035420': ['NAVER', '네이버'],
-  'krx:005380': ['현대자동차', 'Hyundai Motor'],
-  'nasdaq:AAPL': ['Apple'],
-  'nasdaq:NVDA': ['Nvidia'],
-  'nasdaq:MSFT': ['Microsoft'],
-  'nasdaq:TSLA': ['Tesla'],
-};
+const NAMES: Record<string, readonly string[]> = Object.fromEntries(
+  Object.entries(COMPANY_NEWS_IDENTITY).map(([id, identity]) => [id, identity.entityNames]));
 const EXCHANGES: Record<string, Set<string>> = {
   NASDAQ: new Set(['NASDAQ', 'XNAS', 'NASDAQGS', 'NASDAQGM', 'NASDAQCM', 'NMS', 'NGM', 'NCM',
     'NASDAQGLOBALSELECTMARKET', 'NASDAQGLOBALMARKET', 'NASDAQCAPITALMARKET']),
@@ -21,9 +13,9 @@ const EXCHANGES: Record<string, Set<string>> = {
     'KOREAEXCHANGEKOSPI', 'KOREAEXCHANGESTOCKMARKET', 'KOREAEXCHANGEKOSPIMARKET']),
 };
 const BASE_NOTES = [
-  'Marketaux에서 최근 7일의 기사 최대 3건을 조회합니다. 전체 뉴스나 한국어 기사 제공 범위를 보장하지 않습니다.',
+  'Marketaux에서 최근 7일 기사 중 이 회사와 가장 강하게 연결된 기사 최대 3건을 조회합니다. 전체 뉴스나 한국어 기사 제공 범위를 보장하지 않습니다.',
   '긍정·부정·중립은 Marketaux가 제공한 해당 기업의 감성 점수 분류입니다. 주가 변동 확률이나 독립적으로 검증한 예측 점수가 아닙니다.',
-  '원문 언어를 그대로 표시하며 기사 본문을 수집하거나 자동 번역하지 않습니다.',
+  '영어·한국어 기사만 조회합니다. 기사 제목과 매체 설명은 원문 그대로 표시하며 기사 본문은 수집하지 않습니다.',
 ];
 
 type Entity = { symbol: string; name: string; country: string; type: string; exchange: string | null; exchange_long: string | null; sentiment_score?: unknown };
@@ -147,6 +139,10 @@ export function createMarketauxProvider(
         const rows = dataArray(await request('/v1/news/all', {
           symbols: entity.symbol, countries: company.region.toLowerCase(), entity_types: 'equity',
           filter_entities: 'true', must_have_entities: 'true', group_similar: 'true', limit: '3',
+          // Three slots per request go further on articles a Korean reader can follow.
+          language: 'en,ko',
+          // Newest-first filled the slots with sector roundups that only mention the company; the strongest match comes first instead.
+          sort: 'entity_match_score',
           published_after: new Date(now.getTime() - 7 * DAY).toISOString().slice(0, 19),
           published_before: now.toISOString().slice(0, 19),
         }, token, controller.signal), 3);
@@ -167,14 +163,23 @@ export function createMarketauxProvider(
           if (score !== undefined && score !== null && (typeof score !== 'number' || !Number.isFinite(score) || score < -1 || score > 1)) throw new ProviderError('error');
           const scored = typeof score === 'number';
           const sentiment: NewsArticle['sentiment'] = !scored ? 'unclassified' : score > 0 ? 'positive' : score < 0 ? 'negative' : 'neutral';
-          const rationale = scored
-            ? `Marketaux가 ${company.name} 관련 문맥에 제공한 감성 점수 ${String(score)}를 ${sentiment === 'positive' ? '긍정' : sentiment === 'negative' ? '부정' : '중립'}으로 분류했습니다. 기사 분위기이며 주가 방향이나 확률을 뜻하지 않습니다.`
-            : 'Marketaux가 이 기업의 감성 점수를 제공하지 않아 미분류로 표시하며 방향 근거 집계에서 제외합니다.';
+          const rationaleLines = scored ? [
+            `Marketaux가 이 기사에서 '${company.name}' 언급 문맥에 매긴 감성 점수 ${score > 0 ? '+' : ''}${String(score)} (−1~1, 0보다 크면 긍정·작으면 부정)`,
+            `제공자 기업 식별: ${match.name} · ${match.symbol} · ${match.exchange ?? '거래소 정보 미제공'} · ${match.country.toUpperCase()}`,
+            '기사 분위기 지표이며 주가 방향이나 확률을 뜻하지 않습니다.',
+          ] : [
+            'Marketaux가 이 기업의 감성 점수를 제공하지 않아 미분류로 표시합니다.',
+            '긍정·부정 요인 집계에서 제외합니다.',
+          ];
+          // Only the publisher's meta description is kept; body snippets and highlights are not.
+          const description = plainText(row.description, 300);
           articles.push({
             id: row.uuid, title: row.title, source: row.source, publishedAt: row.published_at, url: row.url,
-            sentiment, rationale, classificationMethod: scored ? 'provider' : 'unavailable',
+            sentiment, rationale: rationaleLines.join(' '), rationaleLines, classificationMethod: scored ? 'provider' : 'unavailable',
             ...(scored ? { sentimentScore: score } : {}),
             ...(typeof row.language === 'string' ? { language: row.language } : {}),
+            ...(description ? { description } : {}),
+            sourceProvider: 'Marketaux', timeKind: 'published', identity: 'entity_verified',
             providerEntity: { symbol: match.symbol, name: match.name, country: match.country, exchange: match.exchange },
           });
         }

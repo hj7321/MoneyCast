@@ -1,10 +1,30 @@
+import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { companies, searchCompanies, NEWS_CACHE_TTL_MS, type NewsAnalysis } from '../packages/core/src/index.js';
+import { collectNews } from './collect.js';
+import { createAiClassifier } from './llm.js';
+import { createLlmJudges } from './llm-judges.js';
 import { createNewsProvider } from './news-provider.js';
 import { createNewsService } from './service.js';
+import { createBlobSnapshotStore } from './snapshot-store.js';
 import { DEFAULT_STATIC_DIRECTORY, serveWeb } from './static.js';
 
 type NewsService = ReturnType<typeof createNewsService>;
+interface HandlerOptions { staticDirectory?: string | null; clock?: () => number; env?: NodeJS.ProcessEnv }
+
+/** Production wiring: configured sources, snapshots when a Blob store is connected, and models when keys exist. */
+export function createDefaultNewsService(env: NodeJS.ProcessEnv = process.env): NewsService {
+  return createNewsService(createNewsProvider(env), undefined, {
+    store: createBlobSnapshotStore(env), classifier: createAiClassifier(createLlmJudges(env)),
+  });
+}
+
+/** Vercel Cron sends `Authorization: Bearer <CRON_SECRET>`; compared in constant time. */
+function authorizedCron(header: string | undefined, secret: string): boolean {
+  const expected = Buffer.from(`Bearer ${secret}`);
+  const received = Buffer.from(header ?? '');
+  return received.length === expected.length && timingSafeEqual(received, expected);
+}
 
 function send(response: ServerResponse, status: number, body: unknown, cdnCacheControl = 'no-store') {
   response.writeHead(status, {
@@ -17,7 +37,7 @@ function send(response: ServerResponse, status: number, body: unknown, cdnCacheC
 
 /** Public news may be shared at the edge, but its original expiry never moves. */
 export function newsCdnCacheControl(analysis: NewsAnalysis, now: number = Date.now()): string {
-  if (!['ready', 'insufficient'].includes(analysis.status) || !analysis.cachedUntil) return 'no-store';
+  if (!['ready', 'insufficient'].includes(analysis.status) || !analysis.cachedUntil || analysis.servedFrom === 'stale') return 'no-store';
   const asOf = Date.parse(analysis.asOf);
   const expiresAt = Math.min(Date.parse(analysis.cachedUntil), asOf + NEWS_CACHE_TTL_MS);
   if (!Number.isFinite(asOf) || !Number.isFinite(expiresAt) || asOf > now + 60_000) return 'no-store';
@@ -25,8 +45,7 @@ export function newsCdnCacheControl(analysis: NewsAnalysis, now: number = Date.n
   return seconds > 0 ? `public, s-maxage=${seconds}` : 'no-store';
 }
 
-export function createRequestHandler(service: NewsService = createNewsService(createNewsProvider()),
-  options: { staticDirectory?: string | null; clock?: () => number } = {}) {
+export function createRequestHandler(service: NewsService = createDefaultNewsService(), options: HandlerOptions = {}) {
   return async (request: IncomingMessage, response: ServerResponse) => {
     try {
       const url = new URL(request.url || '/', 'http://localhost');
@@ -41,6 +60,12 @@ export function createRequestHandler(service: NewsService = createNewsService(cr
         const query = url.searchParams.get('q') || '';
         if (query.length > 100) return send(response, 400, { error: '검색어는 100자 이내로 입력해 주세요.' });
         return send(response, 200, { companies: searchCompanies(query) });
+      }
+      if (url.pathname === '/api/cron/collect') {
+        const secret = (options.env ?? process.env).CRON_SECRET?.trim();
+        if (!secret) return send(response, 503, { error: '예약 수집이 설정되지 않았습니다.' });
+        if (!authorizedCron(request.headers.authorization, secret)) return send(response, 401, { error: '인증되지 않은 요청입니다.' });
+        return send(response, 200, await collectNews(service, companies));
       }
       if (url.pathname === '/api/news') {
         const id = url.searchParams.get('companyId');
@@ -57,7 +82,6 @@ export function createRequestHandler(service: NewsService = createNewsService(cr
   };
 }
 
-export function createApp(service: NewsService = createNewsService(createNewsProvider()),
-  options: { staticDirectory?: string | null; clock?: () => number } = {}) {
+export function createApp(service: NewsService = createDefaultNewsService(), options: HandlerOptions = {}) {
   return createServer(createRequestHandler(service, options));
 }
