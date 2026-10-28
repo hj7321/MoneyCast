@@ -40,11 +40,6 @@
 .calculator-card .section-heading { margin-bottom: 18px; }
 .results-column { background: #fbfcfa; border: 1px solid #e8ede8; border-radius: 10px; padding: 18px; }
 .results-column .chart-card, .results-column .goal-result { background: #fff; }
-.goal-picker button { border: 1px solid #d9e3d8; background: #fbfdf9; color: #40584a; }
-.goal-picker button:hover { border-color: #8db79a; background: #f1f8f1; }
-.goal-picker button.chosen { border-color: #478760; background: #dcefe0; color: #1f6040; box-shadow: inset 0 0 0 1px #478760; }
-.goal-picker button svg { color: #3d8a5a; }
-.goal-picker button.chosen svg { color: #246c43; }
 .goal-result { border-color: #d9e4da; }
 .goal-result-icon { display: none; }
 
@@ -71,5 +66,5 @@
 @media (prefers-reduced-motion: reduce) { .factor-grid > div::after { animation: none; } }
 @media (max-width: 760px) { .results-column { padding: 13px; } .surface-label { margin-bottom: 8px; } .article-list article { padding: 14px; } }
 
-/* The four goal labels are the only override to the v0 Latest design. */
-.calculator-card .goal-picker button > .goal-type-label { font-size: 14px; }
+/* Restore the original button typography while keeping all four labels at 14px. */
+.calculator-card .goal-picker button > .goal-type-label { font-size: 14px; line-height: inherit; font-weight: inherit; }

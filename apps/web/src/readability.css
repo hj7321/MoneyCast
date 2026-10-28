@@ -27,7 +27,9 @@
 .goal-picker legend { font-size: 16px; }
 .goal-picker legend > span { display: block; font-size: 13px; margin: 3px 0 0; }
 .goal-picker button { font-size: 14px; padding: 10px 2px; }
-.goal-material-icon { width: 22px; height: 22px; flex: 0 0 22px; }
+/* Preserve the original glyph line box while centering the smaller SVG. */
+.goal-picker .goal-type-icon { display: inline-flex; align-items: center; justify-content: center; height: 1.4em; flex: 0 0 auto; }
+.goal-material-icon { width: 18px; height: 18px; flex: 0 0 18px; }
 .goal-material-icon--plane { transform: rotate(90deg); }
 .calculator-fields { gap: 20px; }
 .field label { font-size: 16px; }
