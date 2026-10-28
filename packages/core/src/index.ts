@@ -557,3 +557,13 @@ export const INVESTMENT_NOTICE = '뉴스는 미래 주가의 방향이나 원인
 export { createNewsCache, NEWS_CACHE_TTL_MS, NEWS_CACHE_ANALYSIS_VERSION, NEWS_LAST_GOOD_MAX_AGE_MS, type NewsCacheStorage } from './news-cache.js';
 export { NEWS_TOPICS, NEWS_TOPIC_KEYS, classifyNewsTopics, isNewsTopicKey, newsTopicLabel, type NewsTopicKey } from './news-topics.js';
 export { COMPANY_NEWS_IDENTITY, matchesCompanyTitle, type CompanyNewsIdentity } from './news-identity.js';
+export {
+  GOAL_TYPES, GOAL_NAME_MAX_LENGTH, GOAL_LABEL_MAX_LENGTH, GOAL_NOTE_MAX_LENGTH, GOAL_ITEM_LIMIT, TRAVELERS_LIMIT, TRIP_NIGHTS_LIMIT,
+  FREE_GOAL_NAME_SUGGESTIONS, HOME_REGIONS, HOUSING_TYPES, CAR_CONDITIONS, HOME_SCOPE_LABELS, CAR_SCOPE_LABELS, GOAL_SOURCE_LABELS,
+  GOAL_SOURCE_NOTES, HOME_SCOPE_NOTES, CAR_SCOPE_NOTES,
+  goalTypeName, createGoalDrafts, parseGoalNumber, resolveGoalTarget, formatGoalFormula, describeGoal, describeGoalTarget, describeGoalResult,
+  createGoalPlanner, updateGoalPlanner,
+  type GoalType, type GoalTypeDefinition, type GoalDrafts, type FreeGoalDraft, type HomeGoalDraft, type CarGoalDraft,
+  type TravelGoalDraft, type GoalItemDraft, type HousingType, type CarCondition, type GoalTargetSource,
+  type GoalFormulaLine, type GoalTargetResolution, type GoalPlannerState, type GoalPlannerAction,
+} from './goals.js';

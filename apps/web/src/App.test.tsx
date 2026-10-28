@@ -204,6 +204,146 @@ test('month duration rejects missing, fractional and out-of-range values and rec
   assert.ok(screen.getByRole('img', { name: /^1개월 자산 추이/ }));
 });
 
+const targetInput = () => screen.getByLabelText('목표 금액') as HTMLInputElement;
+const targetSource = () => document.getElementById('target-source')!.textContent;
+const chartLabel = () => screen.getByRole('img', { name: /자산 추이/ }).getAttribute('aria-label')!;
+
+test('each goal type starts from a labelled example and shows only the entries that set its amount', () => {
+  open();
+  assert.equal(targetSource(), '예시 금액');
+  assert.ok(screen.getByLabelText('목표 이름'));
+  assert.ok(screen.getByText('자유 목표 · 예시 금액 5,000만 원'));
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  assert.equal(screen.getByRole('button', { name: '내 집 마련' }).getAttribute('aria-pressed'), 'true');
+  assert.equal((screen.getByLabelText('예상 매입 가격') as HTMLInputElement).value, '300,000,000');
+  assert.equal(targetInput().value, '300,000,000');
+  assert.equal(targetSource(), '예시 금액');
+  assert.match(chartLabel(), /목표 300,000,000원/);
+  assert.equal(screen.queryByLabelText('대출 예정 금액'), null);
+  const more = screen.getByRole('button', { name: '더 자세히 입력(선택)' });
+  assert.equal(more.getAttribute('aria-expanded'), 'false');
+  assert.equal(document.getElementById('goal-more')!.hidden, true);
+  fireEvent.click(more);
+  assert.equal(document.getElementById('goal-more')!.hidden, false);
+  assert.ok(screen.getByLabelText('지역(시·도)'));
+  for (const [goal, label, value] of [['자동차', '예상 차량 가격', '40,000,000'], ['여행', '총 예산', '10,000,000']] as const) {
+    fireEvent.click(screen.getByRole('button', { name: goal }));
+    assert.equal((screen.getByLabelText(label) as HTMLInputElement).value, value);
+    assert.equal(targetInput().value, value);
+  }
+  assert.ok(screen.getByText(/여행 경비 정보를 제공하지 않아요/));
+});
+
+test('home equity subtracts the planned loan, adds costs and stays undecided until the loan is entered', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  fireEvent.click(screen.getByRole('button', { name: '자기자본' }));
+  assert.equal(targetInput().value, '');
+  assert.equal(targetInput().placeholder, '미정');
+  assert.equal(targetSource(), '미정');
+  assert.ok(screen.getByText('목표 금액이 아직 정해지지 않았어요.'));
+  assert.ok(screen.getByText('목표 상세의 빈 칸(대출 예정 금액)을 채우면 달성률을 보여 드려요.'));
+  assert.doesNotMatch(chartLabel(), /목표/);
+  fireEvent.change(screen.getByLabelText('대출 예정 금액'), { target: { value: '200000000' } });
+  assert.equal(targetInput().value, '100,000,000');
+  assert.equal(targetSource(), '상세 계산');
+  assert.ok(screen.getByText('= 매입 가격 3억 원 − 대출 예정 금액 2억 원'));
+  assert.match(chartLabel(), /목표 100,000,000원/);
+  fireEvent.click(screen.getByRole('button', { name: '더 자세히 입력(선택)' }));
+  fireEvent.click(screen.getByLabelText('부대비용 포함'));
+  fireEvent.change(screen.getByLabelText('부대비용'), { target: { value: '15000000' } });
+  assert.equal(targetInput().value, '115,000,000');
+  assert.ok(screen.getByText('= 매입 가격 3억 원 − 대출 예정 금액 2억 원 + 부대비용 1,500만 원'));
+  fireEvent.change(screen.getByLabelText('대출 예정 금액'), { target: { value: '400000000' } });
+  assert.equal(screen.getByLabelText('대출 예정 금액').getAttribute('aria-invalid'), 'true');
+  assert.ok(screen.getByText('대출 예정 금액이 매입 가격보다 클 수 없어요.'));
+  assert.equal(screen.queryByRole('img', { name: /자산 추이/ }), null);
+});
+
+test('a typed target amount wins until the details are used again', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  fireEvent.change(targetInput(), { target: { value: '123456789' } });
+  assert.equal(targetSource(), '직접 입력');
+  assert.match(chartLabel(), /목표 123,456,789원/);
+  fireEvent.blur(targetInput());
+  assert.equal(targetInput().value, '123,456,789');
+  fireEvent.change(screen.getByLabelText('예상 매입 가격'), { target: { value: '500000000' } });
+  assert.equal(targetInput().value, '123,456,789');
+  fireEvent.click(screen.getByRole('button', { name: '상세 입력으로 다시 계산' }));
+  assert.equal(targetInput().value, '500,000,000');
+  assert.equal(targetSource(), '상세 계산');
+  assert.equal(screen.queryByRole('button', { name: '상세 입력으로 다시 계산' }), null);
+});
+
+test('switching goal types keeps each type\'s entries instead of overwriting the target', () => {
+  open();
+  fireEvent.change(targetInput(), { target: { value: '70000000' } });
+  fireEvent.click(screen.getByRole('button', { name: '자동차' }));
+  assert.equal(targetInput().value, '40,000,000');
+  fireEvent.change(screen.getByLabelText('예상 차량 가격'), { target: { value: '35000000' } });
+  fireEvent.click(screen.getByRole('button', { name: '자유 목표' }));
+  assert.equal(targetInput().value, '70000000');
+  assert.equal(targetSource(), '직접 입력');
+  fireEvent.click(screen.getByRole('button', { name: '자동차' }));
+  assert.equal(targetInput().value, '35,000,000');
+  assert.equal((screen.getByLabelText('예상 차량 가격') as HTMLInputElement).value, '35000000');
+});
+
+test('a free goal takes a name, a sum of rows or no amount yet', async () => {
+  open();
+  fireEvent.change(screen.getByLabelText('목표 이름'), { target: { value: '결혼 자금' } });
+  assert.ok(screen.getByText('결혼 자금 · 예시 금액 5,000만 원'));
+  fireEvent.click(screen.getByRole('button', { name: '비상금' }));
+  assert.equal((screen.getByLabelText('목표 이름') as HTMLInputElement).value, '비상금');
+  assert.equal(targetInput().value, '50,000,000');
+  fireEvent.click(screen.getByRole('button', { name: '아직 모름' }));
+  assert.equal(targetSource(), '미정');
+  assert.ok(screen.getByText('그래서 달성률은 계산하지 않았어요. 지금 조건이면 5년 후 예상 자산은 46,669,685원이에요.'));
+  fireEvent.click(screen.getByRole('button', { name: '항목별로 나눠 보기' }));
+  // Compare ids: a failed DOM-node comparison makes assert render the whole jsdom tree.
+  await waitFor(() => assert.equal(document.activeElement?.id, 'goal-item-0-label'));
+  assert.equal(screen.getByRole('button', { name: '항목 합산' }).getAttribute('aria-pressed'), 'true');
+  fireEvent.change(screen.getByLabelText('항목 1 이름'), { target: { value: '예식' } });
+  fireEvent.change(screen.getByLabelText('항목 1 금액'), { target: { value: '20000000' } });
+  fireEvent.click(screen.getByRole('button', { name: '+ 항목 추가' }));
+  fireEvent.change(screen.getByLabelText('항목 2 금액'), { target: { value: '8000000' } });
+  assert.equal(targetInput().value, '28,000,000');
+  assert.ok(screen.getByText('= 예식 2,000만 원 + 항목 2 800만 원'));
+  fireEvent.click(screen.getByRole('button', { name: '항목 2 삭제' }));
+  assert.equal(targetInput().value, '20,000,000');
+  fireEvent.change(targetInput(), { target: { value: '30000000' } });
+  assert.equal(screen.getByRole('button', { name: '직접 입력' }).getAttribute('aria-pressed'), 'true');
+  assert.equal(targetSource(), '직접 입력');
+});
+
+test('travel items multiply by travelers, nights and days and name the trip in the result', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '여행' }));
+  fireEvent.change(screen.getByLabelText('여행지'), { target: { value: '오사카' } });
+  fireEvent.click(screen.getByRole('button', { name: '항목별 계산' }));
+  for (const [label, value] of [['인원', '2'], ['박 수', '3'], ['항공권(1인 왕복)', '600000'], ['숙박비(1박 전체)', '150000'], ['현지 경비(1인 1일)', '100000']] as const) {
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+  }
+  assert.equal((screen.getByLabelText('일 수') as HTMLInputElement).placeholder, '4');
+  assert.equal(targetInput().value, '2,450,000');
+  assert.ok(screen.getByText('= 항공권(1인 × 2명) 120만 원 + 숙박(3박) 45만 원 + 현지 경비(2명 × 4일) 80만 원'));
+  assert.ok(screen.getByText('기타 비용: 입력하지 않아 0원으로 계산했어요.'));
+  assert.ok(screen.getByText('여행(오사카, 2명, 3박 4일) · 상세 계산 245만 원'));
+});
+
+test('new calculation returns the goal planner to the free-goal example', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  fireEvent.click(screen.getByRole('button', { name: '자기자본' }));
+  fireEvent.click(screen.getByRole('button', { name: '새로 계산하기' }));
+  assert.equal(screen.getByRole('button', { name: '자유 목표' }).getAttribute('aria-pressed'), 'true');
+  assert.equal(targetInput().value, '50,000,000');
+  assert.equal(targetSource(), '예시 금액');
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  assert.equal(screen.getByRole('button', { name: '집값 전체' }).getAttribute('aria-pressed'), 'true');
+});
+
 test('malformed news data shows an error instead of crashing the news screen', async () => {
   globalThis.fetch = (async () => response({ ...newsFixture(), status: ['ready'], positiveFactors: null })) as typeof fetch;
   open('news');
