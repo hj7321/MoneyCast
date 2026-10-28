@@ -172,6 +172,8 @@ Marketaux에는 최근 7일의 영어·한국어 기사 중 이 회사와 가장
 
 AI 품질 평가는 `npm run ai:check -- nasdaq:AAPL krx:005930`으로 합니다. 서버 없이 루트 `.env`의 키로 출처와 두 모델을 직접 불러, Marketaux 점수가 있는 기사까지 모든 기사의 방향을 두 모델에 판단시킵니다(화면에는 반영하지 않음). 출처는 예약 수집과 같은 경로로 불러 GDELT도 조회합니다(호출 제한 429가 나올 수 있음). 번호별 두 모델의 판단·근거 구절·Gemini 요약과 앱에 반영될 결과(점수 기사는 '점수 유지' 또는 '관련 없음 합의(요인 제외)'), 두 모델 일치율·Marketaux 점수와의 방향 일치·검증에서 버리거나 자른 사유를 출력합니다. 회사는 최대 4개이며, 회사당 Marketaux 1~2회·GDELT 1회·Gemini 1회·Cloudflare 1회를 씁니다. 명령 자체는 키를 출력하지 않습니다. 키 설정 전에는 `not_configured`와 기사 0건이 정상이며 실제 연결 성공을 뜻하지 않습니다.
 
+목표 설명 AI 정리의 품질은 `npm run goal:check`로 평가합니다(모델 하나만: `npm run goal:check -- cloudflare`). 서버 없이 루트 `.env`의 키로, 실제 사람의 정보가 없는 예시 설명 19건을 운영과 같은 프롬프트(`goal-clarify-v1`)와 검증으로 모델마다 한 번씩 보내고, 기대한 분류·값과 기기 안 규칙의 결과를 나란히 출력합니다. 분류가 맞은 건수, 금액·기간·인원·박이 모두 맞은 건수, 검증에서 버린 사유, 실패와 평균 응답 시간을 집계하며 화면에는 반영하지 않습니다. 모델마다 호출 19회를 쓰고, 호출당 사용량(토큰·Neurons)은 각 서비스의 대시보드에서 확인해야 합니다. 아직 실제 키로 실행한 기록은 없습니다.
+
 ### AI 교차 판단과 요약
 
 감성 점수가 없는 기사(GDELT 기사, 점수 없는 Marketaux 기사)는 두 무료 LLM이 **서로의 답을 보지 않고 병렬로** 판단합니다. 최종 결과는 어느 한 모델이 아니라 아래 규칙으로 정합니다. Marketaux 점수가 있는 기사도 두 모델이 같은 방식으로 판단하지만, 점수는 그대로 두고 두 번째 표의 경우에만 바꿉니다. 2026-10-28 점검에서 업종 시황·다른 회사 기사에 점수가 붙거나, 점수가 제목과 정반대인 경우가 있었기 때문입니다.
@@ -290,11 +292,14 @@ apps/web/src/FeatureIntro.tsx 계산기·뉴스 소개 화면
 apps/web/src/navigation.css  접기·펼치기 및 제목 영역 배치
 apps/web/src/GrowthChart.tsx  SVG 차트·월별 탐색
 apps/web/src/GoalPlanner.tsx  목표 유형·상세 입력·목표 금액 출처
+apps/web/src/GoalAssist.tsx   자유 목표 설명 카드·질문·AI 정리 버튼
 apps/web/src/NewsPanel.tsx    회사 검색·뉴스 상태·기사
 apps/web/src/styles.css      반응형 디자인
 apps/mobile/App.tsx          Expo 네이티브 계산·뉴스 화면
 packages/core/src/index.ts   공용 계산·검증·검색·데이터 계약
 packages/core/src/goals.ts   목표 유형별 상세 입력과 목표 금액 산정
+packages/core/src/goal-text.ts 설명의 금액·기간·인원·분류를 읽는 규칙
+packages/core/src/goal-clarify.ts AI 정리 응답 계약·검증
 server/provider.ts           공용 응답 검증·게이트웨이 어댑터
 server/marketaux.ts          Marketaux 기업 식별·기사·감성 연동
 server/gdelt.ts              GDELT DOC 2.0 기사 목록 연동
@@ -304,12 +309,14 @@ server/synthesis.ts          긍정·부정 요인의 규칙 기반 종합
 server/llm.ts                AI 판단 요청·검증·합의 규칙
 server/llm-gemini.ts         Gemini 어댑터
 server/llm-cloudflare.ts     Cloudflare Workers AI 어댑터
+server/goal-clarify.ts       목표 설명 AI 정리(선택)
 server/snapshot-store.ts     비공개 Blob 스냅샷
 server/collect.ts            예약 수집
 server/service.ts            근거 수준·주간·캐시·이전 결과
 server/app.ts                HTTP API·예약 수집 경로
 server/static.ts             웹 빌드 파일 제공
 scripts/check-news.ts        실제 로컬 뉴스 연결 진단
+scripts/check-goal.ts        목표 설명 AI 정리 평가
 ```
 
 회사 목록은 정적 식별 자료이며 완전한 상장 종목 검색이 아닙니다. API 캐시는 서버 메모리·배포 CDN·비공개 Blob 스냅샷(최근 7일)에, 웹 캐시는 브라우저에 한시 보관하며 분석 이력의 영구 저장·사후 수익률 비교는 아직 없습니다. 기사 데이터는 공개 Git 저장소에 커밋하지 않습니다. `asOf`·기사 ID/URL/시각·회사 ID·제공자·분석 버전 구조로 향후 확장할 수 있습니다. 웹은 WOFF2, 앱은 TTF 형식의 IBM Plex Sans KR 파일을 포함하므로 외부 폰트 서비스 연결 없이 로드합니다. 글꼴 로딩에 실패하면 시스템 글꼴로 대체합니다.
