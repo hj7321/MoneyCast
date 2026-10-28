@@ -171,7 +171,7 @@ export function NewsPanel() {
                   setFocusId(id);
                 }}/>
                 {shown.articles.length === 0 && <div className="article-empty">수집 기간에 확인된 기사가 없습니다.</div>}
-                {shown.articles.some(article => article.sentiment === 'unclassified') && <p className="news-provider-note">{shown.ai ? '미분류·잠정·판단 유보 기사는 긍정·부정 요인 집계에서 제외합니다. AI 판단은 두 모델이 같을 때만 집계합니다.' : '미분류 기사는 긍정·부정 요인 집계에서 제외합니다.'}</p>}
+                {shown.articles.some(article => article.sentiment === 'unclassified') && <p className="news-provider-note">{shown.ai ? '미분류·잠정·판단 유보 기사는 긍정·부정 요인 집계에서 제외합니다.' : '미분류 기사는 긍정·부정 요인 집계에서 제외합니다.'}</p>}
                 <div className="article-list">{(expanded ? shown.articles : shown.articles.slice(0, VISIBLE_ARTICLES)).map((article, index) => <ArticleCard key={article.id} article={article} index={index} provider={shown.provider}/>)}</div>
                 {shown.articles.length > VISIBLE_ARTICLES && <button type="button" className="article-more" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? '기사 접기' : `기사 ${shown.articles.length - VISIBLE_ARTICLES}건 더 보기`}</button>}
                 <div className="risk-box"><h4>전망이 빗나갈 수 있는 이유</h4>{shown.risks.map((s, i) => <p key={i}>{s}</p>)}</div>
