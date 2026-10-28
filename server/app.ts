@@ -64,7 +64,12 @@ function clientAddress(request: IncomingMessage): string {
   return (typeof real === 'string' && real.trim()) || first || request.socket.remoteAddress || 'unknown';
 }
 
-/** JSON only, within the byte limit; the body is never logged. */
+/**
+ * JSON only, within the byte limit; the body is never logged. Read through
+ * 'data' and 'end' listeners: the Vercel Node runtime reads the stream before
+ * the handler runs and replays the body only to those listeners, so async
+ * iteration would see an empty, already destroyed stream there.
+ */
 async function readJsonBody(request: IncomingMessage): Promise<{ value: unknown } | { status: 400 | 413 | 415 }> {
   if (!/^application\/json\b/i.test(request.headers['content-type'] ?? '')) return { status: 415 };
   const declared = Number(request.headers['content-length']);
@@ -72,18 +77,23 @@ async function readJsonBody(request: IncomingMessage): Promise<{ value: unknown 
     request.resume();
     return { status: 413 };
   }
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    size += (chunk as Buffer).length;
-    if (size > GOAL_BODY_LIMIT_BYTES) {
-      request.resume();
-      return { status: 413 };
-    }
-    chunks.push(chunk as Buffer);
-  }
+  const read = await new Promise<{ body: Buffer } | { status: 400 | 413 }>(resolve => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    request.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      // The rest keeps flowing and is dropped.
+      if (size > GOAL_BODY_LIMIT_BYTES) resolve({ status: 413 });
+      else chunks.push(chunk);
+    });
+    request.on('end', () => resolve({ body: Buffer.concat(chunks) }));
+    // A body cut off before its end is not answered as a request.
+    request.on('error', () => resolve({ status: 400 }));
+    request.on('close', () => { if (!request.complete) resolve({ status: 400 }); });
+  });
+  if ('status' in read) return read;
   try {
-    return { value: JSON.parse(Buffer.concat(chunks).toString('utf8')) };
+    return { value: JSON.parse(read.body.toString('utf8')) };
   } catch {
     return { status: 400 };
   }
