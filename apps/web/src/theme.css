@@ -9,13 +9,17 @@
   --accent: #acdbb8;
   --surface: #203536;
   --surface-soft: #263d3b;
+  --surface-secondary: #263d37;
+  --line-secondary: #466054;
   --surface-well: #142729;
   --surface-featured: #2d493f;
-  --featured-gradient: linear-gradient(125deg, #28473f, #36544a);
+  --panel-gradient: radial-gradient(ellipse at 110% 0%, rgb(142 181 147 / 12%), transparent 72%);
+  --featured-gradient: radial-gradient(ellipse at 110% 10%, #46624e, transparent 75%);
+  --well-gradient: radial-gradient(ellipse at 110% 0%, rgb(112 157 133 / 9%), transparent 72%);
+  --notice-gradient: radial-gradient(ellipse at 110% 0%, rgb(193 174 120 / 12%), transparent 75%);
+  --positive-gradient: radial-gradient(ellipse at 110% 0%, rgb(229 72 77 / 16%), transparent 75%);
+  --negative-gradient: radial-gradient(ellipse at 110% 0%, rgb(52 120 246 / 16%), transparent 75%);
   --line-featured: #668675;
-  --surface-article: #29413f;
-  --line-article: #46605a;
-  --article-accent: #83a890;
   --line: #3d5651;
   --card-line: #405b54;
   --shadow-card: 0 2px 4px #08171918, 0 8px 20px #0817191c;
@@ -39,6 +43,7 @@
 }
 
 .main-shell { min-height: 100vh; background: #192d2e; color: var(--text-primary); }
+.main-shell .eyebrow { color: var(--supporting-text); }
 .main-shell :is(h1, h2, h3, h4) { color: var(--text-primary); }
 .main-shell h1 span { color: var(--accent); }
 .topbar { background: #1b3031; border-color: var(--line); box-shadow: 0 2px 8px #0817191a; }
@@ -112,7 +117,9 @@
 .page-footer { color: var(--supporting-text); }
 
 /* Controls keep their original geometry and use clear, opaque dark surfaces. */
-.card { background: var(--surface); border-color: var(--card-line); border-radius: 14px; box-shadow: var(--shadow-card); }
+/* Theme colors switch in one paint; pressed-button movement stays animated. */
+button, .news-promo { transition: transform .17s; }
+.card { background: var(--surface); background-image: var(--panel-gradient); border-color: var(--card-line); border-radius: 14px; box-shadow: var(--shadow-card); }
 .outline-button, .primary-button, .icon-button { border-radius: 8px; }
 .outline-button { border-color: #4c695c; background: #263d37; color: #dcebdd; font-size: 14px; min-height: 44px; }
 .outline-button:hover { background: #324b41; border-color: #7c9d86; }
@@ -157,7 +164,7 @@
 /* Recessed output wells, raised working panels and one shared primary surface. */
 .surface-label { display: block; margin-bottom: 10px; color: #b6d1ba; font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .result-label { margin: 0 0 -4px; color: #bdd1c2; }
-.calculator-card { background: #233a34; border-color: #496555; }
+.calculator-card { background: #233a34; background-image: var(--panel-gradient); border-color: #496555; }
 .calculator-card .section-heading { margin-bottom: 18px; }
 .form-note { background: #1c322b; border-color: #405a49; border-radius: 0 0 14px 14px; }
 .results-column, .news-main {
@@ -170,21 +177,21 @@
 }
 .results-column { gap: 18px; }
 .stat-grid { gap: 12px; }
-.stat-card { border-color: #466054; border-radius: 12px; background: #263d37; box-shadow: 0 2px 4px #08171922; }
+.stat-card { border-color: var(--line-secondary); border-radius: 12px; background: var(--surface-secondary); background-image: var(--panel-gradient); box-shadow: 0 2px 4px #08171922; }
 .stat-card.featured { background: var(--surface-featured); background-image: var(--featured-gradient); border-color: var(--line-featured); box-shadow: var(--shadow-primary); }
 .stat-label { line-height: 1.5; }
 .stat-label svg { color: #c0ddc2; }
 .stat-value { font-weight: 650; }
 .stat-decoration { opacity: .38; }
-.results-column .chart-card, .analysis-card { background: var(--surface); border-color: #4a6659; box-shadow: var(--shadow-primary); }
+.results-column .chart-card, .analysis-card { background: var(--surface); background-image: var(--panel-gradient); border-color: #4a6659; box-shadow: var(--shadow-primary); }
 .principal-summary { background: #1c312e; border-color: var(--line); }
 .principal-summary strong { color: #e4eee1; font-weight: 600; font-variant-numeric: tabular-nums; }
-.results-column .goal-result { background: #263e33; border-color: #486350; box-shadow: none; border-radius: 12px; }
+.results-column .goal-result { background: #263e33; background-image: var(--panel-gradient); border-color: #486350; box-shadow: none; border-radius: 12px; }
 .goal-result h3 { color: #e2ecdc; line-height: 1.65; }
 .goal-result h3 strong { color: #c5e5ba; }
 .goal-result-icon { display: none; }
-.scenario { background: #263b34; border-color: #4b6356; border-radius: 8px; }
-.scenario.base { background: #35503e; border-color: #729679; }
+.scenario { background: #263b34; background-image: var(--panel-gradient); border-color: #4b6356; border-radius: 8px; }
+.scenario.base { background: #35503e; background-image: var(--panel-gradient); border-color: #729679; }
 .scenario strong { color: #ecf3e7; font-variant-numeric: tabular-nums; }
 .chart-current strong, .chart-slider strong { color: #bce5c4; }
 .chart-slider { border-color: var(--line); }
@@ -196,12 +203,12 @@
 .chart-invalid { color: #dec8a9; }
 .chart-invalid h3 { color: #f1dfc6; }
 
-/* News: the summary shares the primary result gradient; evidence remains explicit. */
+/* News uses the secondary result surface, with meaning carried by labels and chips. */
 .analysis-header { align-items: flex-start; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
 .analysis-header > div { min-width: 0; }
 .analysis-header h2 { overflow-wrap: anywhere; }
 .analysis-header > button { flex-shrink: 0; }
-.evidence-summary { margin: 22px 0 18px; padding: 20px; border-color: var(--line-featured); border-radius: 10px; background: var(--surface-featured); background-image: var(--featured-gradient); box-shadow: none; }
+.evidence-summary { margin: 22px 0 18px; padding: 20px; border-color: var(--line-secondary); border-radius: 10px; background: var(--surface-secondary); background-image: var(--panel-gradient); box-shadow: none; }
 .evidence-summary h3, .evidence-summary p { line-height: 1.75; }
 .factor-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 22px; }
 .factor-grid > div { min-width: 0; border: 1px solid; border-radius: 10px; padding: 17px 18px; }
@@ -216,13 +223,15 @@
 @media (prefers-reduced-motion: reduce) { .factor-grid .factor-direction { animation: none; } }
 .factor-grid p { line-height: 1.8; overflow-wrap: anywhere; }
 .article-list { display: grid; gap: 12px; }
-.article-list article { min-width: 0; border: 1px solid var(--line-article); border-left: 3px solid var(--article-accent); border-radius: 10px; background: var(--surface-article); padding: 18px; box-shadow: none; }
+.article-list article { min-width: 0; border: 1px solid var(--line-secondary); border-left-width: 3px; border-radius: 10px; background: var(--surface-secondary); background-image: var(--panel-gradient); padding: 18px; box-shadow: none; }
 .article-list article p { line-height: 1.8; }
 .article-list h3 { line-height: 1.7; }
 .article-meta { gap: 8px 10px; line-height: 1.8; }
 .risk-box { margin: 18px 0 22px; border-color: #686346; border-radius: 10px; background: #383d30; }
 .risk-box h4, .risk-box p { color: #eee3c8; }
 .risk-box p { line-height: 1.8; margin-top: 6px; }
+.news-main .risk-box { background: #263e33; background-image: var(--panel-gradient); border-color: #486350; }
+.news-main .risk-box :is(h4, p) { color: var(--text-primary); }
 .analysis-footer { line-height: 1.8; border-color: var(--line); }
 .investment-notice { padding: 16px 4px 0; line-height: 1.85; }
 .empty-state h3 { color: #e4eddd; }
@@ -247,12 +256,12 @@
 /* The lower navigation and cross-feature link use the same quiet dark surfaces. */
 .page-footer { border-color: var(--line); }
 .page-footer strong { color: #dceadc; }
-.news-promo { background: #294136; border-color: #4e6d56; color: #e2edda; }
+.news-promo { background: #294136; background-image: var(--panel-gradient); border-color: #4e6d56; color: #e2edda; }
+.news-promo:is(:hover, :focus-visible) { background: #314b3d; background-image: var(--panel-gradient); border-color: #77987e; }
 .news-promo small, .news-promo > span > span { color: #b6cfb8; }
 .news-promo strong { color: #e9f2e2; }
 .news-promo-icon { background: #3c5742; color: #c8e4bc; }
 .promo-decoration { color: #8daf8e; opacity: .18; }
-.assumptions-note .note-icon { background: #2d4338; border-color: #49614d; }
 .mobile-nav { background: #1b3031; border-color: #496254; backdrop-filter: none; box-shadow: 0 -4px 16px #08171924; }
 .mobile-nav button { color: #b1c4b6; }
 .mobile-nav button.active { color: #d6edcc; }
@@ -260,7 +269,7 @@
 
 /* Feature introductions keep their established layouts and use matching surfaces. */
 .feature-intro { --fi-accent: #acdbb8; --fi-ink: #edf4ed; --fi-muted: #b5c5bb; }
-.feature-intro .fi-hero { background: var(--featured-gradient); border-color: #5a7d68; }
+.feature-intro .fi-hero { background: var(--surface-featured); background-image: var(--featured-gradient); border-color: #5a7d68; }
 .feature-intro .fi-preview { background: #213b35; border-color: #66836c; box-shadow: var(--shadow-primary); }
 .feature-intro .fi-preview-heading, .feature-intro .fi-preview-title > span, .feature-intro .fi-preview-legend, .feature-intro .fi-preview-caption { color: #bfd1c0; }
 .feature-intro .fi-preview-heading, .feature-intro .fi-preview-inputs { border-color: #4c6957; }
@@ -317,6 +326,15 @@
 .unrelated-articles { margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-well); padding: 10px 14px; }
 .unrelated-articles summary { cursor: pointer; color: var(--supporting-text); font-size: 15px; line-height: 1.6; }
 .unrelated-articles .article-list { margin-top: 10px; }
+
+/* Supporting boxes share the same quiet corner light, including semantic panels. */
+:is(.form-note, .principal-summary, .connection-notice),
+.feature-intro :is(.fi-preview, .fi-step, .fi-transparency, .fi-uncertainty) { background-image: var(--panel-gradient); }
+:is(.results-column, .news-main, .unrelated-articles) { background-image: var(--well-gradient); }
+:is(.risk-box, .stale-banner),
+.feature-intro .fi-pending-state { background-image: var(--notice-gradient); }
+.factor-grid > .factor-positive { background-image: var(--positive-gradient); }
+.factor-grid > .factor-negative { background-image: var(--negative-gradient); }
 
 @media (min-width: 1041px) and (max-width: 1280px) {
   .factor-grid { grid-template-columns: 1fr; }

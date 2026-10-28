@@ -1,0 +1,187 @@
+/* The previous light workspace is an explicit choice; the sidebar keeps its brand palette. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  color: #233c35;
+  background: #f5f7f5;
+  --text-primary: #111;
+  --supporting-text: #626e69;
+  --muted: #626e69;
+  --accent: #387d5b;
+  --surface: #fff;
+  --surface-soft: #f6f8f6;
+  --surface-secondary: #fff;
+  --line-secondary: #dce5df;
+  --surface-well: #edf2ef;
+  --surface-featured: #e4f0e7;
+  --panel-gradient: radial-gradient(ellipse at 110% 0%, rgb(126 168 138 / 20%), transparent 72%);
+  --featured-gradient: radial-gradient(ellipse at 110% 10%, rgb(141 188 155 / 32%), transparent 75%);
+  --well-gradient: radial-gradient(ellipse at 110% 0%, rgb(153 190 168 / 18%), transparent 72%);
+  --notice-gradient: radial-gradient(ellipse at 110% 0%, rgb(213 185 125 / 18%), transparent 75%);
+  --positive-gradient: radial-gradient(ellipse at 110% 0%, rgb(229 72 77 / 14%), transparent 75%);
+  --negative-gradient: radial-gradient(ellipse at 110% 0%, rgb(52 120 246 / 14%), transparent 75%);
+  --line-featured: #b9d3c1;
+  --line: #dfe7e1;
+  --card-line: #d8e2db;
+  --shadow-card: 0 2px 4px #18372f05, 0 8px 20px #18372f06;
+  --shadow-primary: 0 2px 4px #18372f08, 0 10px 24px #18372f0a;
+  --positive-soft: rgb(229 72 77 / 5%);
+  --negative-soft: rgb(52 120 246 / 5%);
+  --chart-grid: #e0e7e2;
+  --chart-axis: #626e69;
+  --chart-area-top: #79c991;
+  --chart-area-bottom: #a9dfbb;
+  --chart-principal-fill: #e9eeec;
+  --chart-principal: #91a59a;
+  --chart-balance: #398660;
+  --chart-target: #bd8b57;
+  --chart-target-bg: #fcf0e0;
+  --chart-target-text: #845728;
+  --chart-cursor: #6d9b7a;
+  --chart-dot-outline: #fff;
+}
+
+:root[data-theme="light"] .main-shell { background: #f5f7f5; color: #233c35; }
+:root[data-theme="light"] .main-shell h1 { color: #233d33; }
+:root[data-theme="light"] .main-shell h1 span { color: #60876a; }
+:root[data-theme="light"] .topbar { background: #fcfcf9; box-shadow: 0 2px 8px #18372f06; }
+:root[data-theme="light"] .breadcrumb strong { color: #3b4d43; }
+:root[data-theme="light"] .avatar { color: #556e48; background: #f0f3e9; border-color: #d5dfcf; }
+:root[data-theme="light"] .main-shell .mobile-brand .brand { color: #2c503a; }
+:root[data-theme="light"] .main-shell .mobile-brand .brand-dot { color: #62925d; }
+
+/* Opaque, light controls retain the same size, placement and keyboard behavior. */
+:root[data-theme="light"] .outline-button { border-color: #cddbd0; background: #fff; color: #365f47; }
+:root[data-theme="light"] .outline-button:hover { background: #edf4ef; border-color: #aac4b2; }
+:root[data-theme="light"] .primary-button { background: #326e50; color: #fff; }
+:root[data-theme="light"] .primary-button:hover { background: #285e43; }
+:root[data-theme="light"] .icon-button { color: #52715f; border-color: #dfe7e1; background: #fff; }
+:root[data-theme="light"] .icon-button:hover { background: #edf4e7; }
+:root[data-theme="light"] .sidebar-toggle.icon-button { color: #365d48; background: #f4f7ef; border-color: #dfe7e1; }
+:root[data-theme="light"] .sidebar-toggle.icon-button:hover { background: #e7efdf; }
+:root[data-theme="light"] :is(.input-wrap, .search-input) { border-color: #cdd9d0; background: #fff; }
+:root[data-theme="light"] .input-wrap input { color: #304a37; }
+:root[data-theme="light"] .search-input input { color: #344c3d; }
+:root[data-theme="light"] .search-input { color: #627968; }
+:root[data-theme="light"] .search-input input::placeholder { color: #68776b; }
+:root[data-theme="light"] .search-input button { color: #58705f; }
+:root[data-theme="light"] :is(.input-wrap, .search-input):focus-within { border-color: #4a805e; box-shadow: 0 0 0 3px #387d5b19; }
+:root[data-theme="light"] .input-wrap.invalid { border-color: #bc7056; background: #fff9f5; }
+:root[data-theme="light"] .error-text { color: #a54837 !important; }
+:root[data-theme="light"] .field label { color: #344c3d; }
+:root[data-theme="light"] .field-tag { background: #e9f0e5; }
+:root[data-theme="light"] .goal-picker button { border-color: #dfe7e1; background: #fff; color: #546957; }
+:root[data-theme="light"] .goal-picker button:hover { background: #f0f5ed; }
+:root[data-theme="light"] .goal-picker button.chosen { border-color: #78a287; background: #eaf3ed; color: #315e43; }
+:root[data-theme="light"] :is(.period-slider, .chart-slider input) { accent-color: #578d5b; }
+:root[data-theme="light"] .switch { background: #cdd8c7; }
+:root[data-theme="light"] .scenario-toggle input:checked + .switch { background: #608e67; }
+:root[data-theme="light"] .scenario-toggle input:checked + .switch::after { background: #fff; }
+:root[data-theme="light"] .company-option strong { color: #36513f; }
+:root[data-theme="light"] .company-option > svg { color: #608067; }
+:root[data-theme="light"] .company-option:hover { background: #f2f6ef; }
+:root[data-theme="light"] .company-option.selected { background: #edf4ef; border-color: #bbd1c2; }
+:root[data-theme="light"] .company-logo { background: #e8efdf; color: #55763f; }
+:root[data-theme="light"] .company-logo.us { background: #ede9dc; color: #806c3d; }
+:root[data-theme="light"] .company-logo.company-logo-image { background: #fff; border-color: #e5ebe4; }
+:root[data-theme="light"] .main-shell :is(button, a, summary, input):focus-visible { outline-color: #387d5b; }
+
+/* Mint primary results and blue-gray articles match the last light design. */
+:root[data-theme="light"] .surface-label { color: #467252; }
+:root[data-theme="light"] .result-label { color: #52685a; }
+:root[data-theme="light"] .calculator-card { background: #f0f6f1; background-image: var(--panel-gradient); border-color: #cedfd1; }
+:root[data-theme="light"] .form-note { background: #e9f1ea; border-color: #d8e5da; }
+:root[data-theme="light"] :is(.results-column, .news-main) { border-color: #dae4dd; box-shadow: inset 0 1px 3px #18372f05; }
+:root[data-theme="light"] .stat-card { border-color: var(--line-secondary); background: var(--surface-secondary); background-image: var(--panel-gradient); box-shadow: 0 2px 4px #18372f06; }
+:root[data-theme="light"] .stat-card.featured { background: var(--surface-featured); background-image: var(--featured-gradient); border-color: var(--line-featured); box-shadow: var(--shadow-primary); }
+:root[data-theme="light"] .stat-label svg { color: #68866d; }
+:root[data-theme="light"] .stat-decoration { opacity: .3; }
+:root[data-theme="light"] :is(.results-column .chart-card, .analysis-card) { border-color: #ccdcd1; }
+:root[data-theme="light"] .principal-summary { background: #f6f8f6; }
+:root[data-theme="light"] .principal-summary strong { color: #344f3e; }
+:root[data-theme="light"] .results-column .goal-result { background: #f7faf7; background-image: var(--panel-gradient); border-color: #d0ded3; }
+:root[data-theme="light"] .goal-result h3 { color: #36543f; }
+:root[data-theme="light"] .goal-result h3 strong { color: #315c3d; }
+:root[data-theme="light"] .scenario { background: #f6f8f6; background-image: var(--panel-gradient); border-color: #dfe7e1; }
+:root[data-theme="light"] .scenario.base { background: #eaf3ed; background-image: var(--panel-gradient); border-color: #c4d9cb; }
+:root[data-theme="light"] .scenario strong { color: #304b38; }
+:root[data-theme="light"] :is(.chart-current strong, .chart-slider strong) { color: #3c704b; }
+:root[data-theme="light"] .chart-invalid { color: #826349; }
+:root[data-theme="light"] .chart-invalid h3 { color: #6d5038; }
+:root[data-theme="light"] .factor-positive .factor-direction { color: #e5484d; }
+:root[data-theme="light"] .factor-negative .factor-direction { color: #3478f6; }
+:root[data-theme="light"] .risk-box { border-color: #e7dfce; background: #faf8f2; }
+:root[data-theme="light"] .risk-box :is(h4, p) { color: #111; }
+:root[data-theme="light"] .news-main .risk-box { background: #edf3ed; background-image: var(--panel-gradient); border-color: #d0ded3; }
+:root[data-theme="light"] .news-main .risk-box :is(h4, p) { color: #36543f; }
+:root[data-theme="light"] .empty-state h3 { color: #3e5f37; }
+:root[data-theme="light"] .state-illustration { background: #edf3e6; border-color: #d6e3cd; color: #567d46; }
+:root[data-theme="light"] .state-illustration.orange { background: #fbf4e6; border-color: #eee1ca; color: #97763e; }
+:root[data-theme="light"] .illustration-dot { background: #91ad7a; border-color: #edf3e6; }
+:root[data-theme="light"] .connection-notice { background: #f0f5e9; }
+:root[data-theme="light"] .status-badge { background: #edf3e5; color: #466239; }
+:root[data-theme="light"] .status-badge.orange { background: #faf1e4; color: #806137; }
+:root[data-theme="light"] :is(.search-empty, .article-empty) { color: #626e69; }
+:root[data-theme="light"] .setup-details a { color: #366c47; }
+:root[data-theme="light"] .main-shell code { background: #edf2e8; color: #416238; }
+:root[data-theme="light"] :is(.guide-card > p, .guide-card dd) { color: #626e69; }
+:root[data-theme="light"] .guide-card dt { color: #36563f; }
+
+:root[data-theme="light"] :is(.sentiment.positive, .status-positive, .feature-intro .fi-sentiment-row > span:first-child) { background: #fceced; color: #b62d32; }
+:root[data-theme="light"] :is(.sentiment.negative, .status-negative, .feature-intro .fi-sentiment-row > span:nth-child(2)) { background: #edf3ff; color: #245bb7; }
+:root[data-theme="light"] :is(.sentiment.neutral, .status-neutral, .feature-intro .fi-sentiment-row > span:nth-child(3)) { background: #fff3cc; color: #816115; }
+:root[data-theme="light"] .sentiment.unclassified { background: #edf0ef; color: #53645c; }
+:root[data-theme="light"] .sentiment.withheld { background: #eee8f7; color: #665083; }
+:root[data-theme="light"] .sentiment.unrelated { background: #edf0ee; color: #52645b; }
+:root[data-theme="light"] .stale-banner { background: #faf6ec; border-color: #e6d9bc; }
+:root[data-theme="light"] .stale-banner p { color: #6c5a34; }
+:root[data-theme="light"] .stale-retry { border-color: #b29d70; color: #70572f; }
+
+:root[data-theme="light"] .page-footer strong { color: #36563f; }
+:root[data-theme="light"] .news-promo { background: #edf2e8; background-image: var(--panel-gradient); border-color: #dae4d3; color: #36583d; }
+:root[data-theme="light"] .news-promo:is(:hover, :focus-visible) { background: #e3ecdf; background-image: var(--panel-gradient); border-color: #aac1a7; }
+:root[data-theme="light"] :is(.news-promo small, .news-promo > span > span) { color: #4f6549; }
+:root[data-theme="light"] .news-promo strong { color: #36583d; }
+:root[data-theme="light"] .news-promo-icon { background: #e3ecdb; color: #527844; }
+:root[data-theme="light"] .promo-decoration { color: #adc2a0; }
+:root[data-theme="light"] .mobile-nav { background: #fff; border-color: #dfe7e1; box-shadow: 0 -4px 16px #18372f08; }
+:root[data-theme="light"] .mobile-nav button { color: #626e69; }
+:root[data-theme="light"] .mobile-nav button.active { color: #3d703f; }
+:root[data-theme="light"] .mobile-nav button.active::before { background: #5c8950; }
+
+/* The introductory hero remains a green brand surface in either mode. */
+:root[data-theme="light"] .feature-intro { --fi-accent: #387d5b; --fi-ink: #193d35; --fi-muted: #596f61; }
+:root[data-theme="light"] .feature-intro .fi-hero { background: linear-gradient(125deg, #193e40, #25554f); border-color: #285850; }
+:root[data-theme="light"] .feature-intro .fi-hero h2 { color: #f2f8ee; }
+:root[data-theme="light"] .feature-intro .fi-preview { background: #fff; border-color: #e3eae1; box-shadow: var(--shadow-primary); }
+:root[data-theme="light"] .feature-intro :is(.fi-preview-heading, .fi-preview-title > span, .fi-preview-legend, .fi-preview-caption) { color: #596f61; }
+:root[data-theme="light"] .feature-intro :is(.fi-preview-heading, .fi-preview-inputs) { border-color: #e7eee5; }
+:root[data-theme="light"] .feature-intro :is(.fi-preview-heading > svg, .fi-evidence-row > svg) { color: #587d60; }
+:root[data-theme="light"] .feature-intro .fi-preview-title > strong { color: #315c42; }
+:root[data-theme="light"] .feature-intro .fi-preview-inputs { color: #536d59; }
+:root[data-theme="light"] .feature-intro :is(.fi-section-heading > span, .fi-step-number) { color: #596f61; }
+:root[data-theme="light"] .feature-intro .fi-section-heading h2 { color: #193d35; }
+:root[data-theme="light"] .feature-intro .fi-step { background: #fff; border-color: #e0e8dc; }
+:root[data-theme="light"] .feature-intro :is(.fi-step-icon, .fi-evidence-icon) { background: #edf5e9; color: #4d7e55; }
+:root[data-theme="light"] .feature-intro :is(.fi-step h3, .fi-evidence-row strong) { color: #365a41; }
+:root[data-theme="light"] .feature-intro .fi-transparency { background: #edf2e8; border-color: #e1e8da; }
+:root[data-theme="light"] .feature-intro .fi-transparency-icon { color: #557647; }
+:root[data-theme="light"] .feature-intro .fi-transparency h3 { color: #496740; }
+:root[data-theme="light"] .feature-intro :is(.fi-transparency p, .fi-guide-row > p, .fi-evidence-row > div > span) { color: #596f61; }
+:root[data-theme="light"] .feature-intro .fi-guide-row > button { color: #3d714d; }
+:root[data-theme="light"] .feature-intro .fi-evidence-row { border-color: #e8eee7; color: #587263; }
+:root[data-theme="light"] .feature-intro .fi-uncertainty { background: #f0f5e9; border-color: #dce6d6; color: #526d47; }
+:root[data-theme="light"] .feature-intro .fi-uncertainty strong { color: #45613c; }
+:root[data-theme="light"] .feature-intro .fi-pending-state { background: #fbf3e8; color: #7a5c32; }
+:root[data-theme="light"] .feature-intro .fi-preview-goal-label { background: #fbf0df; color: #845f30; }
+:root[data-theme="light"] .feature-intro .fi-preview-chart path[fill="#d8ecdc"] { fill: #d8ecdc; }
+:root[data-theme="light"] .feature-intro .fi-preview-chart path[fill="#e8eeea"] { fill: #e8eeea; }
+:root[data-theme="light"] .feature-intro .fi-preview-chart circle[fill="#398660"] { fill: #398660; stroke: #fff; }
+
+/* Keep the corner shading visible on every light content surface. */
+:root[data-theme="light"] :is(.form-note, .principal-summary, .connection-notice),
+:root[data-theme="light"] .feature-intro :is(.fi-preview, .fi-step, .fi-transparency, .fi-uncertainty) { background-image: var(--panel-gradient); }
+:root[data-theme="light"] :is(.results-column, .news-main, .unrelated-articles) { background-image: var(--well-gradient); }
+:root[data-theme="light"] :is(.risk-box, .stale-banner),
+:root[data-theme="light"] .feature-intro .fi-pending-state { background-image: var(--notice-gradient); }
+:root[data-theme="light"] .factor-grid > .factor-positive { background-image: var(--positive-gradient); }
+:root[data-theme="light"] .factor-grid > .factor-negative { background-image: var(--negative-gradient); }

@@ -33,6 +33,7 @@ const { render, screen, fireEvent, cleanup, waitFor, within, act } = await impor
 const { default: App } = await import('./App');
 const originalFetch = globalThis.fetch;
 const originalSessionStorage = Object.getOwnPropertyDescriptor(dom.window, 'sessionStorage')!;
+const originalLocalStorage = Object.getOwnPropertyDescriptor(dom.window, 'localStorage')!;
 const originalMatchMedia = Object.getOwnPropertyDescriptor(dom.window, 'matchMedia');
 
 function mobileViewport() {
@@ -81,13 +82,66 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
+  Object.defineProperty(window, 'localStorage', originalLocalStorage);
   Object.defineProperty(window, 'sessionStorage', originalSessionStorage);
   if (originalMatchMedia) Object.defineProperty(window, 'matchMedia', originalMatchMedia);
   else Reflect.deleteProperty(window, 'matchMedia');
   window.sessionStorage.clear();
   window.history.replaceState(null, '', 'http://localhost/#calculator');
+  document.documentElement.removeAttribute('data-theme');
+  document.documentElement.style.removeProperty('color-scheme');
 });
 after(() => dom.window.close());
+
+test('dark is the default and theme switching preserves calculator inputs and results', () => {
+  open();
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.equal(document.documentElement.style.colorScheme, 'dark');
+  fireEvent.change(screen.getByLabelText('매월 저축·투자 금액'), { target: { value: '1000000' } });
+  fireEvent.click(screen.getByRole('button', { name: '라이트 모드로 전환' }));
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  assert.equal(document.documentElement.style.colorScheme, 'light');
+  assert.equal(window.localStorage.getItem('moneycast.theme'), 'light');
+  assert.equal((screen.getByLabelText('매월 저축·투자 금액') as HTMLInputElement).value, '1000000');
+  assert.ok(screen.getAllByText('80,576,554원').length >= 1);
+  fireEvent.click(screen.getByRole('button', { name: '다크 모드로 전환' }));
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.equal(window.localStorage.getItem('moneycast.theme'), 'dark');
+});
+
+test('saved light mode survives navigation and recreating the app', () => {
+  window.localStorage.setItem('moneycast.theme', 'light');
+  const view = open();
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  fireEvent.click(screen.getByRole('button', { name: '계산 및 데이터 안내 열기' }));
+  assert.equal(window.location.hash, '#guide');
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  view.unmount();
+  open();
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  assert.ok(screen.getByRole('button', { name: '다크 모드로 전환' }));
+});
+
+test('an invalid saved appearance falls back to dark mode', () => {
+  window.localStorage.setItem('moneycast.theme', 'unrecognized');
+  open();
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.ok(screen.getByRole('button', { name: '라이트 모드로 전환' }));
+});
+
+test('blocked local storage does not prevent changing the theme', () => {
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    get() { throw new dom.window.DOMException('Storage blocked for test', 'SecurityError'); },
+  });
+  open();
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  fireEvent.click(screen.getByRole('button', { name: '라이트 모드로 전환' }));
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  fireEvent.click(screen.getByRole('button', { name: '다크 모드로 전환' }));
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.ok(screen.getByLabelText('현재 시드머니'));
+});
 
 test('calculator renders default assumption, final assets, principal and a labeled chart', () => {
   open();

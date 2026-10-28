@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { calculateProjection, calculateScenarios, validateCalculatorInput, DEFAULT_CALCULATOR_INPUT, formatKRW, formatCompactKRW, formatDurationMonths, type CalculatorInput, type Projection, type ProjectionScenario } from '@moneycast/core';
 import { Brand, GoalIcon, Icon, type IconName } from './icons';
 import { GrowthChart } from './GrowthChart';
 import { NewsPanel } from './NewsPanel';
 import { FeatureIntro } from './FeatureIntro';
+import { applyTheme, getTheme, saveTheme } from './appearance';
 
 type Page = 'calculator' | 'news' | 'guide' | 'calculator-intro' | 'news-intro';
 const nav: { id: Page; label: string; icon: IconName }[] = [
@@ -35,6 +36,8 @@ function exportCSV(projection: Projection) {
   const a = document.createElement('a'); a.href = url; a.download = 'MoneyCast-자산시뮬레이션.csv'; a.click(); URL.revokeObjectURL(url);
 }
 export default function App() {
+  const [theme, setTheme] = useState(getTheme);
+  const themeSwitchLabel = theme === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환';
   const [page, setPage] = useState<Page>(getPage);
   const [sidebarOpen, setSidebarOpen] = useState(getSidebarOpen);
   const [isMobile, setIsMobile] = useState(() => window.matchMedia?.('(max-width: 760px)').matches ?? false);
@@ -52,6 +55,10 @@ export default function App() {
   const [raw, setRaw] = useState(defaults);
   const [goal, setGoal] = useState('free');
   const [showScenarios, setShowScenarios] = useState(false);
+  useLayoutEffect(() => {
+    applyTheme(theme);
+    saveTheme(theme);
+  }, [theme]);
   useEffect(() => {
     const listener = () => {
       const next = getPage();
@@ -163,7 +170,7 @@ export default function App() {
       <div className="sidebar-journey"><div className="journey-bars" aria-hidden="true"><span/><span/><span/><span/><svg viewBox="0 0 140 80"><path d="m8 65 38-18 33-5 50-33m-21 0h21v21" fill="none" stroke="#b6e8bf" strokeWidth="2"/></svg></div><span className="eyebrow">YOUR NEXT CHAPTER</span><h3>오늘의 계획이<br/>내일의 가능성으로.</h3><p>나만의 속도로,<br/>목표에 한 걸음 더 가까이.</p><button onClick={() => navigate('calculator')}>목표 그려보기 <Icon name="arrow" size={16}/></button></div>
       <div className="sidebar-bottom"><button className={`nav-item ${page === 'guide' ? 'active' : ''}`} onClick={() => navigate('guide')}><Icon name="info"/><span>계산 및 데이터 안내</span></button><div className="sidebar-footer"><span className="tiny-brand">MC</span><div><strong>나의 MoneyCast</strong><span>로그인 없이 가볍게 시작</span></div></div></div>
     </aside></div>
-    <div className="main-shell"><header className="topbar"><div className="topbar-start"><button ref={sidebarToggleRef} className="sidebar-toggle icon-button" onClick={toggleSidebar} aria-label={visibleSidebarOpen ? '사이드바 닫기' : '사이드바 열기'} title={visibleSidebarOpen ? '사이드바 닫기' : '사이드바 열기'} aria-expanded={visibleSidebarOpen} aria-controls="moneycast-sidebar"><Icon name={visibleSidebarOpen ? 'close' : 'menu'} size={21}/></button><a className="mobile-brand" inert={mobileDrawerOpen} href="#calculator" aria-label="MoneyCast 홈" onClick={() => navigate('calculator')}><Brand/></a><div className="breadcrumb" inert={mobileDrawerOpen}><span>나의 워크스페이스</span><Icon name="chevron" size={12}/><strong>{pageLabels[page]}</strong></div></div><div className="topbar-right" inert={mobileDrawerOpen}><span className="local-status"><i/>내 기기에서 계산</span><button className="avatar" aria-label="계산 및 데이터 안내 열기" onClick={() => navigate('guide')}>M</button></div></header>
+    <div className="main-shell"><header className="topbar"><div className="topbar-start"><button ref={sidebarToggleRef} className="sidebar-toggle icon-button" onClick={toggleSidebar} aria-label={visibleSidebarOpen ? '사이드바 닫기' : '사이드바 열기'} title={visibleSidebarOpen ? '사이드바 닫기' : '사이드바 열기'} aria-expanded={visibleSidebarOpen} aria-controls="moneycast-sidebar"><Icon name={visibleSidebarOpen ? 'close' : 'menu'} size={21}/></button><a className="mobile-brand" inert={mobileDrawerOpen} href="#calculator" aria-label="MoneyCast 홈" onClick={() => navigate('calculator')}><Brand/></a><div className="breadcrumb" inert={mobileDrawerOpen}><span>나의 워크스페이스</span><Icon name="chevron" size={12}/><strong>{pageLabels[page]}</strong></div></div><div className="topbar-right" inert={mobileDrawerOpen}><span className="local-status"><i/>내 기기에서 계산</span><button className="theme-toggle icon-button" onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')} aria-label={themeSwitchLabel} title={themeSwitchLabel}><Icon name={theme === 'dark' ? 'sun' : 'moon'} size={19}/><span>{theme === 'dark' ? '라이트 모드' : '다크 모드'}</span></button><button className="avatar" aria-label="계산 및 데이터 안내 열기" onClick={() => navigate('guide')}>M</button></div></header>
       <main id="main" tabIndex={-1} inert={mobileDrawerOpen}>
         <div className="page-heading"><div><div className="page-kicker">{isIntro ? 'GET TO KNOW MONEYCAST' : 'MAKE ROOM FOR YOUR FUTURE'}</div><h1>{page === 'calculator-intro' ? <>목표 자금 계산기, <span>이렇게 활용하세요.</span></> : page === 'news-intro' ? <>뉴스 인사이트, <span>근거부터 살펴보세요.</span></> : page === 'news' ? <>뉴스 너머의 <span>근거를 읽다.</span></> : page === 'guide' ? <>숫자는 투명하게, <span>판단은 신중하게.</span></> : <>나의 자산, <span>어디까지 자랄까요?</span></>}</h1><p>{page === 'calculator-intro' ? '지금의 저축과 투자가 목표에 얼마나 가까워지는지 알아보세요.' : page === 'news-intro' ? '출처가 있는 소식과 그 소식만으로 알 수 없는 것을 함께 확인하세요.' : page === 'news' ? '회사의 소식을 살펴보고, 다음 주를 바라보는 다양한 근거를 확인하세요.' : page === 'guide' ? 'MoneyCast의 계산 기준과 데이터 사용 방식을 확인하세요.' : '막연했던 목표를 구체적인 숫자로. 오늘부터 나만의 미래를 그려보세요.'}</p></div><div className="page-heading-actions">{(page === 'calculator' || page === 'news') && <button className="outline-button feature-help-button" aria-label={usageLabel} onClick={() => navigate(`${page}-intro` as Page)}><Icon name="info" size={16}/>{usageLabel}</button>}{page === 'calculator' && <button className="outline-button" onClick={reset}><Icon name="refresh" size={15}/>새로 계산하기</button>}</div></div>
         {isIntro ? <FeatureIntro feature={page === 'calculator-intro' ? 'calculator' : 'news'} onStart={() => navigate(page === 'calculator-intro' ? 'calculator' : 'news')} onGuide={() => navigate('guide')}/> : page === 'news' ? <NewsPanel/> : page === 'guide' ? <Guide/> : <>
