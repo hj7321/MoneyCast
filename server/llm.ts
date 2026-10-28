@@ -128,6 +128,12 @@ export function parseModelJson(text: string): unknown {
 const normalize = (value: string) => value.normalize('NFKC').toLowerCase()
   .replace(/[“”„‟"'‘’‚‛`´「」『』]/g, '').replace(/\s+/g, ' ').trim();
 const numbersIn = (value: string) => (value.normalize('NFKC').match(/\d+(?:[.,]\d+)*/g) ?? []).map(item => item.replace(/,/g, ''));
+/** English number words that a Korean answer fairly writes as digits ("third-quarter" → "3분기"). */
+const NUMBER_WORDS: Readonly<Record<string, string>> = {
+  one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10',
+  first: '1', second: '2', third: '3', fourth: '4', fifth: '5', double: '2', triple: '3',
+};
+const spelledNumbersIn = (value: string) => (value.toLowerCase().match(/[a-z]+/g) ?? []).flatMap(word => NUMBER_WORDS[word] ?? []);
 
 /**
  * Advice and outlook wording. A rule with `source` is allowed only when the
@@ -221,7 +227,8 @@ export function validateJudgements(raw: unknown, request: JudgeRequest, notes?: 
     if (!isRecord(entry)) { note('missing'); continue; }
     // An id answered twice is ambiguous, so neither answer is used.
     if (counts.get(input.key) !== 1) { note('duplicate'); continue; }
-    const allowed = new Set(numbersIn(`${input.title} ${input.description ?? ''} ${companyText}`));
+    const text = `${input.title} ${input.description ?? ''} ${companyText}`;
+    const allowed = new Set([...numbersIn(text), ...spelledNumbersIn(text)]);
     const judged = validateItem(entry, input, request, allowed, note);
     if (judged) valid.set(input.key, judged);
   }

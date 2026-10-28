@@ -388,7 +388,7 @@ function NewsScreen({ active }: { active: boolean }) {
                 <Text style={styles.bodyMuted}>프로젝트 루트 .env에 NEWS_PROVIDER=marketaux와 서버 전용 MARKETAUX_API_TOKEN을 설정하고 API 서버를 재시작하세요. 키는 앱이나 브라우저에 입력하지 않습니다. 기존 게이트웨이 설정은 서버 README를 확인하세요.</Text>
                 <Pressable accessibilityRole="link" onPress={() => void openArticle('https://www.marketaux.com/')} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Marketaux 계정 안내 열기 ↗</Text></Pressable>
               </View>}
-              {marketaux && <Text style={[styles.bodyMuted, styles.secondaryText]}>Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 영어·한국어 기사만 조회하며, 기사 부족·상충 시 판단을 유보합니다.</Text>}
+              {marketaux && <Text style={[styles.bodyMuted, styles.secondaryText]}>Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 최근 7일의 영어·한국어 기사 중 이 회사와 가장 강하게 연결된 기사를 고르며, 기사 부족·상충 시 판단을 유보합니다.</Text>}
               <View style={styles.metadata}><Text style={styles.tiny}>데이터 기준: {formatNewsTime(shown.asOf)}</Text>
                 {shown.newsWindow ? <Text style={styles.tiny}>뉴스 수집 기간: {formatNewsTime(shown.newsWindow.start)} ~ {formatNewsTime(shown.newsWindow.end)}</Text> : null}
                 <Text style={styles.tiny}>다음 주 참고 기간: {shown.period.start} ~ {shown.period.end}</Text>

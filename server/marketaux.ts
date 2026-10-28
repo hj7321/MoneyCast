@@ -13,7 +13,7 @@ const EXCHANGES: Record<string, Set<string>> = {
     'KOREAEXCHANGEKOSPI', 'KOREAEXCHANGESTOCKMARKET', 'KOREAEXCHANGEKOSPIMARKET']),
 };
 const BASE_NOTES = [
-  'Marketaux에서 최근 7일의 기사 최대 3건을 조회합니다. 전체 뉴스나 한국어 기사 제공 범위를 보장하지 않습니다.',
+  'Marketaux에서 최근 7일 기사 중 이 회사와 가장 강하게 연결된 기사 최대 3건을 조회합니다. 전체 뉴스나 한국어 기사 제공 범위를 보장하지 않습니다.',
   '긍정·부정·중립은 Marketaux가 제공한 해당 기업의 감성 점수 분류입니다. 주가 변동 확률이나 독립적으로 검증한 예측 점수가 아닙니다.',
   '영어·한국어 기사만 조회합니다. 기사 제목과 매체 설명은 원문 그대로 표시하며 기사 본문은 수집하지 않습니다.',
 ];
@@ -141,6 +141,8 @@ export function createMarketauxProvider(
           filter_entities: 'true', must_have_entities: 'true', group_similar: 'true', limit: '3',
           // Three slots per request go further on articles a Korean reader can follow.
           language: 'en,ko',
+          // Newest-first filled the slots with sector roundups that only mention the company; the strongest match comes first instead.
+          sort: 'entity_match_score',
           published_after: new Date(now.getTime() - 7 * DAY).toISOString().slice(0, 19),
           published_before: now.toISOString().slice(0, 19),
         }, token, controller.signal), 3);

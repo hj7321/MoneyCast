@@ -237,6 +237,8 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
     { key: 'a8', title: '삼성전자 미국 공장 착공', description: '텍사스 테일러 공장 착공식이 열렸다.', source: 'a', summarize: true },
     { key: 'a9', title: 'Samsung Electronics wins a large order', source: 'a', summarize: false,
       description: 'Samsung Electronics said on Tuesday it had won a large foundry order from a global customer, its biggest this year.' },
+    { key: 'a10', title: 'Samsung Electronics third-quarter profit beats estimates', source: 'a', summarize: false },
+    { key: 'a11', title: 'Samsung Electronics third-quarter profit beats estimates', source: 'a', summarize: false },
   ] };
   const long = '가'.repeat(400);
   const notes = new Map<ValidationNote, number>();
@@ -253,9 +255,12 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
     { id: 'zz', relevant: true, sentiment: 'positive', evidence: '신제품', reason: '', summary: '' },
     { id: 'a9', relevant: true, sentiment: 'positive', reason: '', summary: '',
       evidence: 'Samsung Electronics said on Tuesday it had won a large foundry order from a global customer, its biggest this year.' },
+    // "third-quarter" written as 3분기 is the article's own number; a percentage it never gave is not.
+    { id: 'a10', relevant: true, sentiment: 'positive', evidence: 'profit beats estimates', reason: '3분기 이익이 시장 예상치를 웃돌았다는 소식입니다.', summary: '' },
+    { id: 'a11', relevant: true, sentiment: 'positive', evidence: 'profit beats estimates', reason: '3분기 이익이 30% 늘었다는 소식입니다.', summary: '' },
   ] }, request, notes);
-  assert.deepEqual([...valid.keys()], ['a4', 'a5', 'a6', 'a8', 'a9']);
-  assert.deepEqual(Object.fromEntries(notes), { evidence_not_in_text: 1, no_evidence: 1, reason_numbers: 1, summary_advice: 2, duplicate: 1, evidence_trimmed: 1 });
+  assert.deepEqual([...valid.keys()], ['a4', 'a5', 'a6', 'a8', 'a9', 'a10']);
+  assert.deepEqual(Object.fromEntries(notes), { evidence_not_in_text: 1, no_evidence: 1, reason_numbers: 2, summary_advice: 2, duplicate: 1, evidence_trimmed: 1 });
   // A long verbatim quote is kept as its opening part instead of costing the judgement.
   assert.equal(valid.get('a9')!.evidence, 'Samsung Electronics said on Tuesday it had won a large foundry order from a glob');
   assert.equal(valid.get('a4')!.summary, undefined);

@@ -185,7 +185,7 @@ export function NewsPanel() {
                   <div className="article-list">{unrelated.map((article, index) => <ArticleCard key={article.id} article={article} anchor={unrelatedAnchor(index)} provider={shown.provider}/>)}</div></details>}
                 <div className="risk-box"><h4>전망이 빗나갈 수 있는 이유</h4>{shown.risks.map((s, i) => <p key={i}>{s}</p>)}</div>
               </> : null}
-        {marketaux && <p className="news-provider-note">Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 영어·한국어 기사만 조회하며, 기사 부족·상충 시 판단을 유보합니다.</p>}
+        {marketaux && <p className="news-provider-note">Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 최근 7일의 영어·한국어 기사 중 이 회사와 가장 강하게 연결된 기사를 고르며, 기사 부족·상충 시 판단을 유보합니다.</p>}
         {aiOutput && <p className="news-provider-note">일부 요약·분류는 AI(Gemini·Cloudflare Workers AI)가 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다. 원문에서 확인하세요.</p>}
         {shown?.articles.some(article => article.sourceProvider === 'GDELT') && <p className="news-provider-note">일부 기사 목록은 <a href="https://www.gdeltproject.org" target="_blank" rel="noopener noreferrer">GDELT Project</a> 검색 결과입니다. GDELT 시각은 기사를 처음 확인한 시각이며 게시 시각과 다를 수 있습니다.</p>}
         {shown && <div className="analysis-footer">
