@@ -56,7 +56,7 @@ function FactorGrid({ analysis, onEvidence }: { analysis: NewsAnalysis; onEviden
   return <>
     <div className="factor-grid">{boxes.map(([direction, title, legacy]) => {
       const box = analysis.factorSummary?.[direction];
-      return <div key={direction}><h4>{title}</h4>
+      return <div key={direction} className={`factor-${direction}`}><h4>{title}<span className="factor-direction" aria-hidden="true">{direction === 'positive' ? '↑' : '↓'}</span></h4>
         {box ? box.lines.length ? box.lines.map((line, i) => <p key={i} className="factor-line">{line.text} <button type="button" className="evidence-link" onClick={() => onEvidence(line.articleIds[0]!)}>근거 기사 {line.articleIds.length}건</button></p>) : <p>확인된 요인 없음</p>
           : legacy.length ? legacy.map((s, i) => <p key={i}>{s}</p>) : <p>확인된 요인 없음</p>}
         {box && box.chips.length > 0 && <ul className="factor-chips" aria-label={`${title} 주의 사항`}>{box.chips.map(chip => <li key={chip}>{chip}</li>)}</ul>}

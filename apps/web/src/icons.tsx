@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-export type IconName = 'grid' | 'chart' | 'news' | 'arrow' | 'info' | 'check' | 'search' | 'chevron' | 'refresh' | 'target' | 'wallet' | 'trend' | 'external' | 'spark' | 'close' | 'download' | 'shield' | 'menu' | 'car' | 'home' | 'plane';
+export type IconName = 'grid' | 'chart' | 'news' | 'arrow' | 'info' | 'check' | 'search' | 'chevron' | 'refresh' | 'target' | 'wallet' | 'trend' | 'external' | 'spark' | 'close' | 'download' | 'shield' | 'menu' | 'car' | 'home' | 'plane' | 'sun' | 'moon';
 const paths: Record<IconName, React.ReactNode> = {
   grid: <><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
   chart: <><path d="M4 3v17h17M8 14l4-5 4 3 5-7"/></>,
@@ -19,6 +19,8 @@ const paths: Record<IconName, React.ReactNode> = {
   download: <><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></>,
   shield: <><path d="m12 2 8 4v6c0 5-8 10-8 10S4 17 4 12V6l8-4Z"/><path d="m8 11 3 3 5-5"/></>,
   menu: <path d="M4 6h16M4 12h16M4 18h16"/>,
+  sun: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></>,
+  moon: <path d="M20.5 14a8.5 8.5 0 0 1-10.5-10.5A8.5 8.5 0 1 0 20.5 14Z"/>,
   car: <><path d="M5 17v-5l2-5h10l2 5v5"/><path d="M4 12h16M7 17h.01M17 17h.01"/><path d="M8 7h8"/></>,
   home: <path d="m4 11 8-7 8 7v9H4v-9Z"/>,
   plane: <path d="m3 12 18-7-5 7 5 7-18-7Zm8 0h5"/>,

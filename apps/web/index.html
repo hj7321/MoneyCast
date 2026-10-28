@@ -1,9 +1,17 @@
 <!doctype html>
-<html lang="ko">
+<html lang="ko" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#132c30" />
+    <script>
+      (() => {
+        let theme = 'dark';
+        try { if (localStorage.getItem('moneycast.theme') === 'light') theme = 'light'; } catch {}
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
     <meta name="description" content="MoneyCast에서 목표 자금을 계산하고 뉴스의 근거와 불확실성을 확인하세요. 한국어 자산 시뮬레이터." />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>MoneyCast · 내일을 그리는 자산 계획</title>

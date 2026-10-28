@@ -33,6 +33,22 @@ const { render, screen, fireEvent, cleanup, waitFor, within, act } = await impor
 const { default: App } = await import('./App');
 const originalFetch = globalThis.fetch;
 const originalSessionStorage = Object.getOwnPropertyDescriptor(dom.window, 'sessionStorage')!;
+const originalLocalStorage = Object.getOwnPropertyDescriptor(dom.window, 'localStorage')!;
+const originalMatchMedia = Object.getOwnPropertyDescriptor(dom.window, 'matchMedia');
+
+function mobileViewport() {
+  const listeners = new Set<() => void>();
+  const media = {
+    matches: true,
+    addEventListener: (_event: string, listener: () => void) => listeners.add(listener),
+    removeEventListener: (_event: string, listener: () => void) => listeners.delete(listener),
+  };
+  Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => media });
+  return (mobile: boolean) => {
+    media.matches = mobile;
+    act(() => listeners.forEach(listener => listener()));
+  };
+}
 
 function open(page = 'calculator') {
   window.history.replaceState(null, '', `http://localhost/#${page}`);
@@ -66,11 +82,66 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
+  Object.defineProperty(window, 'localStorage', originalLocalStorage);
   Object.defineProperty(window, 'sessionStorage', originalSessionStorage);
+  if (originalMatchMedia) Object.defineProperty(window, 'matchMedia', originalMatchMedia);
+  else Reflect.deleteProperty(window, 'matchMedia');
   window.sessionStorage.clear();
   window.history.replaceState(null, '', 'http://localhost/#calculator');
+  document.documentElement.removeAttribute('data-theme');
+  document.documentElement.style.removeProperty('color-scheme');
 });
 after(() => dom.window.close());
+
+test('dark is the default and theme switching preserves calculator inputs and results', () => {
+  open();
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.equal(document.documentElement.style.colorScheme, 'dark');
+  fireEvent.change(screen.getByLabelText('매월 저축·투자 금액'), { target: { value: '1000000' } });
+  fireEvent.click(screen.getByRole('button', { name: '라이트 모드로 전환' }));
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  assert.equal(document.documentElement.style.colorScheme, 'light');
+  assert.equal(window.localStorage.getItem('moneycast.theme'), 'light');
+  assert.equal((screen.getByLabelText('매월 저축·투자 금액') as HTMLInputElement).value, '1000000');
+  assert.ok(screen.getAllByText('80,576,554원').length >= 1);
+  fireEvent.click(screen.getByRole('button', { name: '다크 모드로 전환' }));
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.equal(window.localStorage.getItem('moneycast.theme'), 'dark');
+});
+
+test('saved light mode survives navigation and recreating the app', () => {
+  window.localStorage.setItem('moneycast.theme', 'light');
+  const view = open();
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  fireEvent.click(screen.getByRole('button', { name: '계산 및 데이터 안내 열기' }));
+  assert.equal(window.location.hash, '#guide');
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  view.unmount();
+  open();
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  assert.ok(screen.getByRole('button', { name: '다크 모드로 전환' }));
+});
+
+test('an invalid saved appearance falls back to dark mode', () => {
+  window.localStorage.setItem('moneycast.theme', 'unrecognized');
+  open();
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.ok(screen.getByRole('button', { name: '라이트 모드로 전환' }));
+});
+
+test('blocked local storage does not prevent changing the theme', () => {
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    get() { throw new dom.window.DOMException('Storage blocked for test', 'SecurityError'); },
+  });
+  open();
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  fireEvent.click(screen.getByRole('button', { name: '라이트 모드로 전환' }));
+  assert.equal(document.documentElement.dataset.theme, 'light');
+  fireEvent.click(screen.getByRole('button', { name: '다크 모드로 전환' }));
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.ok(screen.getByLabelText('현재 시드머니'));
+});
 
 test('calculator renders default assumption, final assets, principal and a labeled chart', () => {
   open();
@@ -82,6 +153,7 @@ test('calculator renders default assumption, final assets, principal and a label
   assert.match(screen.getByRole('img', { name: /5년 자산 추이/ }).getAttribute('aria-label')!, /목표 50,000,000원/);
   assert.ok(screen.getByText(/세금·수수료 미반영 · 물가상승은 목표 금액에만 선택 반영/));
   assert.ok(screen.getByText(/수익률은 사용자의 가정/));
+  assert.equal(document.querySelector('.calculator-card .section-number'), null);
 });
 
 test('changing monthly contribution immediately updates results, chart and goal message', () => {
@@ -1000,12 +1072,13 @@ test('sidebar starts open, exposes its controlled region and can close and reope
   open();
   const sidebar = document.getElementById('moneycast-sidebar')!;
   assert.ok(sidebar);
-  assert.equal(sidebar.hidden, false);
+  assert.equal(sidebar.getAttribute('aria-hidden'), 'false');
   const close = screen.getByRole('button', { name: '사이드바 닫기' });
   assert.equal(close.getAttribute('aria-expanded'), 'true');
   assert.equal(close.getAttribute('aria-controls'), sidebar.id);
   fireEvent.click(close);
-  assert.equal(sidebar.hidden, true);
+  assert.equal(sidebar.getAttribute('aria-hidden'), 'true');
+  assert.equal(sidebar.hasAttribute('inert'), true);
   assert.equal(screen.queryByRole('navigation', { name: '주 메뉴' }), null);
   const reopen = screen.getByRole('button', { name: '사이드바 열기' });
   assert.equal(reopen.getAttribute('aria-expanded'), 'false');
@@ -1013,7 +1086,8 @@ test('sidebar starts open, exposes its controlled region and can close and reope
   assert.equal(window.sessionStorage.getItem('moneycast.sidebar'), 'closed');
   assert.ok(screen.getByLabelText('현재 시드머니'));
   fireEvent.click(reopen);
-  assert.equal(sidebar.hidden, false);
+  assert.equal(sidebar.getAttribute('aria-hidden'), 'false');
+  assert.equal(sidebar.hasAttribute('inert'), false);
   assert.equal(window.sessionStorage.getItem('moneycast.sidebar'), 'open');
   assert.ok(screen.getByRole('navigation', { name: '주 메뉴' }));
 });
@@ -1023,13 +1097,87 @@ test('sidebar restores a collapsed session after remount and clearing the sessio
   fireEvent.click(screen.getByRole('button', { name: '사이드바 닫기' }));
   first.unmount();
   const restored = open();
-  assert.equal(document.getElementById('moneycast-sidebar')!.hidden, true);
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'true');
   assert.equal(screen.getByRole('button', { name: '사이드바 열기' }).getAttribute('aria-expanded'), 'false');
   restored.unmount();
   window.sessionStorage.clear();
   open();
-  assert.equal(document.getElementById('moneycast-sidebar')!.hidden, false);
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'false');
   assert.ok(screen.getByRole('button', { name: '사이드바 닫기' }));
+});
+
+test('desktop sidebar keyboard dismissal returns focus and preserves calculator edits', () => {
+  open();
+  fireEvent.change(screen.getByLabelText('현재 시드머니'), { target: { value: '20000000' } });
+  fireEvent.click(screen.getByRole('button', { name: '사이드바 닫기' }));
+  fireEvent.click(screen.getByRole('button', { name: '사이드바 열기' }));
+  const menu = screen.getByRole('navigation', { name: '주 메뉴' });
+  assert.equal(document.activeElement, within(menu).getByRole('button', { name: '목표 자금 계산기' }));
+  fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'true');
+  assert.equal(document.activeElement, screen.getByRole('button', { name: '사이드바 열기' }));
+  assert.equal((screen.getByLabelText('현재 시드머니') as HTMLInputElement).value, '20000000');
+});
+
+test('mobile drawer traps both keyboard boundaries and Escape restores focus and scrolling', () => {
+  mobileViewport();
+  open();
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'true');
+  fireEvent.click(screen.getByRole('button', { name: '사이드바 열기' }));
+  const sidebar = screen.getByRole('complementary', { name: 'MoneyCast 사이드바' });
+  const close = screen.getByRole('button', { name: '사이드바 닫기' });
+  assert.equal(document.activeElement, within(sidebar).getByRole('button', { name: '목표 자금 계산기' }));
+  assert.equal(document.body.style.overflow, 'hidden');
+  assert.ok(document.getElementById('main')!.hasAttribute('inert'));
+  const home = within(sidebar).getByRole('link', { name: 'MoneyCast 홈' });
+  close.focus();
+  fireEvent.keyDown(close, { key: 'Tab' });
+  assert.equal(document.activeElement, home);
+  fireEvent.keyDown(home, { key: 'Tab', shiftKey: true });
+  assert.equal(document.activeElement, close);
+  fireEvent.keyDown(close, { key: 'Escape' });
+  assert.equal(document.activeElement, screen.getByRole('button', { name: '사이드바 열기' }));
+  assert.equal(sidebar.getAttribute('aria-hidden'), 'true');
+  assert.equal(document.body.style.overflow, '');
+  assert.equal(document.getElementById('main')!.hasAttribute('inert'), false);
+});
+
+test('reopening the sidebar focuses the current introduction instead of the first menu item', () => {
+  mobileViewport();
+  open('news-intro');
+  fireEvent.click(screen.getByRole('button', { name: '사이드바 열기' }));
+  const sidebar = screen.getByRole('complementary', { name: 'MoneyCast 사이드바' });
+  assert.equal(document.activeElement, within(sidebar).getByRole('button', { name: '인사이트 사용법' }));
+});
+
+test('mobile backdrop and navigation dismiss the drawer without changing the desktop session preference', () => {
+  mobileViewport();
+  window.sessionStorage.setItem('moneycast.sidebar', 'closed');
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '사이드바 열기' }));
+  fireEvent.click(document.querySelector('.sidebar-backdrop')!);
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'true');
+  fireEvent.click(screen.getByRole('button', { name: '사이드바 열기' }));
+  fireEvent.click(within(screen.getByRole('navigation', { name: '주 메뉴' })).getByRole('button', { name: '계산기 사용법' }));
+  assert.equal(window.location.hash, '#calculator-intro');
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'true');
+  assert.equal(document.body.style.overflow, '');
+  assert.equal(document.activeElement, screen.getByRole('button', { name: '사이드바 열기' }));
+  assert.equal(window.sessionStorage.getItem('moneycast.sidebar'), 'closed');
+});
+
+test('resizing an open mobile drawer restores desktop preference and clears the background lock', () => {
+  const resize = mobileViewport();
+  window.sessionStorage.setItem('moneycast.sidebar', 'closed');
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '사이드바 열기' }));
+  resize(false);
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'true');
+  assert.equal(document.body.style.overflow, '');
+  assert.equal(document.getElementById('main')!.hasAttribute('inert'), false);
+  assert.equal(document.activeElement, screen.getByRole('button', { name: '사이드바 열기' }));
+  resize(true);
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'true');
 });
 
 test('blocked session storage gracefully keeps sidebar controls and calculator usable', () => {
@@ -1038,11 +1186,11 @@ test('blocked session storage gracefully keeps sidebar controls and calculator u
     get() { throw new dom.window.DOMException('Storage blocked for test', 'SecurityError'); },
   });
   open();
-  assert.equal(document.getElementById('moneycast-sidebar')!.hidden, false);
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'false');
   fireEvent.click(screen.getByRole('button', { name: '사이드바 닫기' }));
-  assert.equal(document.getElementById('moneycast-sidebar')!.hidden, true);
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'true');
   fireEvent.click(screen.getByRole('button', { name: '사이드바 열기' }));
-  assert.equal(document.getElementById('moneycast-sidebar')!.hidden, false);
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'false');
   assert.ok(screen.getByLabelText('현재 시드머니'));
 });
 
@@ -1081,7 +1229,7 @@ test('feature introductions remain reachable from the main page heading when the
   fireEvent.click(within(screen.getByRole('main')).getByRole('button', { name: '인사이트 사용법' }));
   assert.equal(window.location.hash, '#news-intro');
   assert.ok(screen.getByRole('button', { name: '회사 뉴스 살펴보기' }));
-  assert.equal(document.getElementById('moneycast-sidebar')!.hidden, true);
+  assert.equal(document.getElementById('moneycast-sidebar')!.getAttribute('aria-hidden'), 'true');
 });
 
 test('introduction deep links and browser back/forward restore the correct feature screen', async () => {
@@ -1128,7 +1276,8 @@ test('reopening news and remounting the app reuse a valid six-hour company analy
   fireEvent.click(within(screen.getByRole('navigation', { name: '주 메뉴' })).getByRole('button', { name: '뉴스 인사이트' }));
   await screen.findByText(fixture.summary);
   assert.equal(calls, 1);
-  assert.ok(window.localStorage.length > 0);
+  assert.ok(Array.from({ length: window.localStorage.length }, (_, index) => window.localStorage.key(index))
+    .some(key => key?.startsWith('moneycast.news.v1.')));
   view.unmount();
   open('news');
   await screen.findByText(fixture.summary);

@@ -1,9 +1,28 @@
 /* The desktop preference lives only in sessionStorage for this browser tab. */
-.sidebar[hidden] { display: none; }
-.sidebar-collapsed { --sidebar: 0px; }
-.sidebar-collapsed .main-shell { margin-left: 0; }
+:root { --topbar-height: 77px; --sidebar-duration: .28s; --sidebar-easing: cubic-bezier(.22, .68, .24, 1); }
+.app-shell { --sidebar-width: var(--sidebar); --sidebar-offset: var(--sidebar-width); }
+.sidebar-rail {
+  position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); z-index: 20;
+  pointer-events: none; transform: translateX(0);
+  transition: transform var(--sidebar-duration) var(--sidebar-easing);
+}
+.sidebar-rail .sidebar {
+  position: absolute; inset: 0; width: 100%; display: flex;
+  overflow-y: auto; overscroll-behavior: contain; pointer-events: auto;
+  visibility: visible; transition: visibility 0s linear 0s;
+}
+.sidebar > * { flex-shrink: 0; }
+.sidebar { border-right: 1px solid #658477; box-shadow: 5px 0 16px #08171924; }
+.sidebar-collapsed { --sidebar-offset: 0px; }
+.sidebar-collapsed .sidebar-rail { transform: translateX(-100%); }
+.sidebar-collapsed .sidebar { pointer-events: none; visibility: hidden; transition-delay: var(--sidebar-duration); }
+.main-shell { margin-left: var(--sidebar-offset); transition: margin-left var(--sidebar-duration) var(--sidebar-easing); }
+.topbar { position: sticky; top: 0; z-index: 40; height: var(--topbar-height); box-shadow: 0 2px 8px #18372f06; }
+.main-shell main, .main-shell main [id] { scroll-margin-top: calc(var(--topbar-height) + 16px); }
+.main-shell main :is(button, a, input, summary) { scroll-margin-top: calc(var(--topbar-height) + 16px); scroll-margin-bottom: 90px; }
 .topbar-start { display: flex; align-items: center; gap: 14px; min-width: 0; }
-.sidebar-toggle { flex-shrink: 0; color: #4f705c; background: #f4f7ef; }
+.theme-toggle.icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: auto; min-width: 44px; height: 44px; padding: 0 12px; font-size: 14px; white-space: nowrap; }
+.sidebar-toggle.icon-button { width: 44px; height: 44px; flex-shrink: 0; color: #365d48; background: #f4f7ef; }
 .sidebar-toggle:hover { background: #e7efdf; }
 @media (max-height: 940px) and (min-width: 761px) {
   .sidebar-journey { display: none; }
@@ -36,9 +55,32 @@
   .sidebar-collapsed .calculator-layout { grid-template-columns: 1fr; }
 }
 
+@media (max-width: 1000px) {
+  :root { --topbar-height: 65px; }
+}
+
 @media (max-width: 760px) {
-  .sidebar-toggle { display: none; }
-  .topbar-start { gap: 0; }
+  :root { --topbar-height: 59px; }
+  .app-shell { --sidebar-width: min(300px, calc(100vw - 48px)); --sidebar-offset: 0px; }
+  .sidebar-rail { top: var(--topbar-height); z-index: 45; }
+  .topbar-start { gap: 10px; }
+  .topbar { z-index: 50; }
+  .topbar-right { gap: 8px; }
+  .theme-toggle.icon-button { width: 44px; padding: 0; }
+  .theme-toggle > span { display: none; }
+  .sidebar-rail .sidebar {
+    padding: 24px 20px env(safe-area-inset-bottom, 0px);
+    box-shadow: 12px 0 32px #142b3024;
+  }
+  .sidebar .brand { font-size: 24px; }
+  .sidebar .workspace-label { margin-bottom: 24px; }
+  .sidebar .nav-item { padding-block: 13px; }
+  .sidebar .sidebar-journey { display: none; }
+  .sidebar .sidebar-bottom { padding-top: 24px; }
+  .sidebar-backdrop { position: fixed; inset: var(--topbar-height) 0 0; background: #142b3052; z-index: 40; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity var(--sidebar-duration) var(--sidebar-easing), visibility 0s linear var(--sidebar-duration); }
+  .sidebar-backdrop.is-visible { opacity: 1; visibility: visible; pointer-events: auto; transition-delay: 0s; }
+  .mobile-nav { padding-bottom: env(safe-area-inset-bottom, 0px); height: calc(76px + env(safe-area-inset-bottom, 0px)); }
+  .main-shell main { padding-bottom: calc(90px + env(safe-area-inset-bottom, 0px)); }
   .page-heading { display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
   .page-heading > div:first-child { width: 100%; }
   .page-heading-actions { gap: 10px; }
@@ -47,4 +89,12 @@
   .page-heading-actions .outline-button svg { width: 17px; }
   .mobile-nav button { flex: 1 1 0; min-width: 0; gap: 4px; padding-inline: 4px; }
   .mobile-nav button span { white-space: normal; word-break: keep-all; text-align: center; line-height: 1.4; }
+}
+
+@media (max-width: 480px) {
+  .topbar-right .avatar { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-rail, .sidebar-rail .sidebar, .main-shell, .sidebar-backdrop { transition: none; }
 }
