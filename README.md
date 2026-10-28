@@ -134,7 +134,7 @@ Marketaux에는 최근 7일의 기사 최대 3건을 요청하며, 같은 회사
 
 Vercel 프로젝트 루트는 이 저장소 루트입니다. vercel.json이 웹 빌드와 Node API 진입점을 설정합니다. 빌드는 npm ci → npm run build, 출력은 apps/web/dist이며, api/index.ts가 기존 서버와 같은 API 로직을 사용합니다. 서버는 공용 코어의 실제 소스 경로와 ESM 확장자를 참조하므로 서버리스 배포에도 npm workspace 심볼릭 링크 없이 모듈을 포함합니다. 실제 뉴스는 Vercel 프로덕션의 NEWS_PROVIDER=marketaux와 암호화된 MARKETAUX_API_TOKEN 서버 환경변수로 연결합니다. 키와 .env 파일은 GitHub·업로드 산출물에 포함하지 않습니다.
 
-현재 배포는 Vercel CLI를 사용합니다. 향후 GitHub 커밋마다 자동 배포하려면 Vercel 계정의 GitHub 로그인 연결 및 저장소 연동을 별도로 설정하세요. 기존 GitHub LICENSE와 이력은 유지합니다.
+Vercel 프로젝트는 GitHub `hj7321/MoneyCast` 저장소와 연결되어 있습니다. 프로덕션 브랜치는 `main`이며, `main`에 푸시하면 자동으로 빌드·배포하고 성공한 결과를 <https://moneycast.vercel.app>에 반영합니다. 빌드가 실패하면 기존 정상 배포가 유지되며 Vercel 배포 로그에서 원인을 확인할 수 있습니다. 다른 브랜치는 Preview 배포로 확인할 수 있습니다. 뉴스 API 키는 Vercel의 서버 환경변수에서 관리하며 GitHub 저장소에 추가하지 않습니다. CLI 수동 배포도 사용할 수 있고 기존 GitHub LICENSE와 이력은 유지합니다.
 
 웹·앱 글꼴은 **IBM Plex Sans KR**이며 기존 크기·굵기 값을 유지합니다. 뉴스 안내 버튼은 **인사이트 사용법**입니다. 회사 파비콘은 로컬 파일로 포함하고, 원본·해시·글꼴 라이선스는 [자산 안내](assets/README.md)에 기록합니다.
 
