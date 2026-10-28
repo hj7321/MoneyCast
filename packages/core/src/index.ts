@@ -567,3 +567,13 @@ export {
   type TravelGoalDraft, type GoalItemDraft, type HousingType, type CarCondition, type GoalTargetSource,
   type GoalFormulaLine, type GoalTargetResolution, type GoalPlannerState, type GoalPlannerAction,
 } from './goals.js';
+export {
+  GOAL_CATEGORIES, GOAL_CATEGORY_IDS, isGoalCategory, categoryGoalType, categoryLabel, categoryGoalName, classifyGoalText,
+  parseKoreanAmount, findKoreanAmounts, monthsUntil, findGoalPeriod, findTravelers, findTripLength, hasPersonalData,
+  analyzeGoalText, planGoalQuestions, goalQuestionText,
+  type GoalCategory, type GoalTextFact, type GoalTextItem, type GoalTextFacts, type GoalTextAnalysis, type GoalQuestionId,
+} from './goal-text.js';
+export {
+  GOAL_CLARIFY_PROMPT_VERSION, GOAL_CLARIFY_MAX_LENGTH, GOAL_TITLE_MAX_LENGTH, isQuotedFrom, isGoalAiAvailability, isGoalClarification,
+  type GoalClarifyStatus, type GoalAiProvider, type GoalAiAvailability, type GoalClarification,
+} from './goal-clarify.js';
