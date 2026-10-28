@@ -86,6 +86,20 @@ test('negative amounts, missing fields, strings, NaN and infinity are rejected',
   assert.ok(validateCalculatorInput({ ...base, years: Infinity }).years);
 });
 
+test('amount messages use 를/는 after 시드머니 and 을/은 after labels ending in a consonant', () => {
+  for (const [field, missing, other] of [
+    ['initial', '시드머니를', '시드머니는'],
+    ['monthly', '월 납입액을', '월 납입액은'],
+    ['target', '목표 금액을', '목표 금액은'],
+  ] as const) {
+    for (const value of [undefined, NaN]) {
+      assert.equal(validateCalculatorInput({ ...base, [field]: value })[field], `${missing} 숫자로 입력해 주세요.`);
+    }
+    assert.equal(validateCalculatorInput({ ...base, [field]: -1 })[field], `${other} 0원 이상이어야 합니다.`);
+    assert.equal(validateCalculatorInput({ ...base, [field]: 1e12 + 1 })[field], `${other} 1조 원 이하로 입력해 주세요.`);
+  }
+});
+
 test('annual rate bounds exclude -100 and allow 100', () => {
   assert.ok(validateCalculatorInput({ ...base, annualRate: -100 }).annualRate);
   assert.ok(validateCalculatorInput({ ...base, annualRate: 100.1 }).annualRate);
