@@ -2,7 +2,7 @@ import test, { after as afterAll, before as beforeAll } from 'node:test';
 import assert from 'node:assert/strict';
 import { companies, isNewsAnalysis, isNewsArticle, type AiJudgement, type NewsArticle } from '@moneycast/core';
 import {
-  buildPrompt, createAiClassifier, decideConsensus, LLM_PROMPT_VERSION, LlmError, MAX_LLM_ITEMS, parseModelJson, validateJudgements,
+  buildPrompt, checkScore, createAiClassifier, decideConsensus, LLM_PROMPT_VERSION, LlmError, MAX_LLM_ITEMS, parseModelJson, validateJudgements,
   type JudgeItem, type JudgeRequest, type LlmJudge, type ValidationNote,
 } from './llm.js';
 import { createCloudflareJudge, DEFAULT_CLOUDFLARE_MODEL } from './llm-cloudflare.js';
@@ -206,8 +206,8 @@ test('the time budget, the per-call cap and provider-scored articles limit what 
   const skipped = result.articles.filter(item => item.aiConsensus === 'pending');
   assert.equal(skipped.length, 3);
   assert.match(skipped[0]!.rationaleLines![0]!, /Gemini 이번 갱신 미확인 · Cloudflare 이번 갱신 미확인/);
-  // A provider score is never overridden: the models only check relevance, so no quote is required of them.
-  assert.equal(gemini.requests[0]!.items.find(item => item.title === '삼성전자 실적 발표')?.judge, false);
+  // A scored article is read like any other, so the models must quote it for a direction.
+  assert.equal(gemini.requests[0]!.items.find(item => item.title === '삼성전자 실적 발표')?.judge, true);
   assert.equal(gemini.requests[0]!.items.find(item => item.title === '삼성전자 소식 0')?.judge, true);
   const kept = result.articles.find(item => item.id === 'mx')!;
   assert.equal(kept.sentiment, 'positive');
@@ -239,6 +239,9 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
       description: 'Samsung Electronics said on Tuesday it had won a large foundry order from a global customer, its biggest this year.' },
     { key: 'a10', title: 'Samsung Electronics third-quarter profit beats estimates', source: 'a', summarize: false },
     { key: 'a11', title: 'Samsung Electronics third-quarter profit beats estimates', source: 'a', summarize: false },
+    { key: 'a12', title: 'Samsung Electronics targets annual sales of 250,000 units and a $42 billion buyback', source: 'a', summarize: true },
+    { key: 'a13', title: 'Nasdaq 100 ETF adds Samsung Electronics', source: 'a', summarize: true },
+    { key: 'a14', title: 'Nasdaq 100 ETF adds Samsung Electronics', source: 'a', summarize: true },
   ] };
   const long = '가'.repeat(400);
   const notes = new Map<ValidationNote, number>();
@@ -258,9 +261,19 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
     // "third-quarter" written as 3분기 is the article's own number; a percentage it never gave is not.
     { id: 'a10', relevant: true, sentiment: 'positive', evidence: 'profit beats estimates', reason: '3분기 이익이 시장 예상치를 웃돌았다는 소식입니다.', summary: '' },
     { id: 'a11', relevant: true, sentiment: 'positive', evidence: 'profit beats estimates', reason: '3분기 이익이 30% 늘었다는 소식입니다.', summary: '' },
+    // The same amounts in Korean units are the article's numbers; a different amount is not.
+    { id: 'a12', relevant: true, sentiment: 'neutral', evidence: '', reason: '연간 25만 대 판매와 420억 달러 자사주 매입 계획입니다.',
+      summary: '연간 25만 대와 4200만 달러 규모의 계획을 다룹니다.' },
+    // A fund buying shares is a fact the article reports; telling the reader to buy is not.
+    { id: 'a13', relevant: true, sentiment: 'neutral', evidence: '', reason: 'ETF가 삼성전자 주식을 매수했다는 사실 전달입니다.', summary: '' },
+    { id: 'a14', relevant: true, sentiment: 'neutral', evidence: '', reason: '', summary: '지금이 매수 기회라는 기사입니다.' },
   ] }, request, notes);
-  assert.deepEqual([...valid.keys()], ['a4', 'a5', 'a6', 'a8', 'a9', 'a10']);
-  assert.deepEqual(Object.fromEntries(notes), { evidence_not_in_text: 1, no_evidence: 1, reason_numbers: 2, summary_advice: 2, duplicate: 1, evidence_trimmed: 1 });
+  assert.deepEqual([...valid.keys()], ['a4', 'a5', 'a6', 'a8', 'a9', 'a10', 'a12', 'a13', 'a14']);
+  assert.deepEqual(Object.fromEntries(notes), { evidence_not_in_text: 1, no_evidence: 1, reason_numbers: 2, summary_advice: 3, summary_numbers: 1, duplicate: 1, evidence_trimmed: 1 });
+  assert.equal(valid.get('a12')!.reason, '연간 25만 대 판매와 420억 달러 자사주 매입 계획입니다.');
+  assert.equal(valid.get('a12')!.summary, undefined);
+  assert.equal(valid.get('a13')!.reason, 'ETF가 삼성전자 주식을 매수했다는 사실 전달입니다.');
+  assert.equal(valid.get('a14')!.summary, undefined);
   // A long verbatim quote is kept as its opening part instead of costing the judgement.
   assert.equal(valid.get('a9')!.evidence, 'Samsung Electronics said on Tuesday it had won a large foundry order from a glob');
   assert.equal(valid.get('a4')!.summary, undefined);
@@ -475,7 +488,8 @@ test('two "unrelated" answers set a scored article apart without changing its sc
   const again = await classifier.apply(company, result.articles, { budgetMs: 18_000, eligible: always });
   assert.deepEqual(again.articles[0]!.rationaleLines, result.articles[0]!.rationaleLines);
   // One model alone cannot set a scored article apart.
-  const split = createAiClassifier([unrelatedJudge('gemini'), scripted('cloudflare', () => ({ sentiment: 'positive' }))], { clock: () => now.getTime() })!;
+  const split = createAiClassifier([unrelatedJudge('gemini'), scripted('cloudflare', () => ({ sentiment: 'positive', evidence: 'sectors surge' }))],
+    { clock: () => now.getTime() })!;
   const kept = (await split.apply(company, [roundup('r4', 0.6)], { budgetMs: 18_000, eligible: always })).articles[0]!;
   assert.deepEqual([kept.sentiment, kept.aiRelevance, kept.aiJudgements?.length], ['positive', undefined, 2]);
   assert.deepEqual(kept.rationaleLines, roundup('r4', 0.6).rationaleLines);
@@ -491,4 +505,72 @@ test('two "unrelated" answers set a scored article apart without changing its sc
     plain.rationale,
   ]);
   assert.equal(apart.aiRelevance, 'unrelated');
+});
+
+test('a score follows the two models only when both read it the other way, and is withheld when one does and neither backs it', async () => {
+  const scoredNews = (id: string, title: string, score: number): NewsArticle => ({
+    ...unscored(id, title, { sourceProvider: 'Marketaux', identity: 'entity_verified', timeKind: 'published', source: `${id}.example`,
+      rationaleLines: [`Marketaux 감성 점수 ${score}`, '기사 분위기 지표이며 주가 방향이나 확률을 뜻하지 않습니다.'] }),
+    sentiment: score > 0 ? 'positive' : score < 0 ? 'negative' : 'neutral', classificationMethod: 'provider', sentimentScore: score,
+  });
+  const articles = [
+    scoredNews('fall', 'Samsung Electronics shares fall as memory prices slide', 0.67),
+    scoredNews('mixed', 'Samsung Electronics shares fall after upbeat guidance', 0.3),
+    scoredNews('split', 'Samsung Electronics shares fall despite record orders', 0.4),
+    scoredNews('calm', 'Samsung Electronics holds annual shareholder meeting', 0),
+  ];
+  const geminiReads: Record<string, Answer> = {
+    fall: { sentiment: 'negative', evidence: 'shares fall', reason: '주가 하락 소식입니다.' },
+    mixed: { sentiment: 'negative', evidence: 'shares fall' }, split: { sentiment: 'negative', evidence: 'shares fall' },
+    calm: { sentiment: 'positive', evidence: 'annual shareholder meeting' },
+  };
+  const cloudflareReads: Record<string, Answer> = {
+    fall: { sentiment: 'negative', evidence: 'memory prices slide' }, mixed: { sentiment: 'neutral' },
+    split: { sentiment: 'positive', evidence: 'record orders' }, calm: { sentiment: 'positive', evidence: 'shareholder meeting' },
+  };
+  const byTitle = (reads: Record<string, Answer>) => (item: JudgeItem) => reads[articles.find(article => article.title === item.title)!.id]!;
+  // Gemini also summarizes, so a later refresh has nothing left to ask.
+  const gemini = scripted('gemini', item => ({ ...byTitle(geminiReads)(item), summary: '삼성전자 주가 관련 기사입니다.' }));
+  const cloudflare = scripted('cloudflare', byTitle(cloudflareReads));
+  const classifier = createAiClassifier([gemini, cloudflare], { clock: () => now.getTime() })!;
+  const provider = { name: 'Marketaux', cacheTtlMs: 60_000, async getArticles() { return { provider: 'Marketaux', articles }; } };
+  const store = createMemorySnapshotStore();
+  let instant = now;
+  const service = () => createNewsService(provider, () => instant, { store, classifier });
+  const result = await service().getAnalysis(company);
+  assert.ok(isNewsAnalysis(result, company.id));
+  const shape = (list: NewsArticle[]) => list.map(item => [item.id, item.sentiment, item.classificationMethod, item.aiConsensus, item.sentimentScore]);
+  assert.deepEqual(shape(result.articles), [
+    ['fall', 'negative', 'llm', 'confirmed', undefined], ['mixed', 'unclassified', 'unavailable', 'withheld', undefined],
+    ['split', 'positive', 'provider', undefined, 0.4], ['calm', 'neutral', 'provider', undefined, 0],
+  ]);
+  const card = (id: string) => result.articles.find(item => item.id === id)!.rationaleLines!;
+  assert.equal(card('fall')[0], "AI 방향 확인: Marketaux 점수 +0.67('긍정')과 달리 Gemini '부정' · Cloudflare '부정' → 두 모델이 반대 방향으로 일치해 AI 판단으로 집계합니다.");
+  assert.match(card('fall')[1]!, /^근거 표현: 「shares fall」/);
+  assert.equal(card('mixed')[0], "AI 방향 확인: Marketaux 점수 +0.3('긍정') · Gemini '부정' · Cloudflare '중립' → 점수와 AI 판단이 엇갈려 판단을 유보합니다.");
+  assert.deepEqual(card('split'), articles[2]!.rationaleLines);
+  // The overruled article now counts against the one the models did not contradict.
+  assert.equal(result.summary, '긍정·부정 근거가 상충하여 다음 주 방향 판단을 유보합니다.');
+  assert.deepEqual(result.factorSummary!.negative.lines.flatMap(line => line.articleIds), ['fall']);
+  assert.ok(result.factorSummary!.chips.includes('AI 판단 유보 1건'));
+
+  // Fresh copies of the same articles keep the outcome without asking either model again.
+  const calls = gemini.requests.length + cloudflare.requests.length;
+  instant = new Date(now.getTime() + 61_000);
+  const again = await service().getAnalysis(company);
+  assert.equal(gemini.requests.length + cloudflare.requests.length, calls);
+  assert.deepEqual(shape(again.articles), shape(result.articles));
+  assert.deepEqual(again.articles.map(item => item.rationaleLines), result.articles.map(item => item.rationaleLines));
+  // A saved copy judged again on its own still names the score it replaced.
+  const saved = await classifier.apply(company, result.articles, { budgetMs: 18_000, eligible: always });
+  assert.deepEqual(saved.articles.map(item => item.rationaleLines), result.articles.map(item => item.rationaleLines));
+
+  const read = (relevant: boolean, sentiment: AiJudgement['sentiment']) => ({ relevant, sentiment });
+  assert.equal(checkScore('positive', [read(true, 'negative')]), 'kept');
+  assert.equal(checkScore('negative', [read(true, 'positive'), read(true, 'positive')]), 'opposite');
+  assert.equal(checkScore('negative', [read(true, 'positive'), read(true, 'uncertain')]), 'withheld');
+  assert.equal(checkScore('negative', [read(true, 'positive'), read(false, 'neutral')]), 'withheld');
+  assert.equal(checkScore('positive', [read(true, 'neutral'), read(true, 'neutral')]), 'kept');
+  assert.equal(checkScore('neutral', [read(true, 'negative'), read(true, 'negative')]), 'kept');
+  assert.equal(checkScore('positive', [read(false, 'neutral'), read(false, 'neutral')]), 'unrelated');
 });

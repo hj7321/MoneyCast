@@ -36,10 +36,7 @@ export interface JudgeItem {
   source: string;
   language?: string;
   summarize: boolean;
-  /**
-   * False when the answer serves only a summary or a relevance check, as for
-   * articles that already carry a provider score; quotes and reasons are then not required.
-   */
+  /** False when only a summary is wanted; the model's reading is then not used, so no quote or reason is required. */
   judge?: boolean;
 }
 
@@ -134,6 +131,19 @@ const NUMBER_WORDS: Readonly<Record<string, string>> = {
   first: '1', second: '2', third: '3', fourth: '4', fifth: '5', double: '2', triple: '3',
 };
 const spelledNumbersIn = (value: string) => (value.toLowerCase().match(/[a-z]+/g) ?? []).flatMap(word => NUMBER_WORDS[word] ?? []);
+const SCALES: Readonly<Record<string, number>> = {
+  thousand: 1e3, k: 1e3, million: 1e6, mn: 1e6, m: 1e6, billion: 1e9, bn: 1e9, b: 1e9, trillion: 1e12, tn: 1e12, t: 1e12,
+};
+/** The same amounts in the units a Korean answer uses: 250,000 → 25(만), $42 billion → 420(억). */
+function koreanAmountsIn(value: string): string[] {
+  const amounts: string[] = [];
+  for (const [, digits, word, short] of value.normalize('NFKC').toLowerCase()
+    .matchAll(/(\d+(?:[.,]\d+)*)(?:\s*(thousand|million|billion|trillion)\b|(k|mn|m|bn|b|tn|t)(?![a-z]))?/g)) {
+    const amount = Number(digits!.replace(/,/g, '')) * (SCALES[word ?? short ?? ''] ?? 1);
+    for (const unit of [1e4, 1e8, 1e12]) if (amount / unit >= 1) amounts.push(String(Number((amount / unit).toFixed(2))));
+  }
+  return amounts;
+}
 
 /**
  * Advice and outlook wording. A rule with `source` is allowed only when the
@@ -141,8 +151,11 @@ const spelledNumbersIn = (value: string) => (value.toLowerCase().match(/[a-z]+/g
  * would be the model's own prediction and are never allowed.
  */
 const GUARDED: ReadonlyArray<{ output: RegExp; source?: RegExp }> = [
+  // A rating, or a fund or insider buying or selling shares, is reported in the article's own words.
   { output: /매수|매도|\b(buy|sell)\b|outperform|underperform|overweight|underweight/i,
-    source: /매수|매도|\b(buy|sell)\b|outperform|underperform|overweight|underweight|upgrade|downgrade|rating|투자\s*의견/i },
+    source: /매수|매도|매입|\b(buy|buys|bought|sell|sells|sold|adds?|added|purchas\w*|stakes?|acquir\w*)\b|outperform|underperform|overweight|underweight|upgrade|downgrade|rating|투자\s*의견/i },
+  // Buying or selling as advice, whatever the article reports.
+  { output: /(매수|매도)\s*(기회|적기|타이밍|시점)|(매수|매도)\s*(하세요|하십시오|하라|해야|할\s*만)/ },
   { output: /목표\s*(주가|가)|price\s*target|target\s*price/i, source: /목표\s*(주가|가)|price\s*target|target\s*price/i },
   { output: /추천|recommend/i, source: /추천|recommend/i },
   { output: /확률|probabilit|가능성이?\s*(높|크|낮)/i },
@@ -185,7 +198,7 @@ function validateItem(entry: Record<string, unknown>, input: JudgeItem, request:
     if (summary && guarded(summary, source)) { note('summary_advice'); return undefined; }
     return summary;
   };
-  // The model's view of an already scored article is never used, so it cannot cost the summary.
+  // A summary-only answer's reading is never used, so it cannot cost the summary.
   if (input.judge === false) {
     const summary = checkedSummary();
     return { relevant: entry.relevant, sentiment, ...(summary ? { summary } : {}) };
@@ -228,7 +241,7 @@ export function validateJudgements(raw: unknown, request: JudgeRequest, notes?: 
     // An id answered twice is ambiguous, so neither answer is used.
     if (counts.get(input.key) !== 1) { note('duplicate'); continue; }
     const text = `${input.title} ${input.description ?? ''} ${companyText}`;
-    const allowed = new Set([...numbersIn(text), ...spelledNumbersIn(text)]);
+    const allowed = new Set([...numbersIn(text), ...spelledNumbersIn(text), ...koreanAmountsIn(text)]);
     const judged = validateItem(entry, input, request, allowed, note);
     if (judged) valid.set(input.key, judged);
   }
@@ -262,7 +275,7 @@ export function aiManaged(article: NewsArticle): boolean {
 function needsJudgement(article: NewsArticle, id: AiProviderId): boolean {
   const judgements = article.aiJudgements ?? [];
   if (judgements.some(item => item.provider === id)) return false;
-  // A provider score keeps its direction; each model checks once that the article is about the company.
+  // Each model reads a scored article once: whether it is about the company and which way it points.
   if (!aiManaged(article)) return true;
   const { consensus } = decideConsensus(judgements);
   return consensus === 'pending' || consensus === 'provisional';
@@ -294,6 +307,8 @@ const EXCLUDED = '긍정·부정 요인 집계에서 제외합니다.';
 const verdict = (item: AiJudgement) => `${LABELS[item.provider]} '${item.relevant ? SENTIMENT_LABELS[item.sentiment] : '관련 없음'}'`;
 /** Marks the line this module adds to a provider's own rationale, so it is never added twice. */
 const RELEVANCE_LEAD = 'AI 관련성 확인:';
+/** Marks the line that keeps an overruled provider score visible through later refreshes. */
+const SCORE_LEAD = 'AI 방향 확인:';
 
 function aiRationale(article: NewsArticle, judgements: AiJudgement[], consensus: ConsensusDecision['consensus'],
   missing: ReadonlyMap<AiProviderId, MissingReason>, providers: readonly AiProviderId[]): string[] {
@@ -355,7 +370,10 @@ function applyConsensus(article: NewsArticle, judgements: AiJudgement[], missing
     return { ...rest, sentiment: 'unclassified', classificationMethod: 'unavailable', aiJudgements: sorted, aiRelevance: 'unrelated',
       rationaleLines: lines, rationale: lines[0]!, topics };
   }
-  const lines = aiRationale(article, sorted, decision.consensus, missing, providers).slice(0, 5);
+  const generated = aiRationale(article, sorted, decision.consensus, missing, providers);
+  // An overruled provider score stays named in place of the generic first line.
+  const kept = article.rationaleLines?.find(line => line.startsWith(SCORE_LEAD));
+  const lines = (kept ? [kept, ...generated.slice(1)] : generated).slice(0, 5);
   return {
     ...rest, sentiment: decision.sentiment, classificationMethod: decision.consensus === 'confirmed' ? 'llm' : 'unavailable',
     aiConsensus: decision.consensus, ...(sorted.length ? { aiJudgements: sorted } : {}),
@@ -364,8 +382,8 @@ function applyConsensus(article: NewsArticle, judgements: AiJudgement[], missing
 }
 
 /**
- * A provider-scored article keeps its direction. Only when both models judge
- * it not to be about the company is it set apart; its score stays visible for reference.
+ * A provider-scored article the models do not contradict keeps its direction.
+ * When both judge it not to be about the company it is set apart; its score stays visible for reference.
  */
 function applyRelevance(article: NewsArticle, judgements: AiJudgement[], providers: readonly AiProviderId[]): NewsArticle {
   const sorted = ordered(judgements, providers);
@@ -383,6 +401,41 @@ function applyRelevance(article: NewsArticle, judgements: AiJudgement[], provide
     ...rest, ...(sorted.length ? { aiJudgements: sorted } : {}), ...(unrelated ? { aiRelevance: 'unrelated' as const } : {}),
     ...(lines ? { rationaleLines: lines, rationale: lines.join(' ') } : {}),
   };
+}
+
+/** What two models' reading does to an article that carries a provider score. */
+export type ScoreCheck = 'kept' | 'unrelated' | 'opposite' | 'withheld';
+
+/**
+ * The score keeps its direction unless the models contradict it: both reading
+ * the opposite direction overrules it, one doing so while neither supports the
+ * score withholds it, and both judging the article unrelated sets it apart.
+ */
+export function checkScore(sentiment: NewsArticle['sentiment'], judgements: readonly Pick<AiJudgement, 'relevant' | 'sentiment'>[]): ScoreCheck {
+  if (judgements.length !== 2) return 'kept';
+  const reads = judgements.map(item => item.relevant ? item.sentiment : 'unrelated');
+  if (reads.every(read => read === 'unrelated')) return 'unrelated';
+  if (sentiment !== 'positive' && sentiment !== 'negative') return 'kept';
+  const opposite = sentiment === 'positive' ? 'negative' : 'positive';
+  if (reads.includes(sentiment) || !reads.includes(opposite)) return 'kept';
+  return reads.every(read => read === opposite) ? 'opposite' : 'withheld';
+}
+
+/**
+ * The article becomes AI-managed, so its label follows the same agreement rule
+ * as unscored articles; the first rationale line keeps the score it replaced.
+ */
+function overruleScore(article: NewsArticle, judgements: AiJudgement[], check: 'opposite' | 'withheld',
+  providers: readonly AiProviderId[]): NewsArticle {
+  const sorted = ordered(judgements, providers);
+  const { sentimentScore: score, ...rest } = article;
+  const label = SENTIMENT_LABELS[article.sentiment as 'positive' | 'negative'];
+  const reference = `${article.sourceProvider ?? '제공자'} ${score === undefined ? `분류 '${label}'` : `점수 ${score > 0 ? '+' : ''}${String(score)}('${label}')`}`;
+  const lead = check === 'opposite'
+    ? `${SCORE_LEAD} ${reference}과 달리 ${sorted.map(verdict).join(' · ')} → 두 모델이 반대 방향으로 일치해 AI 판단으로 집계합니다.`
+    : `${SCORE_LEAD} ${reference} · ${sorted.map(verdict).join(' · ')} → 점수와 AI 판단이 엇갈려 판단을 유보합니다.`;
+  const base: NewsArticle = { ...rest, sentiment: 'unclassified', classificationMethod: 'unavailable', rationaleLines: [lead], rationale: lead };
+  return applyConsensus(base, sorted, new Map(), providers);
 }
 
 export interface AiClassifier {
@@ -439,8 +492,7 @@ export function createAiClassifier(
           items: [...byKey].map(([key, article]) => ({
             key, title: article.title, ...(article.description ? { description: article.description } : {}),
             source: article.source, ...(article.language ? { language: article.language } : {}),
-            // A scored article is asked only whether it is about the company, so no quote is required.
-            summarize: judge === summarizer && !article.summary, judge: aiManaged(article) && judgeTargets.includes(article),
+            summarize: judge === summarizer && !article.summary, judge: judgeTargets.includes(article),
           })),
         };
         const controller = new AbortController();
@@ -488,7 +540,12 @@ export function createAiClassifier(
         const summary = summaries.get(article.id);
         const current = summary ? { ...article, summary } : article;
         const judgements = [...(current.aiJudgements ?? []), ...(added.get(current.id) ?? [])];
-        if (!aiManaged(current)) { result.push(applyRelevance(current, judgements, providers)); continue; }
+        if (!aiManaged(current)) {
+          const check = checkScore(current.sentiment, judgements);
+          result.push(check === 'opposite' || check === 'withheld' ? overruleScore(current, judgements, check, providers)
+            : applyRelevance(current, judgements, providers));
+          continue;
+        }
         // Articles outside the window are never sent, so they keep their source wording until judged.
         if (!eligible(current) && !current.aiJudgements) { result.push(current); continue; }
         result.push(applyConsensus(current, judgements, missing.get(current.id) ?? new Map(), providers));

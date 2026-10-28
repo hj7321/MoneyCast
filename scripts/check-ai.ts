@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { companies, type AiJudgement, type AiProviderId, type Company, type NewsArticle } from '../packages/core/src/index.js';
-import { decideConsensus, LlmError, MAX_LLM_ITEMS, validateJudgements, type JudgeRequest, type LlmJudge, type ValidJudgement, type ValidationNote } from '../server/llm.js';
+import { checkScore, decideConsensus, LlmError, MAX_LLM_ITEMS, validateJudgements, type JudgeRequest, type LlmJudge, type ScoreCheck, type ValidJudgement, type ValidationNote } from '../server/llm.js';
 import { createLlmJudges } from '../server/llm-judges.js';
 import { createNewsProvider } from '../server/news-provider.js';
 import { ProviderError } from '../server/provider.js';
@@ -19,6 +19,10 @@ const MODEL_WAIT_MS = 25_000;
 const GDELT_SPACING_MS = 6_000;
 const VERDICTS = { positive: '긍정', negative: '부정', neutral: '중립', uncertain: '판단 불가' } as const;
 const RESULTS = { confirmed: '합의', provisional: '잠정', withheld: '유보', pending: '대기', irrelevant: '관련 없음 합의' } as const;
+// What the app does with a scored article, by the same rule the server applies.
+const SCORE_RESULTS: Record<ScoreCheck, string> = {
+  kept: '점수 유지', unrelated: '관련 없음 합의(요인 제외)', opposite: 'AI 판단으로 집계(점수와 반대)', withheld: '판단 유보(점수와 엇갈림)',
+};
 
 const seconds = (ms: number) => (ms / 1000).toFixed(1);
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -26,7 +30,7 @@ const verdict = (judgement: Pick<AiJudgement, 'relevant' | 'sentiment'> | undefi
   !judgement ? '없음' : judgement.relevant ? VERDICTS[judgement.sentiment] : '관련 없음';
 
 interface Answer { judge: LlmJudge; ms: number; valid?: Map<string, ValidJudgement>; error?: string; notes: Map<ValidationNote, number> }
-interface Sample { article: NewsArticle; byModel: Map<AiProviderId, ValidJudgement> }
+interface Sample { article: NewsArticle; byModel: Map<AiProviderId, ValidJudgement>; check?: ScoreCheck }
 
 async function ask(judge: LlmJudge, request: JudgeRequest): Promise<Answer> {
   const notes = new Map<ValidationNote, number>();
@@ -100,13 +104,10 @@ async function main(): Promise<void> {
           const valid = answer.valid?.get(`a${i + 1}`);
           if (valid) byModel.set(answer.judge.id, valid);
         }
-        samples.push({ article, byModel });
         const judgements = [...byModel].map(([id, value]): AiJudgement => ({ provider: id, model: id, relevant: value.relevant, sentiment: value.sentiment, judgedAt: new Date().toISOString() }));
-        const decided = decideConsensus(judgements).consensus;
-        // A provider score keeps its direction in the app; only an agreed "unrelated" sets it apart.
-        const result = article.classificationMethod === 'provider'
-          ? decided === 'irrelevant' ? '관련 없음 합의(요인 제외)' : '점수 유지'
-          : RESULTS[decided];
+        const check = article.classificationMethod === 'provider' ? checkScore(article.sentiment, judgements) : undefined;
+        samples.push({ article, byModel, ...(check ? { check } : {}) });
+        const result = check ? SCORE_RESULTS[check] : RESULTS[decideConsensus(judgements).consensus];
         const reference = article.classificationMethod === 'provider'
           ? `Marketaux ${VERDICTS[article.sentiment as 'positive' | 'negative' | 'neutral']}${article.sentimentScore !== undefined ? `(${article.sentimentScore > 0 ? '+' : ''}${article.sentimentScore})` : ''}`
           : `${article.sourceProvider ?? '출처'} 점수 없음`;
@@ -125,6 +126,10 @@ async function main(): Promise<void> {
   console.log('\n== 집계');
   const scored = samples.filter(sample => sample.article.classificationMethod === 'provider');
   console.log(`표본 ${samples.length}건 · Marketaux 점수 있음 ${scored.length}건 · 점수 없음 ${samples.length - scored.length}건`);
+  if (scored.length) {
+    const tally = (check: ScoreCheck) => scored.filter(sample => sample.check === check).length;
+    console.log(`점수 기사 결과: 점수 유지 ${tally('kept')}건 · AI 판단으로 집계 ${tally('opposite')}건 · 판단 유보 ${tally('withheld')}건 · 관련 없음 ${tally('unrelated')}건`);
+  }
   const pairs = samples.filter(sample => sample.byModel.size === 2);
   const same = pairs.filter(sample => verdict(sample.byModel.get('gemini')) === verdict(sample.byModel.get('cloudflare'))).length;
   if (judges.length === 2) console.log(`두 모델 모두 답한 ${pairs.length}건 중 같은 판단 ${same}건${pairs.length ? `(${Math.round(same / pairs.length * 100)}%)` : ''}`);
