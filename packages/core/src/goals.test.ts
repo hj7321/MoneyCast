@@ -150,6 +150,7 @@ test('goal descriptions name the goal and the part of the price it covers', () =
   assert.equal(describeGoal('free', drafts('free', { name: '가'.repeat(30) })), '가'.repeat(20));
   assert.equal(describeGoal('home', untouched), '내 집 마련 · 집값 전체 기준');
   assert.equal(describeGoal('home', drafts('home', { region: '서울', housing: 'apartment', scope: 'equity' })), '내 집 마련(서울 아파트) · 자기자본 기준');
+  assert.equal(describeGoal('home', drafts('home', { region: '서울', district: ' 마포구 ', housing: 'apartment' })), '내 집 마련(서울 마포구 아파트) · 집값 전체 기준');
   assert.equal(describeGoal('car', drafts('car', { model: '아반떼', condition: 'new', scope: 'initial' })), '자동차(아반떼, 신차) · 초기 자금 기준');
   assert.equal(describeGoal('travel', untouched), '여행');
   assert.equal(describeGoal('travel', drafts('travel', { destination: '오사카' })), '여행(오사카)');

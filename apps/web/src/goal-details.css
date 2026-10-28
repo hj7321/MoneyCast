@@ -78,3 +78,22 @@
 .goal-question-fields .field label { font-size: 14px; }
 .goal-question .goal-link { font-size: 13px; }
 .goal-assist-ai { display: grid; gap: 8px; padding-top: 10px; border-top: 1px dashed #d4e1d3; }
+
+/* Optional settings beside the target: an assumed price rise, the target month, and goals saved in this browser. */
+.goal-inflation { display: grid; gap: 8px; margin-top: 14px; }
+.goal-inflation .field-hint { min-height: 0; line-height: 1.6; }
+.target-month-field { margin-top: 14px; }
+.target-month-field .field-hint { line-height: 1.6; }
+.saved-goals { display: grid; gap: 8px; margin-top: 22px; padding-top: 18px; border-top: 1px solid #edf0e7; word-break: keep-all; }
+.saved-goals-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.saved-goals-head h3 { font-size: 15px; font-weight: 600; color: #2f4a37; }
+.saved-goals-head h3 span { margin-left: 4px; font-size: 13px; font-weight: 500; color: var(--supporting-text); }
+.saved-goals .field-hint { min-height: 0; margin-top: 0; line-height: 1.6; }
+.saved-goal-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.saved-goal-list li { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid #e1e8dc; border-radius: 8px; background: #fbfcf9; }
+.saved-goal-list strong { display: block; font-size: 14px; font-weight: 600; line-height: 1.5; color: #304a37; overflow-wrap: anywhere; }
+.saved-goal-list span { display: block; margin-top: 2px; font-size: 13px; color: var(--supporting-text); }
+.saved-goal-actions { display: flex; gap: 6px; }
+.saved-goal-actions button { min-height: 34px; padding: 5px 12px; border: 1px solid #c9dccb; border-radius: 6px; background: #f3f8f1; color: #2f5f3c; font-size: 13px; font-weight: 550; }
+.saved-goals-notice { min-height: 0; font-size: 13px; color: #2f6b4b; }
+.saved-goals-notice:empty { display: none; }

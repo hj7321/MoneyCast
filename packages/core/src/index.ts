@@ -33,7 +33,7 @@ export const CALCULATION_ASSUMPTIONS = {
   contributionTiming: '매월 말 납입',
   monthlyRate: '(1 + 연 수익률 / 100)^(1/12) - 1',
   rounding: '계산 중 반올림하지 않고 표시할 때 원 단위 반올림',
-  exclusions: '세금, 수수료, 물가상승률 미반영',
+  exclusions: '세금, 수수료 미반영, 물가상승은 목표 금액에만 선택 반영',
   disclaimer: '수익률은 사용자가 입력한 가정이며 실제 수익을 보장하지 않습니다.',
 } as const;
 
@@ -558,14 +558,14 @@ export { createNewsCache, NEWS_CACHE_TTL_MS, NEWS_CACHE_ANALYSIS_VERSION, NEWS_L
 export { NEWS_TOPICS, NEWS_TOPIC_KEYS, classifyNewsTopics, isNewsTopicKey, newsTopicLabel, type NewsTopicKey } from './news-topics.js';
 export { COMPANY_NEWS_IDENTITY, matchesCompanyTitle, type CompanyNewsIdentity } from './news-identity.js';
 export {
-  GOAL_TYPES, GOAL_NAME_MAX_LENGTH, GOAL_LABEL_MAX_LENGTH, GOAL_NOTE_MAX_LENGTH, GOAL_ITEM_LIMIT, TRAVELERS_LIMIT, TRIP_NIGHTS_LIMIT,
+  GOAL_TYPES, GOAL_NAME_MAX_LENGTH, GOAL_LABEL_MAX_LENGTH, GOAL_NOTE_MAX_LENGTH, GOAL_ITEM_LIMIT, GOAL_DISTRICT_MAX_LENGTH, TRAVELERS_LIMIT, TRIP_NIGHTS_LIMIT,
   FREE_GOAL_NAME_SUGGESTIONS, HOME_REGIONS, HOUSING_TYPES, CAR_CONDITIONS, HOME_SCOPE_LABELS, CAR_SCOPE_LABELS, GOAL_SOURCE_LABELS,
   GOAL_SOURCE_NOTES, HOME_SCOPE_NOTES, CAR_SCOPE_NOTES,
   goalTypeName, createGoalDrafts, parseGoalNumber, resolveGoalTarget, formatGoalFormula, describeGoal, describeGoalTarget, describeGoalResult,
   createGoalPlanner, updateGoalPlanner,
   type GoalType, type GoalTypeDefinition, type GoalDrafts, type FreeGoalDraft, type HomeGoalDraft, type CarGoalDraft,
   type TravelGoalDraft, type GoalItemDraft, type HousingType, type CarCondition, type GoalTargetSource,
-  type GoalFormulaLine, type GoalTargetResolution, type GoalPlannerState, type GoalPlannerAction,
+  type GoalFormulaLine, type GoalTargetResolution, type GoalPlannerState, type GoalPlannerAction, type GoalInflationDraft,
 } from './goals.js';
 export {
   GOAL_CATEGORIES, GOAL_CATEGORY_IDS, isGoalCategory, categoryGoalType, categoryLabel, categoryGoalName, classifyGoalText,
@@ -579,3 +579,12 @@ export {
   type GoalClarifyStatus, type GoalAiProvider, type GoalAiAvailability, type GoalClarification,
 } from './goal-clarify.js';
 export { goalFactActions, goalSwitchActions, livingCostActions, describeSwitchPrefill, type GoalFactSelection } from './goal-assist.js';
+export {
+  INFLATION_RATE_MAX, parseYearMonth, periodEndMonth, formatYearMonth, monthInputValue, monthsFromTargetMonth, compareGoalTarget, describeInflation,
+  type YearMonth, type GoalComparison,
+} from './goal-time.js';
+export {
+  SAVED_GOAL_LIMIT, SAVED_GOALS_KEY, createSavedGoal, loadSavedGoalAction, describeSavedGoal, serializeSavedGoals, parseSavedGoals,
+  type SavedGoal, type SavedCalculatorFields,
+} from './goal-saved.js';
+export { csvCell, buildProjectionCsv, goalCsvSummary, type CsvValue, type GoalCsvInput } from './goal-csv.js';

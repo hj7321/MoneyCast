@@ -24,6 +24,8 @@ export const GOAL_NAME_MAX_LENGTH = 20;
 export const GOAL_LABEL_MAX_LENGTH = 30;
 export const GOAL_NOTE_MAX_LENGTH = 200;
 export const GOAL_ITEM_LIMIT = 5;
+/** A district is typed rather than picked: a label only, like the region. */
+export const GOAL_DISTRICT_MAX_LENGTH = 20;
 export const TRAVELERS_LIMIT = 20;
 export const TRIP_NIGHTS_LIMIT = 365;
 /** Same ceiling as the calculator's amount fields. */
@@ -66,6 +68,7 @@ export interface HomeGoalDraft extends PurchaseDraft {
   scope: 'full' | 'equity' | 'initial';
   loan: string;
   region: string;
+  district: string;
   housing: HousingType | '';
 }
 export interface CarGoalDraft extends PurchaseDraft {
@@ -151,7 +154,7 @@ export function createGoalDrafts(formatAmount: (amount: number) => string = Stri
   });
   return {
     free: { name: '', method: 'direct', items: [{ label: '', amount: '' }], note: '' },
-    home: { scope: 'full', ...purchase('home'), loan: '', region: '', housing: '' },
+    home: { scope: 'full', ...purchase('home'), loan: '', region: '', district: '', housing: '' },
     car: { scope: 'full', ...purchase('car'), model: '', condition: '' },
     travel: {
       destination: '', method: 'total', total: formatAmount(exampleAmount('travel')),
@@ -315,12 +318,16 @@ export function resolveGoalTarget(type: GoalType, drafts: GoalDrafts, override?:
   return freeTarget(drafts.free);
 }
 
-/** Everything the goal section holds; memory only, like the calculator's other inputs. */
+/** An assumed yearly price rise applied to the target; off unless the person turns it on. */
+export interface GoalInflationDraft { on: boolean; rate: string }
+
+/** Everything the goal section holds; memory only, like the calculator's other inputs, until the person saves a goal. */
 export interface GoalPlannerState {
   goal: GoalType;
   drafts: GoalDrafts;
   /** Text typed into the target field, per goal type; absent while the details decide the target. */
   overrides: Partial<Record<GoalType, string>>;
+  inflation: GoalInflationDraft;
 }
 
 type DraftUpdate = { [K in GoalType]: { type: 'update'; goal: K; patch: Partial<GoalDrafts[K]> } }[GoalType];
@@ -330,10 +337,14 @@ export type GoalPlannerAction =
   | { type: 'freeMethod'; method: FreeGoalDraft['method'] }
   | { type: 'typeTarget'; text: string }
   | { type: 'followDetails' }
+  | { type: 'inflation'; patch: Partial<GoalInflationDraft> }
+  | { type: 'load'; goal: GoalType; draft: GoalDrafts[GoalType]; override?: string; inflation: GoalInflationDraft }
   | { type: 'reset'; drafts: GoalDrafts };
 
+const NO_INFLATION: GoalInflationDraft = { on: false, rate: '' };
+
 export function createGoalPlanner(formatAmount?: (amount: number) => string): GoalPlannerState {
-  return { goal: 'free', drafts: createGoalDrafts(formatAmount), overrides: {} };
+  return { goal: 'free', drafts: createGoalDrafts(formatAmount), overrides: {}, inflation: NO_INFLATION };
 }
 
 function withoutOverride(overrides: GoalPlannerState['overrides'], goal: GoalType): GoalPlannerState['overrides'] {
@@ -365,8 +376,15 @@ export function updateGoalPlanner(state: GoalPlannerState, action: GoalPlannerAc
     }
     case 'followDetails':
       return { ...state, overrides: withoutOverride(state.overrides, state.goal) };
+    case 'inflation':
+      return { ...state, inflation: { ...state.inflation, ...action.patch } };
+    case 'load': {
+      // A saved goal replaces its own type's entries; the other types keep theirs.
+      const overrides = action.override === undefined ? withoutOverride(state.overrides, action.goal) : { ...state.overrides, [action.goal]: action.override };
+      return { goal: action.goal, drafts: { ...state.drafts, [action.goal]: action.draft }, overrides, inflation: action.inflation };
+    }
     case 'reset':
-      return { goal: 'free', drafts: action.drafts, overrides: {} };
+      return { goal: 'free', drafts: action.drafts, overrides: {}, inflation: NO_INFLATION };
   }
 }
 
@@ -385,11 +403,16 @@ export function describeGoalTarget(resolution: GoalTargetResolution, format: (am
   return `${format(amount)} · ${source === 'example' ? '예시 금액이에요. 내 목표에 맞게 바꿔 보세요.' : '목표 상세로 계산했어요.'}`;
 }
 
-/** "여행(오사카) · 상세 계산 245만 원": the goal and its target, for the result area. */
-export function describeGoalResult(type: GoalType, drafts: GoalDrafts, resolution: GoalTargetResolution, format: (amount: number) => string): string {
+/**
+ * "여행(오사카) · 상세 계산 245만 원": the goal and its target, for the result
+ * area, followed by the amount compared against when a price rise is assumed.
+ */
+export function describeGoalResult(
+  type: GoalType, drafts: GoalDrafts, resolution: GoalTargetResolution, format: (amount: number) => string, inflated?: number,
+): string {
   const { source, amount } = resolution;
   const target = source === 'undecided' || amount === null || !Number.isFinite(amount) ? '목표 금액 미정' : `${GOAL_SOURCE_LABELS[source]} ${format(amount)}`;
-  return `${describeGoal(type, drafts)} · ${target}`;
+  return `${describeGoal(type, drafts)} · ${target}${inflated === undefined ? '' : ` → 물가 반영 ${format(inflated)}`}`;
 }
 
 /** A short name for the result: what the goal is and, for purchases, which part of the price it covers. */
@@ -401,8 +424,8 @@ export function describeGoal(type: GoalType, drafts: GoalDrafts): string {
   };
   if (type === 'free') return clip(drafts.free.name, GOAL_NAME_MAX_LENGTH) || goalTypeName('free');
   if (type === 'home') {
-    const { region, housing, scope } = drafts.home;
-    const place = [region, HOUSING_TYPES.find(item => item.id === housing)?.label ?? ''].filter(Boolean).join(' ');
+    const { region, district, housing, scope } = drafts.home;
+    const place = [region, clip(district, GOAL_DISTRICT_MAX_LENGTH), HOUSING_TYPES.find(item => item.id === housing)?.label ?? ''].filter(Boolean).join(' ');
     return `${named(goalTypeName('home'), [place])} · ${HOME_SCOPE_LABELS[scope]} 기준`;
   }
   if (type === 'car') {

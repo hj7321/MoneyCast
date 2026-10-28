@@ -80,7 +80,7 @@ test('calculator renders default assumption, final assets, principal and a label
   assert.ok(screen.getAllByText('40,000,000원').length >= 1);
   assert.ok(screen.getByText('목표보다 3,330,315원 부족합니다. 납입액이나 기간을 조정해 보세요.'));
   assert.match(screen.getByRole('img', { name: /5년 자산 추이/ }).getAttribute('aria-label')!, /목표 50,000,000원/);
-  assert.ok(screen.getByText(/세금·수수료·물가상승률 미반영/));
+  assert.ok(screen.getByText(/세금·수수료 미반영 · 물가상승은 목표 금액에만 선택 반영/));
   assert.ok(screen.getByText(/수익률은 사용자의 가정/));
 });
 
@@ -436,6 +436,140 @@ test('an unchecked AI answer or personal data falls back to the questions and ne
   assert.ok(within(personal).getByText(/주민등록번호·카드·계좌번호처럼 보이는 내용이 있어 AI로 보내지 않아요/));
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(within(personal).queryByRole('button', { name: 'AI로 다시 정리하기' }), null);
+});
+
+const endMonth = (months: number) => {
+  const now = new Date();
+  const index = now.getFullYear() * 12 + now.getMonth() + months;
+  return { year: Math.floor(index / 12), month: index % 12 + 1 };
+};
+const monthValue = ({ year, month }: { year: number; month: number }) => `${year}-${String(month).padStart(2, '0')}`;
+
+test('a target month sets the saving period, and the period shows the month it ends', () => {
+  open();
+  const period = screen.getByLabelText('목표 기간') as HTMLInputElement;
+  const month = screen.getByLabelText('목표 시점') as HTMLInputElement;
+  assert.equal(month.value, monthValue(endMonth(60)));
+  assert.ok(screen.getByText(`${endMonth(60).year}년 ${endMonth(60).month}월까지 모아요. 날짜를 고르면 목표 기간이 바뀌어요.`));
+  fireEvent.change(month, { target: { value: monthValue(endMonth(18)) } });
+  assert.equal(period.value, '18');
+  assert.ok(screen.getByRole('img', { name: /^1년 6개월 자산 추이/ }));
+  fireEvent.change(period, { target: { value: '24' } });
+  assert.equal(month.value, monthValue(endMonth(24)));
+  fireEvent.change(month, { target: { value: monthValue(endMonth(0)) } });
+  assert.equal(month.getAttribute('aria-invalid'), 'true');
+  assert.ok(screen.getByText('목표 시점은 다음 달 이후로 정해 주세요.'));
+  assert.equal(period.value, '24');
+  fireEvent.change(month, { target: { value: monthValue(endMonth(1)) } });
+  assert.equal(period.value, '1');
+  assert.equal(month.getAttribute('aria-invalid'), 'false');
+});
+
+test('an assumed price rise raises only the amount compared and reads as an assumption', () => {
+  open();
+  fireEvent.click(screen.getByLabelText('물가상승 반영(선택)'));
+  assert.ok(screen.getByText('연 물가상승률을 입력하면 목표 금액에 반영해요.'));
+  assert.match(chartLabel(), /목표 50,000,000원/);
+  fireEvent.change(screen.getByLabelText('연 물가상승률'), { target: { value: '2' } });
+  assert.equal(targetInput().value, '50,000,000');
+  assert.ok(screen.getByText('오늘 5,000만 원이 연 2%씩 오르면 5년 뒤 5,520.4만 원이에요. 이 금액과 비교해요.'));
+  assert.match(chartLabel(), /목표 55,204,040원/);
+  assert.ok(screen.getByText('자유 목표 · 예시 금액 5,000만 원 → 물가 반영 5,520.4만 원'));
+  assert.ok(screen.getByText('목표 5,520.4만 원(물가 반영)'));
+  fireEvent.change(screen.getByLabelText('연 물가상승률'), { target: { value: '25' } });
+  assert.equal(screen.getByLabelText('연 물가상승률').getAttribute('aria-invalid'), 'true');
+  assert.ok(screen.getByText('물가상승률은 0~20% 사이로 입력해 주세요.'));
+  assert.equal(screen.queryByRole('img', { name: /자산 추이/ }), null);
+  assert.equal(targetInput().getAttribute('aria-invalid'), 'false', 'the target itself is fine');
+  fireEvent.click(screen.getByLabelText('물가상승 반영(선택)'));
+  assert.match(chartLabel(), /목표 50,000,000원/);
+  assert.ok(screen.getByText('자유 목표 · 예시 금액 5,000만 원'));
+});
+
+test('a home district labels the goal without changing its amount', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  fireEvent.click(screen.getByRole('button', { name: '더 자세히 입력(선택)' }));
+  fireEvent.change(screen.getByLabelText('지역(시·도)'), { target: { value: '서울' } });
+  fireEvent.change(screen.getByLabelText('시·군·구'), { target: { value: '마포구' } });
+  assert.ok(screen.getByText('내 집 마련(서울 마포구) · 집값 전체 기준 · 예시 금액 3억 원'));
+  assert.equal(targetInput().value, '300,000,000');
+});
+
+const savedRegion = () => screen.getByRole('region', { name: /^저장한 목표/ });
+
+test('a goal is kept in this browser only when saved, without its description, and loads back with the calculator fields', () => {
+  open();
+  assert.equal(window.localStorage.getItem('moneycast.goals.v1'), null);
+  fireEvent.change(screen.getByLabelText('목표 이름'), { target: { value: '결혼 자금' } });
+  fireEvent.change(screen.getByLabelText('설명(선택)'), { target: { value: '예식 2천만 원' } });
+  fireEvent.change(screen.getByLabelText('목표 기간'), { target: { value: '24' } });
+  assert.equal(window.localStorage.getItem('moneycast.goals.v1'), null, 'typing alone stores nothing');
+  fireEvent.click(screen.getByRole('button', { name: '현재 목표 저장' }));
+  assert.doesNotMatch(window.localStorage.getItem('moneycast.goals.v1')!, /예식/);
+  assert.ok(within(savedRegion()).getByText('결혼 자금 · 예시 금액 5,000만 원'));
+  assert.ok(within(savedRegion()).getByText(/^기간 2년 · 매월 50만 원 · .+ 저장$/));
+  // Remounting, as a reload does, starts the inputs over and reads the list back.
+  cleanup();
+  open();
+  assert.equal((screen.getByLabelText('목표 기간') as HTMLInputElement).value, '60');
+  assert.equal((screen.getByLabelText('목표 이름') as HTMLInputElement).value, '');
+  fireEvent.click(within(savedRegion()).getByRole('button', { name: '결혼 자금 · 예시 금액 5,000만 원 불러오기' }));
+  assert.equal((screen.getByLabelText('목표 이름') as HTMLInputElement).value, '결혼 자금');
+  assert.equal((screen.getByLabelText('설명(선택)') as HTMLTextAreaElement).value, '');
+  assert.equal((screen.getByLabelText('목표 기간') as HTMLInputElement).value, '24');
+  assert.ok(screen.getByText('저장한 목표를 불러왔어요.'));
+  fireEvent.click(within(savedRegion()).getByRole('button', { name: '결혼 자금 · 예시 금액 5,000만 원 삭제' }));
+  assert.equal(within(savedRegion()).queryByRole('list'), null);
+  assert.equal(window.localStorage.getItem('moneycast.goals.v1'), null);
+});
+
+test('saving stops at five goals, ignores unreadable storage and is not offered when storage is blocked', () => {
+  window.localStorage.setItem('moneycast.goals.v1', JSON.stringify({ version: 1, goals: [{ id: 'x', goal: 'boat' }] }));
+  open();
+  assert.equal(within(savedRegion()).queryByRole('list'), null);
+  for (let index = 0; index < 5; index += 1) fireEvent.click(screen.getByRole('button', { name: '현재 목표 저장' }));
+  assert.equal(within(savedRegion()).getAllByRole('listitem').length, 5);
+  assert.equal((screen.getByRole('button', { name: '현재 목표 저장' }) as HTMLButtonElement).disabled, true);
+  assert.ok(screen.getByText('최대 5개까지 저장할 수 있어요. 하나를 지운 뒤 저장해 주세요.'));
+  cleanup();
+  const original = Object.getOwnPropertyDescriptor(dom.window, 'localStorage')!;
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    get() { throw new dom.window.DOMException('Storage blocked for test', 'SecurityError'); },
+  });
+  try {
+    open();
+    assert.equal((screen.getByRole('button', { name: '현재 목표 저장' }) as HTMLButtonElement).disabled, true);
+    assert.ok(screen.getByText('이 브라우저에서는 목표를 저장할 수 없어요.'));
+    assert.ok(screen.getByRole('img', { name: /자산 추이/ }));
+  } finally {
+    cleanup();
+    Object.defineProperty(window, 'localStorage', original);
+  }
+});
+
+test('the CSV export starts with the goal and its assumptions, then the monthly rows', async () => {
+  const blobs: Blob[] = [];
+  const { createObjectURL, revokeObjectURL } = URL;
+  const click = dom.window.HTMLAnchorElement.prototype.click;
+  URL.createObjectURL = (blob: Blob) => { blobs.push(blob); return 'blob:test'; };
+  URL.revokeObjectURL = () => undefined;
+  dom.window.HTMLAnchorElement.prototype.click = () => undefined;
+  try {
+    open();
+    fireEvent.change(screen.getByLabelText('목표 이름'), { target: { value: '=결혼 자금' } });
+    fireEvent.click(screen.getByRole('button', { name: '계산 결과 CSV 저장' }));
+    const lines = (await blobs[0]!.text()).replace(/^﻿/, '').split('\r\n');
+    assert.deepEqual(lines.slice(0, 4), ['항목,값', "목표,'=결혼 자금", '목표 금액 출처,예시 금액', '목표 금액(원),50000000']);
+    assert.ok(lines.includes('목표 기간(개월),60'));
+    assert.ok(lines.includes('예상 목표 달성률(%),93.3'));
+    assert.ok(lines.includes('개월,납입 원금(원),예상 자산(원),예상 수익(원)'));
+    assert.equal(lines.at(-1), '60,40000000,46669685,6669685');
+  } finally {
+    Object.assign(URL, { createObjectURL, revokeObjectURL });
+    dom.window.HTMLAnchorElement.prototype.click = click;
+  }
 });
 
 test('malformed news data shows an error instead of crashing the news screen', async () => {

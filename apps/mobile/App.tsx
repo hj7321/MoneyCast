@@ -26,14 +26,17 @@ import {
   categoryGoalType,
   categoryLabel,
   companies,
+  compareGoalTarget,
   createGoalPlanner,
   DEFAULT_CALCULATOR_INPUT,
   describeGoalResult,
   describeGoalTarget,
+  describeInflation,
   describeSwitchPrefill,
   formatCompactKRW,
   formatDurationMonths,
   formatGoalFormula,
+  formatYearMonth,
   formatKRW,
   GOAL_ITEM_LIMIT,
   GOAL_LABEL_MAX_LENGTH,
@@ -53,7 +56,10 @@ import {
   HOME_SCOPE_LABELS,
   HOME_SCOPE_NOTES,
   livingCostActions,
+  monthInputValue,
+  monthsFromTargetMonth,
   parseGoalNumber,
+  periodEndMonth,
   planGoalQuestions,
   resolveGoalTarget,
   searchCompanies,
@@ -154,7 +160,7 @@ function UsageHelp({ feature }: { feature: Tab }) {
                 ? '월 수익률은 (1 + 연 수익률 / 100)^(1/12) − 1로 변환하며, 월 복리·월말 납입으로 계산해요. 계산 중에는 반올림하지 않고 표시할 때 원 단위로 반올림해요.'
                 : '실제 뉴스는 제공자 연동 후 표시돼요. 연동 대기 중에는 기사나 방향 전망을 만들어 보여주지 않아요. 서버 연결이나 제공자 설정이 필요하면 뉴스 화면에 안내해요.'}</Text>
               <Text style={styles.helpNoticeBody}>{calculator
-                ? '세금·수수료·물가상승률은 반영하지 않아요. 수익률은 입력한 가정이며 실제 수익을 보장하지 않아요. 원금 손실이 발생할 수 있어요.'
+                ? '세금·수수료는 반영하지 않아요. 물가상승은 켠 경우 목표 금액에만 가정으로 반영해요. 수익률은 입력한 가정이며 실제 수익을 보장하지 않아요. 원금 손실이 발생할 수 있어요.'
                 : '근거 수준은 예측 정확도가 아니에요. 뉴스는 미래 주가의 원인이나 방향을 증명하지 않으며, 이 정보는 개인 맞춤형 매수·매도 지시가 아니에요. 투자에는 원금 손실 위험이 있어요.'}</Text>
             </View>
           </ScrollView>
@@ -242,6 +248,28 @@ function GoalLink({ label, onPress, disabled = false }: { label: string; onPress
     style={({ pressed }) => [styles.goalLink, (pressed || disabled) && styles.pressed]}>
     <Text style={styles.goalLinkText}>{label}</Text>
   </Pressable>;
+}
+
+/** Another way to enter the saving period: the month the goal is due, applied to the period field. */
+function TargetMonthInput({ months, onMonths }: { months: number; onMonths: (months: number) => void }) {
+  const [text, setText] = useState('');
+  const [error, setError] = useState('');
+  const now = new Date();
+  const valid = Number.isInteger(months) && months >= 1 && months <= 600;
+  const apply = () => {
+    const result = monthsFromTargetMonth(text, now);
+    if ('months' in result) {
+      onMonths(result.months);
+      setText('');
+      setError('');
+    } else setError(result.error);
+  };
+  return <>
+    <GoalInput text label="목표 시점으로 정하기(선택)" value={text} maxLength={10} error={error}
+      placeholder={valid ? monthInputValue(periodEndMonth(months, now)) : '2028-03'} hint="2028-03처럼 연도와 월을 입력하고 적용을 누르면 목표 기간이 바뀌어요."
+      onChange={value => { setText(value); setError(''); }} />
+    <GoalLink label="목표 시점 적용" disabled={!text.trim()} onPress={apply} />
+  </>;
 }
 
 type FactKey = 'name' | 'amount' | 'items' | 'months';
@@ -463,13 +491,14 @@ function CalculatorScreen() {
   const resolution = useMemo(() => resolveGoalTarget(goalState.goal, goalState.drafts, override), [goalState, override]);
   const { width } = useWindowDimensions();
   const months = form.months.trim() === '' ? Number.NaN : Number(form.months);
+  // Undecided goals compare against no target, like an explicit 0; an assumed price rise raises the amount compared.
+  const comparison = useMemo(() => compareGoalTarget(resolution, goalState.inflation, months), [resolution, goalState.inflation, months]);
   const input = useMemo(() => {
     const values = Object.fromEntries(Object.entries(form).map(([key, value]) =>
       [key, value.trim() === '' ? Number.NaN : Number(value)])) as Record<Field, number>;
     const { months: durationMonths, ...amounts } = values;
-    // Undecided goals compare against no target, like an explicit 0.
-    return { ...amounts, years: durationMonths / 12, target: resolution.amount ?? 0 } satisfies CalculatorInput;
-  }, [form, resolution.amount]);
+    return { ...amounts, years: durationMonths / 12, target: comparison.target } satisfies CalculatorInput;
+  }, [form, comparison.target]);
   const errors = useMemo(() => {
     const result = validateCalculatorInput(input);
     if (result.years) { result.months = result.years; delete result.years; }
@@ -482,8 +511,10 @@ function CalculatorScreen() {
   }, [input, errors]);
   const change = (field: Field, text: string) => setForm(previous => ({ ...previous, [field]: text.replace(/,/g, '') }));
   const targetText = override ?? (resolution.amount !== null && Number.isFinite(resolution.amount) ? String(resolution.amount) : '');
-  const targetInvalid = Boolean(errors.target) || Object.keys(resolution.errors).length > 0;
-  const targetNote = resolution.source === 'manual' && errors.target ? errors.target : describeGoalTarget(resolution, formatCompactKRW);
+  // A rejected price-rise rate is reported on its own field, not as a target error.
+  const targetError = comparison.error ? undefined : errors.target;
+  const targetInvalid = Boolean(targetError) || Object.keys(resolution.errors).length > 0;
+  const targetNote = resolution.source === 'manual' && targetError ? targetError : describeGoalTarget(resolution, formatCompactKRW);
   const followable = override !== undefined && (goalState.goal !== 'free' || goalState.drafts.free.method !== 'direct');
   return <ScrollView contentContainerStyle={[styles.content, width > 700 && styles.tabletContent]} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
     <View style={styles.eyebrow}><View style={styles.greenDot} /><Text style={styles.eyebrowText}>목표가 있는 돈의 여정</Text></View>
@@ -520,6 +551,14 @@ function CalculatorScreen() {
         {resolution.source === 'details' && resolution.zeroed.length > 0
           ? <Text style={styles.fieldHint}>{resolution.zeroed.join(', ')}: 입력하지 않아 0원으로 계산했어요.</Text> : null}
         {followable ? <GoalLink label="상세 입력으로 다시 계산" onPress={() => dispatchGoal({ type: 'followDetails' })} /> : null}
+        <View style={styles.chips}>
+          <Chip label="물가상승 반영(선택)" selected={goalState.inflation.on} onPress={() => dispatchGoal({ type: 'inflation', patch: { on: !goalState.inflation.on } })} />
+        </View>
+        {goalState.inflation.on ? <>
+          <Text style={styles.fieldHint}>목표 금액을 오늘 가격으로 보고, 목표 기간 동안 매년 이 비율로 오른다고 가정해 비교해요. 예측이 아닌 나의 가정이에요.</Text>
+          <GoalInput label="연 물가상승률" unit="%" value={goalState.inflation.rate} error={comparison.error} hint={describeInflation(comparison, formatCompactKRW)}
+            onChange={rate => dispatchGoal({ type: 'inflation', patch: { rate } })} />
+        </> : null}
       </View>
       {fields.map(field => <View key={field.key} style={styles.field}>
         <Text style={styles.fieldLabel} nativeID={`label-${field.key}`}>{field.label}</Text>
@@ -532,10 +571,11 @@ function CalculatorScreen() {
           <Text style={styles.inputUnit}>{field.unit}</Text>
         </View>
         {errors[field.key] ? <Text accessibilityRole="alert" style={styles.errorText}>{errors[field.key]}</Text>
-          : field.key === 'months' ? <Text style={styles.fieldHint}>{formatDurationMonths(months)} · 1~600개월, 1개월 단위</Text>
+          : field.key === 'months' ? <Text style={styles.fieldHint}>{formatDurationMonths(months)} · {formatYearMonth(periodEndMonth(months, new Date()))}까지 · 1~600개월, 1개월 단위</Text>
             : field.unit === '원' && form[field.key] !== '' && Number.isFinite(Number(form[field.key]))
               ? <Text style={styles.fieldHint}>{formatCompactKRW(Number(form[field.key]))}</Text> : null}
       </View>)}
+      <TargetMonthInput months={months} onMonths={value => change('months', String(value))} />
       <View style={styles.inlineNotice}><Text style={styles.noticeSymbol}>i</Text><Text style={styles.noticeText}>입력을 바꾸면 결과가 바로 달라집니다. 수익률은 확정 전망이 아닌 나의 가정입니다.</Text></View>
     </View>
 
@@ -547,7 +587,7 @@ function CalculatorScreen() {
         <View style={styles.resultDivider} />
         <View style={styles.rowBetween}><Text style={styles.resultSecondary}>총 납입 원금</Text><Text style={styles.resultValue}>{formatKRW(projection.totalPrincipal)}</Text></View>
         <View style={styles.rowBetween}><Text style={styles.resultSecondary}>예상 수익</Text><Text style={styles.resultValue}>{projection.totalProfit >= 0 ? '+' : ''}{formatKRW(projection.totalProfit)}</Text></View>
-        <Text style={styles.goalResult}>{describeGoalResult(goalState.goal, goalState.drafts, resolution, formatCompactKRW)}</Text>
+        <Text style={styles.goalResult}>{describeGoalResult(goalState.goal, goalState.drafts, resolution, formatCompactKRW, comparison.inflation?.amount)}</Text>
         {resolution.source === 'undecided' && <View style={styles.achievement}>
           <Text style={styles.achievementTitle}>목표 금액이 아직 정해지지 않았어요</Text>
           <Text style={styles.achievementBody}>{resolution.missing.length
@@ -566,7 +606,7 @@ function CalculatorScreen() {
     <View style={styles.assumptions}>
       <Text style={styles.assumptionsTitle}>계산을 읽기 전에</Text>
       <Text style={styles.assumptionsText}>연 유효수익률을 월 수익률로 변환해 매월 복리로 계산합니다. 월말에 납입하고, 계산 중에는 반올림하지 않으며 표시할 때 원 단위로 반올림합니다.</Text>
-      <Text style={styles.assumptionsText}>세금·수수료·물가상승률은 반영하지 않습니다. 실제 수익은 달라질 수 있고 원금 손실이 발생할 수 있습니다.</Text>
+      <Text style={styles.assumptionsText}>세금·수수료는 반영하지 않습니다. 물가상승은 켠 경우 목표 금액에만 가정으로 반영합니다. 실제 수익은 달라질 수 있고 원금 손실이 발생할 수 있습니다.</Text>
     </View>
   </ScrollView>;
 }

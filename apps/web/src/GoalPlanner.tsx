@@ -1,10 +1,12 @@
 import { useMemo, useReducer, useState, type ReactNode } from 'react';
 import {
-  createGoalDrafts, createGoalPlanner, describeGoalResult, describeGoalTarget, formatCompactKRW, formatGoalFormula, goalTypeName,
-  parseGoalNumber, resolveGoalTarget, updateGoalPlanner,
-  CAR_CONDITIONS, CAR_SCOPE_LABELS, CAR_SCOPE_NOTES, FREE_GOAL_NAME_SUGGESTIONS, GOAL_ITEM_LIMIT, GOAL_LABEL_MAX_LENGTH, GOAL_NAME_MAX_LENGTH,
-  GOAL_NOTE_MAX_LENGTH, GOAL_SOURCE_LABELS, GOAL_SOURCE_NOTES, GOAL_TYPES, HOME_REGIONS, HOME_SCOPE_LABELS, HOME_SCOPE_NOTES, HOUSING_TYPES,
-  type FreeGoalDraft, type GoalDrafts, type GoalItemDraft, type GoalPlannerAction, type GoalType,
+  createGoalDrafts, createGoalPlanner, describeGoalResult, describeGoalTarget, describeInflation, formatCompactKRW, formatGoalFormula, goalTypeName,
+  loadSavedGoalAction, parseGoalNumber, resolveGoalTarget, updateGoalPlanner,
+  CAR_CONDITIONS, CAR_SCOPE_LABELS, CAR_SCOPE_NOTES, FREE_GOAL_NAME_SUGGESTIONS, GOAL_DISTRICT_MAX_LENGTH, GOAL_ITEM_LIMIT, GOAL_LABEL_MAX_LENGTH,
+  GOAL_NAME_MAX_LENGTH, GOAL_NOTE_MAX_LENGTH, GOAL_SOURCE_LABELS, GOAL_SOURCE_NOTES, GOAL_TYPES, HOME_REGIONS, HOME_SCOPE_LABELS, HOME_SCOPE_NOTES,
+  HOUSING_TYPES,
+  type FreeGoalDraft, type GoalComparison, type GoalDrafts, type GoalInflationDraft, type GoalItemDraft, type GoalPlannerAction, type GoalType,
+  type SavedGoal,
 } from '@moneycast/core';
 import { GoalAssist } from './GoalAssist';
 import { GoalIcon, Icon } from './icons';
@@ -13,18 +15,16 @@ const formatAmount = (amount: number) => amount.toLocaleString('en-US', { maximu
 const isAmount = (value: number | null): value is number => value !== null && Number.isFinite(value) && value >= 0;
 export type GoalPlannerControls = ReturnType<typeof useGoalPlanner>;
 
-/** The goal type, its details and any amount typed into the target field; kept in memory only, like the other inputs. */
+/** The goal type, its details and any amount typed into the target field; kept in memory only unless the person saves the goal. */
 export function useGoalPlanner() {
   const [state, dispatch] = useReducer(updateGoalPlanner, undefined, () => createGoalPlanner(formatAmount));
-  const { goal, drafts } = state;
+  const { goal, drafts, inflation } = state;
   const override = state.overrides[goal];
   const resolution = useMemo(() => resolveGoalTarget(goal, drafts, override), [goal, drafts, override]);
   return {
-    goal, drafts, override, resolution,
-    /** The calculator compares against no goal while the amount is undecided. */
-    target: resolution.amount ?? 0,
-    /** The goal and its target in one line for the result area. */
-    result: describeGoalResult(goal, drafts, resolution, formatCompactKRW),
+    state, goal, drafts, override, resolution, inflation,
+    /** The goal and its target in one line for the result area, with the amount compared against when a price rise is assumed. */
+    describeResult: (inflated?: number) => describeGoalResult(goal, drafts, resolution, formatCompactKRW, inflated),
     select: (next: GoalType) => dispatch({ type: 'select', goal: next }),
     update: <T extends GoalType>(type: T, patch: Partial<GoalDrafts[T]>) => dispatch({ type: 'update', goal: type, patch } as GoalPlannerAction),
     setFreeMethod: (method: FreeGoalDraft['method']) => dispatch({ type: 'freeMethod', method }),
@@ -34,6 +34,8 @@ export function useGoalPlanner() {
       if (isAmount(value)) dispatch({ type: 'typeTarget', text: formatAmount(value) });
     },
     followDetails: () => dispatch({ type: 'followDetails' }),
+    setInflation: (patch: Partial<GoalInflationDraft>) => dispatch({ type: 'inflation', patch }),
+    load: (saved: SavedGoal) => dispatch(loadSavedGoalAction(saved)),
     reset: () => dispatch({ type: 'reset', drafts: createGoalDrafts(formatAmount) }),
     /** Applies information the person chose from the description card. */
     apply: (actions: readonly GoalPlannerAction[]) => actions.forEach(dispatch),
@@ -57,10 +59,10 @@ function NumberField({ id, label, value, onChange, error, hint, unit = '원', pl
   </div>;
 }
 
-function TextField({ id, label, value, onChange, maxLength, placeholder, hint }: {
-  id: string; label: string; value: string; onChange: (text: string) => void; maxLength: number; placeholder?: string; hint?: string;
+function TextField({ id, label, value, onChange, maxLength, placeholder, hint, wide = true }: {
+  id: string; label: string; value: string; onChange: (text: string) => void; maxLength: number; placeholder?: string; hint?: string; wide?: boolean;
 }) {
-  return <div className="field goal-wide">
+  return <div className={`field ${wide ? 'goal-wide' : ''}`}>
     <label htmlFor={id}>{label}</label>
     <div className="input-wrap goal-text-input"><input id={id} type="text" autoComplete="off" value={value} maxLength={maxLength} placeholder={placeholder}
       onChange={event => onChange(event.target.value)} aria-describedby={hint ? `${id}-hint` : undefined}/></div>
@@ -97,8 +99,10 @@ function CostsField({ id, checked, value, error, hint, onToggle, onChange }: {
   </>;
 }
 
-export function GoalPlanner({ planner, targetError, onPeriod }: { planner: GoalPlannerControls; targetError?: string; onPeriod: (months: number) => void }) {
-  const { goal, drafts, override, resolution, update } = planner;
+export function GoalPlanner({ planner, comparison, targetError, onPeriod }: {
+  planner: GoalPlannerControls; comparison: GoalComparison; targetError?: string; onPeriod: (months: number) => void;
+}) {
+  const { goal, drafts, override, resolution, inflation, update } = planner;
   const [moreOpen, setMoreOpen] = useState(false);
   const { errors } = resolution;
   const updateItem = (index: number, patch: Partial<GoalItemDraft>) =>
@@ -160,6 +164,8 @@ export function GoalPlanner({ planner, targetError, onPeriod }: { planner: GoalP
     more = <>
       {home ? <>
         <SelectField id="goal-home-region" label="지역(시·도)" value={drafts.home.region} options={HOME_REGIONS.map(region => [region, region] as const)} onChange={region => set({ region })}/>
+        <TextField id="goal-home-district" label="시·군·구" value={drafts.home.district} maxLength={GOAL_DISTRICT_MAX_LENGTH} placeholder="예: 마포구" wide={false}
+          onChange={district => set({ district })}/>
         <SelectField id="goal-home-housing" label="주택 유형" value={drafts.home.housing} options={HOUSING_TYPES.map(type => [type.id, type.label] as const)}
           onChange={housing => update('home', { housing: housing as GoalDrafts['home']['housing'] })}/>
       </> : <>
@@ -223,6 +229,14 @@ export function GoalPlanner({ planner, targetError, onPeriod }: { planner: GoalP
       {source === 'details' && lines.length > 0 && !detailErrors && <p className="goal-formula">= {formatGoalFormula(lines, formatCompactKRW)}</p>}
       {source === 'details' && zeroed.length > 0 && <p className="goal-formula">{zeroed.join(', ')}: 입력하지 않아 0원으로 계산했어요.</p>}
       {followable && <button type="button" className="goal-link" onClick={planner.followDetails}>상세 입력으로 다시 계산</button>}
+      <div className="goal-inflation">
+        <label className="goal-check"><input type="checkbox" checked={inflation.on} onChange={event => planner.setInflation({ on: event.target.checked })}/>물가상승 반영(선택)</label>
+        {inflation.on && <>
+          <p className="field-hint">목표 금액을 오늘 가격으로 보고, 목표 기간 동안 매년 이 비율로 오른다고 가정해 비교해요. 예측이 아닌 나의 가정이에요.</p>
+          <NumberField id="goal-inflation-rate" label="연 물가상승률" unit="%" value={inflation.rate} error={comparison.error}
+            hint={describeInflation(comparison, formatCompactKRW)} onChange={rate => planner.setInflation({ rate })}/>
+        </>}
+      </div>
     </div>
   </div>;
 }
