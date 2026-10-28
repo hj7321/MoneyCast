@@ -241,6 +241,47 @@ export function searchCompanies(query: string): Company[] {
 }
 
 export type NewsSentiment = 'positive' | 'negative' | 'neutral' | 'unclassified';
+export type AiProviderId = 'gemini' | 'cloudflare';
+export type AiSentiment = 'positive' | 'negative' | 'neutral' | 'uncertain';
+/** One model's own judgement of one article, kept only after server-side validation. */
+export interface AiJudgement {
+  provider: AiProviderId;
+  model: string;
+  relevant: boolean;
+  sentiment: AiSentiment;
+  /** Phrase copied verbatim from the title or the publisher description. */
+  evidence?: string;
+  reason?: string;
+  topic?: NewsTopicKey;
+  judgedAt: string;
+}
+/**
+ * confirmed: both models agree. provisional: only one model answered so far.
+ * withheld: the models disagree or one could not judge. pending: no answer yet.
+ * Only confirmed articles carry a direction; the others stay unclassified.
+ */
+export type AiConsensus = 'confirmed' | 'provisional' | 'withheld' | 'pending';
+/** What the article is about, generated from the title and description only. */
+export interface ArticleSummary {
+  text: string;
+  basis: 'title_description' | 'title_only';
+  generatedBy: string;
+}
+export interface AiProviderState {
+  id: AiProviderId;
+  label: string;
+  model: string;
+  /** idle: nothing needed this model during the refresh. */
+  status: 'ok' | 'idle' | 'not_configured' | 'rate_limited' | 'error' | 'timeout';
+  judgedCount: number;
+  retryAt?: string;
+}
+export interface AiStatus {
+  providers: AiProviderState[];
+  /** Articles both models judged unrelated to the company; left out of the list. */
+  hiddenCount: number;
+  promptVersion: string;
+}
 export interface NewsArticle {
   id: string;
   title: string;
@@ -252,7 +293,7 @@ export interface NewsArticle {
   rationale: string;
   language?: string;
   sentimentScore?: number;
-  classificationMethod?: 'provider' | 'unavailable';
+  classificationMethod?: 'provider' | 'unavailable' | 'llm';
   providerEntity?: { symbol: string; name: string; exchange: string | null; country: string };
   /** Publisher meta description supplied by the provider; never article body text. */
   description?: string;
@@ -268,6 +309,9 @@ export interface NewsArticle {
   identity?: 'entity_verified' | 'name_match';
   /** Other publishers carrying the same story after URL/title de-duplication. */
   alsoReportedBy?: Array<{ source: string; url: string }>;
+  summary?: ArticleSummary;
+  aiJudgements?: AiJudgement[];
+  aiConsensus?: AiConsensus;
 }
 
 export type NewsSourceStatus = 'ok' | 'empty' | 'not_configured' | 'rate_limited' | 'error';
@@ -323,6 +367,7 @@ export interface NewsAnalysis {
   servedFrom?: 'live' | 'stale';
   /** When the failed refresh behind a stale result was attempted. */
   refreshAttemptedAt?: string;
+  ai?: AiStatus;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -374,10 +419,21 @@ function isBoundedTextArray(value: unknown, min: number, max: number, maxLength:
 function hasValidArticleMetadata(article: Record<string, unknown>): boolean {
   if (article.language !== undefined && !isNonemptyString(article.language)) return false;
   if (article.classificationMethod !== undefined && article.classificationMethod !== 'provider' &&
-      article.classificationMethod !== 'unavailable') return false;
+      article.classificationMethod !== 'unavailable' && article.classificationMethod !== 'llm') return false;
   if (article.classificationMethod === 'unavailable' &&
       (article.sentiment !== 'unclassified' || article.sentimentScore !== undefined)) return false;
   if (article.classificationMethod === 'provider' && article.sentiment === 'unclassified') return false;
+  // A model-derived direction needs both models to agree and never carries a provider score.
+  if ((article.classificationMethod === 'llm') !== (article.aiConsensus === 'confirmed')) return false;
+  if (article.classificationMethod === 'llm' && (article.sentiment === 'unclassified' || article.sentimentScore !== undefined)) return false;
+  if (article.aiConsensus !== undefined && !['confirmed', 'provisional', 'withheld', 'pending'].includes(String(article.aiConsensus))) return false;
+  if (article.aiConsensus !== undefined && article.aiConsensus !== 'confirmed' && article.sentiment !== 'unclassified') return false;
+  if (article.aiJudgements !== undefined && !(Array.isArray(article.aiJudgements) && article.aiJudgements.length >= 1 &&
+      article.aiJudgements.length <= 2 && article.aiJudgements.every(isAiJudgement) &&
+      new Set(article.aiJudgements.map(item => (item as AiJudgement).provider)).size === article.aiJudgements.length)) return false;
+  if (article.summary !== undefined && !(isRecord(article.summary) && isBoundedText(article.summary.text, 200) &&
+      (article.summary.basis === 'title_description' || article.summary.basis === 'title_only') &&
+      isBoundedText(article.summary.generatedBy, 40))) return false;
   if (article.sentimentScore !== undefined) {
     const score = article.sentimentScore;
     if (typeof score !== 'number' || !Number.isFinite(score) || score < -1 || score > 1 ||
@@ -398,6 +454,28 @@ function hasValidArticleMetadata(article: Record<string, unknown>): boolean {
   if (article.alsoReportedBy !== undefined && !(Array.isArray(article.alsoReportedBy) && article.alsoReportedBy.length <= 10 &&
       article.alsoReportedBy.every(item => isRecord(item) && isBoundedText(item.source, 100) && isSafeHttpsUrl(item.url)))) return false;
   return true;
+}
+
+const AI_PROVIDERS = ['gemini', 'cloudflare'];
+
+function isAiJudgement(value: unknown): boolean {
+  return isRecord(value) && typeof value.provider === 'string' && AI_PROVIDERS.includes(value.provider) &&
+    isBoundedText(value.model, 80) && typeof value.relevant === 'boolean' &&
+    typeof value.sentiment === 'string' && ['positive', 'negative', 'neutral', 'uncertain'].includes(value.sentiment) &&
+    (value.evidence === undefined || isBoundedText(value.evidence, 120)) &&
+    (value.reason === undefined || isBoundedText(value.reason, 200)) &&
+    (value.topic === undefined || isNewsTopicKey(value.topic)) && isTimestamp(value.judgedAt);
+}
+
+function isAiStatus(value: unknown): boolean {
+  return isRecord(value) && Array.isArray(value.providers) && value.providers.length >= 1 && value.providers.length <= 2 &&
+    value.providers.every(item => isRecord(item) && typeof item.id === 'string' && AI_PROVIDERS.includes(item.id) &&
+      isBoundedText(item.label, 40) && isBoundedText(item.model, 80) && typeof item.status === 'string' &&
+      ['ok', 'idle', 'not_configured', 'rate_limited', 'error', 'timeout'].includes(item.status) &&
+      typeof item.judgedCount === 'number' && Number.isSafeInteger(item.judgedCount) && item.judgedCount >= 0 &&
+      (item.retryAt === undefined || isTimestamp(item.retryAt))) &&
+    typeof value.hiddenCount === 'number' && Number.isSafeInteger(value.hiddenCount) && value.hiddenCount >= 0 &&
+    isBoundedText(value.promptVersion, 40);
 }
 
 function isSourceState(value: unknown): boolean {
@@ -458,6 +536,7 @@ export function isNewsAnalysis(value: unknown, expectedCompanyId?: string): valu
   if (value.sources !== undefined && !(Array.isArray(value.sources) && value.sources.length <= 8 && value.sources.every(isSourceState))) return false;
   if (value.servedFrom !== undefined && value.servedFrom !== 'live' && value.servedFrom !== 'stale') return false;
   if (value.refreshAttemptedAt !== undefined && !isTimestamp(value.refreshAttemptedAt)) return false;
+  if (value.ai !== undefined && !isAiStatus(value.ai)) return false;
   if (!value.articles.every(isNewsArticle)) return false;
   return value.factorSummary === undefined || isFactorSummary(value.factorSummary, value.articles);
 }

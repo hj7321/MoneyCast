@@ -410,6 +410,71 @@ test('combined sources show per-source states, GDELT attribution, first-seen tim
   assert.ok(within(card).getByText('같은 내용 다른 출처 2곳: b.example.test, c.example.test'));
 });
 
+test('AI labels show agreement, provisional and withheld states with model status, AI summaries and an AI notice', async () => {
+  const fixture = marketauxFixture();
+  fixture.provider = 'Marketaux · GDELT';
+  const { sentimentScore: _score, providerEntity: _entity, language: _language, ...base } = fixture.articles[0]!;
+  const judgedAt = '2026-10-26T21:00:00.000Z';
+  const gdelt = { ...base, sourceProvider: 'GDELT', timeKind: 'seen' as const, identity: 'name_match' as const };
+  fixture.articles = [
+    { ...gdelt, id: 'ai-confirmed', url: 'https://a.example.test/1', title: '테스트 전용: 일부 제품 리콜 대상 확대', sentiment: 'negative',
+      classificationMethod: 'llm', aiConsensus: 'confirmed',
+      aiJudgements: [{ provider: 'gemini', model: 'g', relevant: true, sentiment: 'negative', evidence: '리콜 대상 확대', judgedAt },
+        { provider: 'cloudflare', model: 'c', relevant: true, sentiment: 'negative', evidence: '리콜 대상 확대', judgedAt }],
+      summary: { text: '테스트 전용: 리콜 대상을 넓힌다는 내용입니다.', basis: 'title_only', generatedBy: 'Gemini' },
+      rationaleLines: ["AI 두 모델이 따로 판단: Gemini '부정' · Cloudflare '부정' → 일치해 확정", '기사 분위기 판단이며 주가 방향·확률이 아닙니다.'] },
+    { ...gdelt, id: 'ai-provisional', url: 'https://a.example.test/2', title: '테스트 전용: 영업이익 개선', sentiment: 'unclassified',
+      classificationMethod: 'unavailable', aiConsensus: 'provisional',
+      aiJudgements: [{ provider: 'gemini', model: 'g', relevant: true, sentiment: 'positive', evidence: '영업이익 개선', judgedAt }],
+      rationaleLines: ["Gemini만 판단('긍정'). Cloudflare는 무료 한도에 도달해 다음 갱신 때 교차 확인합니다."] },
+    { ...gdelt, id: 'ai-withheld', url: 'https://a.example.test/3', title: '테스트 전용: 수주 확대 기대 속 검토 단계', sentiment: 'unclassified',
+      classificationMethod: 'unavailable', aiConsensus: 'withheld',
+      aiJudgements: [{ provider: 'gemini', model: 'g', relevant: true, sentiment: 'positive', evidence: '수주 확대 기대', judgedAt },
+        { provider: 'cloudflare', model: 'c', relevant: true, sentiment: 'neutral', judgedAt }],
+      rationaleLines: ["Gemini '긍정' · Cloudflare '중립' → 판단이 달라 유보합니다."] },
+  ];
+  fixture.ai = { promptVersion: 'news-judge-v1', hiddenCount: 1, providers: [
+    { id: 'gemini', label: 'Gemini', model: 'gemini-test', status: 'ok', judgedCount: 3 },
+    { id: 'cloudflare', label: 'Cloudflare', model: '@cf/test/model', status: 'rate_limited', judgedCount: 0, retryAt: '2026-10-28T00:00:00.000Z' },
+  ] };
+  globalThis.fetch = (async () => response(fixture)) as typeof fetch;
+  open('news');
+  assert.ok(await screen.findByText(/AI 판단: Gemini 정상 3건 · Cloudflare 한도 도달\(재시도 .*\) · 관련 없는 기사 1건 숨김/));
+  const [confirmed, provisional, withheld] = Array.from(document.querySelectorAll<HTMLElement>('.article-list article'));
+  assert.ok(within(confirmed!).getByText('부정 · AI 합의'));
+  assert.ok(within(confirmed!).getByText('핵심 요약 · AI 요약(제목만 기준, 본문 미확인)'));
+  assert.ok(within(confirmed!).getByText('테스트 전용: 리콜 대상을 넓힌다는 내용입니다.'));
+  assert.ok(within(confirmed!).getByText(/일치해 확정/));
+  assert.ok(within(provisional!).getByText('긍정 · 잠정'));
+  assert.ok(within(provisional!).getByText('요약 정보 없음 — 원문에서 확인하세요.'));
+  assert.ok(within(withheld!).getByText('판단 유보'));
+  assert.ok(screen.getByText(/미분류·잠정·판단 유보 기사는 긍정·부정 요인 집계에서 제외합니다/));
+  assert.ok(screen.getByText(/일부 요약·분류는 AI\(Gemini·Cloudflare Workers AI\)가 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다/));
+});
+
+test('long article lists show eight cards first and expand on request or when evidence points further down', async () => {
+  const fixture = marketauxFixture();
+  fixture.articles = Array.from({ length: 10 }, (_, index) => ({ ...fixture.articles[0]!, id: `many-${index}`,
+    url: `https://publisher.example.test/many-${index}`, title: `Test fixture: article ${index}` }));
+  fixture.positiveFactors = ['테스트 전용: 마지막 기사만 근거로 든 문장입니다.'];
+  fixture.factorSummary = {
+    positive: { state: 'single', chips: [], lines: [{ text: fixture.positiveFactors[0]!, topic: 'other', articleIds: ['many-9'] }] },
+    negative: { state: 'none', lines: [], chips: [] }, chips: [], note: '테스트 전용 주제 안내',
+  };
+  globalThis.fetch = (async () => response(fixture)) as typeof fetch;
+  open('news');
+  await screen.findByText('테스트 전용: 마지막 기사만 근거로 든 문장입니다.');
+  const cards = () => document.querySelectorAll('.article-list article').length;
+  assert.equal(cards(), 8);
+  fireEvent.click(screen.getByRole('button', { name: '기사 2건 더 보기' }));
+  assert.equal(cards(), 10);
+  fireEvent.click(screen.getByRole('button', { name: '기사 접기' }));
+  assert.equal(cards(), 8);
+  fireEvent.click(screen.getByRole('button', { name: '근거 기사 1건' }));
+  await waitFor(() => assert.equal(document.activeElement?.id, 'news-article-9'));
+  assert.equal(cards(), 10);
+});
+
 test('a stale server result and a failed refresh with a saved result both show an explicit old-result banner', async () => {
   const stale = marketauxFixture();
   stale.servedFrom = 'stale';

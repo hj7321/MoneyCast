@@ -2,6 +2,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { companies, searchCompanies, NEWS_CACHE_TTL_MS, type NewsAnalysis } from '../packages/core/src/index.js';
 import { collectNews } from './collect.js';
+import { createAiClassifier } from './llm.js';
+import { createLlmJudges } from './llm-judges.js';
 import { createNewsProvider } from './news-provider.js';
 import { createNewsService } from './service.js';
 import { createBlobSnapshotStore } from './snapshot-store.js';
@@ -10,9 +12,11 @@ import { DEFAULT_STATIC_DIRECTORY, serveWeb } from './static.js';
 type NewsService = ReturnType<typeof createNewsService>;
 interface HandlerOptions { staticDirectory?: string | null; clock?: () => number; env?: NodeJS.ProcessEnv }
 
-/** Production wiring: configured sources plus snapshots when a Blob store is connected. */
+/** Production wiring: configured sources, snapshots when a Blob store is connected, and models when keys exist. */
 export function createDefaultNewsService(env: NodeJS.ProcessEnv = process.env): NewsService {
-  return createNewsService(createNewsProvider(env), undefined, { store: createBlobSnapshotStore(env) });
+  return createNewsService(createNewsProvider(env), undefined, {
+    store: createBlobSnapshotStore(env), classifier: createAiClassifier(createLlmJudges(env)),
+  });
 }
 
 /** Vercel Cron sends `Authorization: Bearer <CRON_SECRET>`; compared in constant time. */

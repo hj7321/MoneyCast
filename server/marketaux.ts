@@ -15,7 +15,7 @@ const EXCHANGES: Record<string, Set<string>> = {
 const BASE_NOTES = [
   'Marketaux에서 최근 7일의 기사 최대 3건을 조회합니다. 전체 뉴스나 한국어 기사 제공 범위를 보장하지 않습니다.',
   '긍정·부정·중립은 Marketaux가 제공한 해당 기업의 감성 점수 분류입니다. 주가 변동 확률이나 독립적으로 검증한 예측 점수가 아닙니다.',
-  '원문 언어를 그대로 표시하며 기사 본문을 수집하거나 자동 번역하지 않습니다.',
+  '기사 제목과 매체 설명은 원문 언어 그대로 표시하며 기사 본문은 수집하지 않습니다.',
 ];
 
 type Entity = { symbol: string; name: string; country: string; type: string; exchange: string | null; exchange_long: string | null; sentiment_score?: unknown };

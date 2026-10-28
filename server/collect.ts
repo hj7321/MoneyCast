@@ -1,7 +1,10 @@
 import type { Company, NewsAnalysis } from '../packages/core/src/index.js';
 
-/** Keeps the scheduled run well inside the function's maxDuration. */
-export const COLLECT_BUDGET_MS = 90_000;
+/**
+ * No company starts after this, so the run ends inside the function's
+ * 300-second maxDuration even when the last refresh waits on both models.
+ */
+export const COLLECT_BUDGET_MS = 200_000;
 
 export interface CollectSummary {
   refreshed: string[];

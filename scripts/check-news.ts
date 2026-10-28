@@ -80,6 +80,14 @@ async function main(): Promise<void> {
   for (const source of analysis.sources ?? []) {
     console.log(`출처 ${providerLabel(source.label)}: ${source.status} · 기사 ${source.articleCount}건${source.retryAt ? ` · 재시도 ${source.retryAt}` : ''}`);
   }
+  for (const model of analysis.ai?.providers ?? []) {
+    console.log(`AI ${providerLabel(model.label)} (${providerLabel(model.model.replace(/[@/]/g, ' '))}): ${model.status} · 판단 ${model.judgedCount}건${model.retryAt ? ` · 재시도 ${model.retryAt}` : ''}`);
+  }
+  if (analysis.ai) {
+    const count = (consensus: string) => analysis.articles.filter(article => article.aiConsensus === consensus).length;
+    console.log(`AI 합의 ${count('confirmed')}건 · 잠정 ${count('provisional')}건 · 유보 ${count('withheld')}건 · 대기 ${count('pending')}건 · 관련 없음으로 숨김 ${analysis.ai.hiddenCount}건`);
+    console.log(`AI 요약: ${analysis.articles.filter(article => article.summary).length}건 · 프롬프트 ${providerLabel(analysis.ai.promptVersion)}`);
+  }
   const mirrored = analysis.articles.reduce((sum, article) => sum + (article.alsoReportedBy?.length ?? 0), 0);
   if (mirrored) console.log(`중복 제거로 합친 다른 출처: ${mirrored}건`);
   if (analysis.servedFrom === 'stale') console.log(`새로 고침 실패: ${analysis.refreshAttemptedAt ?? '시각 미상'} 시도, 이전 결과를 표시합니다.`);

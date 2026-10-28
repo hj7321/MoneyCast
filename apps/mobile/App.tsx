@@ -29,6 +29,7 @@ import {
   type CalculatorInput,
   type Company,
   type NewsAnalysis,
+  type NewsArticle,
 } from '@moneycast/core';
 import { CompanyAvatar } from './CompanyAvatar';
 import { useFonts } from 'expo-font';
@@ -312,6 +313,15 @@ function NewsScreen({ active }: { active: boolean }) {
     return () => { ++requestId.current; };
   }, [company.id, retry, active]);
   const sentimentLabels = { positive: '긍정', negative: '부정', neutral: '중립', unclassified: '미분류' };
+  // Agreed AI labels keep their direction; one model's view is provisional and never aggregated.
+  const articleLabel = (article: NewsArticle) => {
+    if (article.aiConsensus === 'confirmed') return `${sentimentLabels[article.sentiment]} · AI 합의`;
+    if (article.aiConsensus === 'withheld') return '판단 유보';
+    const only = article.aiConsensus === 'provisional' ? article.aiJudgements?.[0] : undefined;
+    if (article.aiConsensus === 'provisional') return only?.relevant && only.sentiment !== 'uncertain' ? `${sentimentLabels[only.sentiment]} · 잠정` : '관련성 확인 대기';
+    return sentimentLabels[article.sentiment];
+  };
+  const aiLabels = { ok: '정상', idle: '새 판단 없음', not_configured: '미설정', rate_limited: '한도 도달', error: '응답 없음', timeout: '시간 초과' } as const;
   // A failed refresh shows the last successful result of this app session, labelled as old.
   const failed = !!error || analysis?.status === 'error' || analysis?.status === 'rate_limited';
   const fallback = failed ? mobileNewsCache.peekLastGood(company.id) : null;
@@ -367,16 +377,18 @@ function NewsScreen({ active }: { active: boolean }) {
                 <Text style={styles.tiny}>근거 수준은 최근 7일의 기사 수와 상충 여부를 기준으로 하며, 예측 정확도가 아닙니다.</Text>
                 <Text style={styles.tiny}>제공자: {shown.provider ?? '미설정'} · 분석 버전 {shown.analysisVersion}</Text>
                 {shown.sources ? <Text style={styles.tiny}>출처 상태: {shown.sources.map(source => `${source.label} ${({ ok: `정상 ${source.articleCount}건`, empty: '기사 없음', not_configured: '미설정', rate_limited: '호출 제한', error: '실패' })[source.status]}`).join(' · ')}</Text> : null}
+                {shown.ai ? <Text style={styles.tiny}>AI 판단: {shown.ai.providers.map(model => `${model.label} ${aiLabels[model.status]}${model.status === 'ok' ? ` ${model.judgedCount}건` : ''}`).join(' · ')}{shown.ai.hiddenCount > 0 ? ` · 관련 없는 기사 ${shown.ai.hiddenCount}건 숨김` : ''}</Text> : null}
                 {shown.articles.some(article => article.sourceProvider === 'GDELT') ? <Text style={styles.tiny}>일부 기사 목록은 GDELT Project(gdeltproject.org) 검색 결과이며, GDELT 시각은 기사를 처음 확인한 시각입니다.</Text> : null}
+                {shown.articles.some(article => article.summary || article.aiJudgements) ? <Text style={styles.tiny}>일부 요약·분류는 AI(Gemini·Cloudflare Workers AI)가 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다.</Text> : null}
               </View>
               {shown.articles.length === 0 && <Text style={styles.noResults}>표시할 실제 뉴스가 없습니다. 설정되지 않은 데이터나 예시 기사는 표시하지 않습니다.</Text>}
-              {shown.articles.some(article => article.sentiment === 'unclassified') && <Text style={styles.bodyMuted}>미분류 기사는 긍정·부정 요인 집계에서 제외합니다.</Text>}
+              {shown.articles.some(article => article.sentiment === 'unclassified') && <Text style={styles.bodyMuted}>{shown.ai ? '미분류·잠정·판단 유보 기사는 긍정·부정 요인 집계에서 제외합니다.' : '미분류 기사는 긍정·부정 요인 집계에서 제외합니다.'}</Text>}
               {shown.articles.map(article => <Pressable key={article.id} accessibilityRole="link" accessibilityLabel={`${article.title}, 원문 열기`}
                 onPress={() => void openArticle(article.url)} style={styles.article}>
-                <View style={styles.rowBetween}><Text style={styles.articleSource}>{article.source}</Text><Text style={styles.sentiment}>{sentimentLabels[article.sentiment]}</Text></View>
+                <View style={styles.rowBetween}><Text style={styles.articleSource}>{article.source}</Text><Text style={styles.sentiment}>{articleLabel(article)}</Text></View>
                 <Text style={styles.articleTitle}>{article.title} ↗</Text>
-                <Text style={[styles.tiny, styles.blackText]}>핵심 요약{article.description ? ' · 매체 설명(원문)' : ''}</Text>
-                <Text numberOfLines={3} style={styles.bodyMuted}>{article.description ?? '요약 정보 없음 — 원문에서 확인하세요.'}</Text>
+                <Text style={[styles.tiny, styles.blackText]}>핵심 요약{article.summary ? ` · AI 요약(${article.summary.basis === 'title_only' ? '제목만 기준, 본문 미확인' : '제목·설명 기준'})` : article.description ? ' · 매체 설명(원문)' : ''}</Text>
+                <Text numberOfLines={3} style={styles.bodyMuted}>{article.summary?.text ?? article.description ?? '요약 정보 없음 — 원문에서 확인하세요.'}</Text>
                 {article.rationaleLines ? <>
                   <Text style={[styles.tiny, styles.blackText]}>분류 근거</Text>
                   {article.rationaleLines.slice(0, 5).map((line, index) => <Text key={index} style={styles.bodyMuted}>{index + 1}. {line}</Text>)}

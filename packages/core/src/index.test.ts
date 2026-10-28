@@ -377,3 +377,39 @@ test('runtime news validator checks source labels, time kinds, identity, mirrors
     { sources: [{ id: 'x', label: 'X', status: 'rate_limited', articleCount: 0, retryAt: 'soon' }] },
   ]) assert.equal(isNewsAnalysis({ ...valid, ...invalid }), false, JSON.stringify(invalid));
 });
+
+test('runtime news validator lets only two-model agreement carry an AI direction and bounds AI fields', () => {
+  const valid = validAnalysis();
+  const { sentimentScore: _score, ...article } = { ...valid.articles[0]!, sentimentScore: undefined };
+  const judgedAt = '2026-10-27T00:00:00Z';
+  const gemini = { provider: 'gemini', model: 'gemini-test', relevant: true, sentiment: 'positive', evidence: '근거 구절', reason: '이유', topic: 'earnings', judgedAt };
+  const cloudflare = { ...gemini, provider: 'cloudflare', model: '@cf/test/model' };
+  const confirmed = { ...article, sentiment: 'positive', classificationMethod: 'llm', aiConsensus: 'confirmed', aiJudgements: [gemini, cloudflare],
+    summary: { text: '테스트 전용 요약', basis: 'title_only', generatedBy: 'Gemini' } };
+  const ai = { promptVersion: 'news-judge-v1', hiddenCount: 1, providers: [
+    { id: 'gemini', label: 'Gemini', model: 'gemini-test', status: 'ok', judgedCount: 2 },
+    { id: 'cloudflare', label: 'Cloudflare', model: '@cf/test/model', status: 'rate_limited', judgedCount: 0, retryAt: judgedAt },
+  ] };
+  assert.equal(isNewsAnalysis({ ...valid, ai, articles: [confirmed] }), true);
+  for (const consensus of ['provisional', 'withheld', 'pending']) {
+    assert.equal(isNewsAnalysis({ ...valid, articles: [{ ...article, sentiment: 'unclassified', classificationMethod: 'unavailable',
+      aiConsensus: consensus, aiJudgements: [gemini] }] }), true, consensus);
+  }
+  for (const invalid of [
+    { classificationMethod: 'llm', aiConsensus: 'provisional' }, { aiConsensus: undefined },
+    { sentiment: 'unclassified' }, { sentimentScore: 0.4 }, { aiConsensus: 'certain' },
+    { aiConsensus: 'provisional', classificationMethod: 'unavailable' },
+    { aiJudgements: [] }, { aiJudgements: [gemini, gemini] }, { aiJudgements: [gemini, cloudflare, gemini] },
+    { aiJudgements: [{ ...gemini, provider: 'other' }] }, { aiJudgements: [{ ...gemini, sentiment: 'up' }] },
+    { aiJudgements: [{ ...gemini, evidence: 'x'.repeat(121) }] }, { aiJudgements: [{ ...gemini, relevant: 'yes' }] },
+    { aiJudgements: [{ ...gemini, topic: 'price_up' }] }, { aiJudgements: [{ ...gemini, judgedAt: 'now' }] },
+    { summary: { text: '', basis: 'title_only', generatedBy: 'Gemini' } },
+    { summary: { text: 'x'.repeat(201), basis: 'title_only', generatedBy: 'Gemini' } },
+    { summary: { text: '요약', basis: 'article_body', generatedBy: 'Gemini' } },
+  ]) assert.equal(isNewsAnalysis({ ...valid, articles: [{ ...confirmed, ...invalid }] }), false, JSON.stringify(invalid));
+  for (const invalid of [
+    { ...ai, providers: [] }, { ...ai, providers: [...ai.providers, ai.providers[0]] }, { ...ai, hiddenCount: -1 },
+    { ...ai, promptVersion: '' }, { ...ai, providers: [{ ...ai.providers[0], status: 'great' }] },
+    { ...ai, providers: [{ ...ai.providers[0], judgedCount: 0.5 }] }, { ...ai, providers: [{ ...ai.providers[0], id: 'openai' }] },
+  ]) assert.equal(isNewsAnalysis({ ...valid, ai: invalid, articles: [confirmed] }), false, JSON.stringify(invalid));
+});

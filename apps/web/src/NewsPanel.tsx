@@ -1,10 +1,32 @@
 import { useEffect, useMemo, useState } from 'react';
-import { companies, searchCompanies, INVESTMENT_NOTICE, type Company, type NewsAnalysis, type NewsArticle, type NewsSourceState } from '@moneycast/core';
+import { companies, searchCompanies, INVESTMENT_NOTICE, type AiProviderState, type Company, type NewsAnalysis, type NewsArticle, type NewsSourceState } from '@moneycast/core';
 import { Icon } from './icons';
 import { CompanyAvatar } from './CompanyAvatar';
 import { loadCachedNews, peekCachedNews, peekLastGoodNews } from './news-cache';
 
 const sentimentLabels = { positive: '긍정', negative: '부정', neutral: '중립', unclassified: '미분류' };
+const VISIBLE_ARTICLES = 8;
+
+/** Card badge: provider or agreed labels as is; a single model's view is marked provisional. */
+function badge(article: NewsArticle): { label: string; className: string } {
+  if (article.aiConsensus === 'confirmed') return { label: `${sentimentLabels[article.sentiment]} · AI 합의`, className: article.sentiment };
+  if (article.aiConsensus === 'withheld') return { label: '판단 유보', className: 'withheld' };
+  if (article.aiConsensus === 'provisional') {
+    const only = article.aiJudgements?.[0];
+    if (!only || !only.relevant || only.sentiment === 'uncertain') return { label: '관련성 확인 대기', className: 'unclassified' };
+    return { label: `${sentimentLabels[only.sentiment]} · 잠정`, className: `provisional ${only.sentiment}` };
+  }
+  return { label: sentimentLabels[article.sentiment], className: article.sentiment };
+}
+
+function aiStatusLabel(model: AiProviderState) {
+  if (model.status === 'ok') return `${model.label} 정상 ${model.judgedCount}건`;
+  if (model.status === 'idle') return `${model.label} 새로 판단할 기사 없음`;
+  if (model.status === 'not_configured') return `${model.label} 미설정`;
+  if (model.status === 'rate_limited') return `${model.label} 한도 도달${model.retryAt ? `(재시도 ${formatTime(model.retryAt)})` : ''}`;
+  if (model.status === 'timeout') return `${model.label} 시간 초과`;
+  return `${model.label} 응답 없음`;
+}
 const formatTime = (value: string) => `${new Date(value).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} KST`;
 const articleAnchor = (index: number) => `news-article-${index}`;
 function shorten(value: string, max: number) {
@@ -45,11 +67,15 @@ function FactorGrid({ analysis, onEvidence }: { analysis: NewsAnalysis; onEviden
 
 /** What the article is about (summary) and why it carries its label (rationale). */
 function ArticleCard({ article, index, provider }: { article: NewsArticle; index: number; provider: string | null }) {
+  const label = badge(article);
   return <article id={articleAnchor(index)} tabIndex={-1}>
-    <div className="article-meta"><span className={`sentiment ${article.sentiment}`}>{sentimentLabels[article.sentiment]}</span><span>{article.source} · {article.timeKind === 'seen' ? `${article.sourceProvider ?? '수집기'} 확인` : '게시'}: {formatTime(article.publishedAt)}</span>{article.language && <span>원문 언어: {languageLabel(article.language)}</span>}{article.sourceProvider && <span>수집: {article.sourceProvider}</span>}</div>
+    <div className="article-meta"><span className={`sentiment ${label.className}`}>{label.label}</span><span>{article.source} · {article.timeKind === 'seen' ? `${article.sourceProvider ?? '수집기'} 확인` : '게시'}: {formatTime(article.publishedAt)}</span>{article.language && <span>원문 언어: {languageLabel(article.language)}</span>}{article.sourceProvider && <span>수집: {article.sourceProvider}</span>}</div>
     <h3><a href={article.url} target="_blank" rel="noopener noreferrer">{article.title}<Icon name="external" size={15}/></a></h3>
-    <div className="article-summary"><span className="article-block-label">핵심 요약{article.description ? ' · 매체 설명(원문)' : ''}</span>
-      <p>{article.description ? shorten(article.description, 160) : '요약 정보 없음 — 원문에서 확인하세요.'}</p></div>
+    <div className="article-summary">{article.summary ? <>
+      <span className="article-block-label">핵심 요약 · AI 요약({article.summary.basis === 'title_only' ? '제목만 기준, 본문 미확인' : '제목·설명 기준'})</span>
+      <p>{article.summary.text}</p></> : <>
+      <span className="article-block-label">핵심 요약{article.description ? ' · 매체 설명(원문)' : ''}</span>
+      <p>{article.description ? shorten(article.description, 160) : '요약 정보 없음 — 원문에서 확인하세요.'}</p></>}</div>
     {article.alsoReportedBy && article.alsoReportedBy.length > 0 && <p className="article-provenance">같은 내용 다른 출처 {article.alsoReportedBy.length}곳: {article.alsoReportedBy.slice(0, 3).map(item => item.source).join(', ')}{article.alsoReportedBy.length > 3 ? ' 외' : ''}</p>}
     {article.rationaleLines ? <div className="article-rationale"><span className="article-block-label">분류 근거</span>
       <ol>{article.rationaleLines.slice(0, 5).map((line, i) => <li key={i}>{line}</li>)}</ol></div> : <>
@@ -84,13 +110,15 @@ export function NewsPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+  const [focusId, setFocusId] = useState<string | null>(null);
   const results = searchCompanies(query);
   const retryDelayed = useRetryDelay(analysis?.retryAt);
   const refreshDisabled = loading || retryDelayed;
   useEffect(() => {
     let disposed = false;
     const cached = peekCachedNews(company.id);
-    setError(''); setAnalysis(cached); setLoading(!cached);
+    setError(''); setAnalysis(cached); setLoading(!cached); setExpanded(false);
     if (!cached) loadCachedNews(company.id)
       .then(data => { if (!disposed) setAnalysis(data); })
       .catch((err: unknown) => {
@@ -110,6 +138,15 @@ export function NewsPanel() {
   const stale = shown && (shown.servedFrom === 'stale' || shown === fallback)
     ? { asOf: shown.asOf, reason: shown === fallback ? error || analysis?.message : shown.message } : null;
   const marketaux = /marketaux/i.test(`${shown?.provider ?? ''} ${shown?.message ?? ''}`);
+  const aiOutput = !!shown?.articles.some(article => article.summary || article.aiJudgements);
+  useEffect(() => {
+    if (!focusId || !shown) return;
+    // Hash links would change the app route; move focus to the card instead.
+    const target = document.getElementById(articleAnchor(shown.articles.findIndex(article => article.id === focusId)));
+    target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    target?.focus({ preventScroll: true });
+    setFocusId(null);
+  }, [focusId, expanded, shown]);
   return <div className="news-layout">
     <section className="card company-picker">
       <div className="section-heading"><div><span className="eyebrow">FIND YOUR COMPANY</span><h2>어떤 회사가 궁금하세요?</h2></div><Icon name="search"/></div>
@@ -127,19 +164,20 @@ export function NewsPanel() {
               : shown ? <>
                 {stale && <div className="stale-banner" role="status"><strong>이전 결과</strong><p>새 기사를 불러오지 못해 {formatTime(stale.asOf)} 기준 결과({elapsedLabel(stale.asOf)})를 보여드립니다.{stale.reason ? ` ${stale.reason}` : ''}</p><button className="stale-retry" onClick={() => setRetry(n => n + 1)} disabled={refreshDisabled}>다시 시도</button></div>}
                 <div className="evidence-summary"><span className={`status-badge ${shown.status === 'insufficient' ? 'orange' : ''}`}>{shown.status === 'insufficient' ? '근거 부족 · 판단 유보' : '뉴스 참고 · 불확실성 존재'}</span><h3>{shown.summary}</h3><p>근거 수준: {shown.evidence === 'moderate' ? '보통' : shown.evidence === 'low' ? '낮음' : '없음'} · 기사 {shown.articles.length}건</p>
-                  {shown.sources && <p className="source-status">출처 상태: {shown.sources.map(sourceStatusLabel).join(' · ')}</p>}</div>
+                  {shown.sources && <p className="source-status">출처 상태: {shown.sources.map(sourceStatusLabel).join(' · ')}</p>}
+                  {shown.ai && <p className="source-status">AI 판단: {shown.ai.providers.map(aiStatusLabel).join(' · ')}{shown.ai.hiddenCount > 0 ? ` · 관련 없는 기사 ${shown.ai.hiddenCount}건 숨김` : ''}</p>}</div>
                 <FactorGrid analysis={shown} onEvidence={id => {
-                  // Hash links would change the app route; move focus to the card instead.
-                  const target = document.getElementById(articleAnchor(shown.articles.findIndex(article => article.id === id)));
-                  target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
-                  target?.focus({ preventScroll: true });
+                  if (shown.articles.findIndex(article => article.id === id) >= VISIBLE_ARTICLES) setExpanded(true);
+                  setFocusId(id);
                 }}/>
                 {shown.articles.length === 0 && <div className="article-empty">수집 기간에 확인된 기사가 없습니다.</div>}
-                {shown.articles.some(article => article.sentiment === 'unclassified') && <p className="news-provider-note">미분류 기사는 긍정·부정 요인 집계에서 제외합니다.</p>}
-                <div className="article-list">{shown.articles.map((article, index) => <ArticleCard key={article.id} article={article} index={index} provider={shown.provider}/>)}</div>
+                {shown.articles.some(article => article.sentiment === 'unclassified') && <p className="news-provider-note">{shown.ai ? '미분류·잠정·판단 유보 기사는 긍정·부정 요인 집계에서 제외합니다. AI 판단은 두 모델이 같을 때만 집계합니다.' : '미분류 기사는 긍정·부정 요인 집계에서 제외합니다.'}</p>}
+                <div className="article-list">{(expanded ? shown.articles : shown.articles.slice(0, VISIBLE_ARTICLES)).map((article, index) => <ArticleCard key={article.id} article={article} index={index} provider={shown.provider}/>)}</div>
+                {shown.articles.length > VISIBLE_ARTICLES && <button type="button" className="article-more" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? '기사 접기' : `기사 ${shown.articles.length - VISIBLE_ARTICLES}건 더 보기`}</button>}
                 <div className="risk-box"><h4>전망이 빗나갈 수 있는 이유</h4>{shown.risks.map((s, i) => <p key={i}>{s}</p>)}</div>
               </> : null}
         {marketaux && <p className="news-provider-note">Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 원문 언어를 제한하지 않아 해외 기사가 포함될 수 있으며, 기사 부족·상충 시 판단을 유보합니다.</p>}
+        {aiOutput && <p className="news-provider-note">일부 요약·분류는 AI(Gemini·Cloudflare Workers AI)가 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다. 원문에서 확인하세요.</p>}
         {shown?.articles.some(article => article.sourceProvider === 'GDELT') && <p className="news-provider-note">일부 기사 목록은 <a href="https://www.gdeltproject.org" target="_blank" rel="noopener noreferrer">GDELT Project</a> 검색 결과입니다. GDELT 시각은 기사를 처음 확인한 시각이며 게시 시각과 다를 수 있습니다.</p>}
         {shown && <div className="analysis-footer">
           <span>데이터 기준: {formatTime(shown.asOf)}</span>
