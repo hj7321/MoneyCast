@@ -278,8 +278,8 @@ export interface AiProviderState {
 }
 export interface AiStatus {
   providers: AiProviderState[];
-  /** Articles both models judged unrelated to the company; left out of the list. */
-  hiddenCount: number;
+  /** Articles both models judged unrelated to the company; folded below the list and left out of counts. */
+  unrelatedCount: number;
   promptVersion: string;
 }
 export interface NewsArticle {
@@ -312,9 +312,16 @@ export interface NewsArticle {
   summary?: ArticleSummary;
   aiJudgements?: AiJudgement[];
   aiConsensus?: AiConsensus;
+  /**
+   * Both models judged the article not to be about the company. It stays
+   * visible, folded below the list, but no count or factor uses it; a
+   * provider score is shown for reference only.
+   */
+  aiRelevance?: 'unrelated';
 }
 
-export type NewsSourceStatus = 'ok' | 'empty' | 'not_configured' | 'rate_limited' | 'error';
+/** skipped: not queried in this refresh, as GDELT outside scheduled collection. */
+export type NewsSourceStatus = 'ok' | 'empty' | 'skipped' | 'not_configured' | 'rate_limited' | 'error';
 /** Per-source outcome of one refresh, shown so partial failures stay visible. */
 export interface NewsSourceState {
   id: string;
@@ -431,6 +438,9 @@ function hasValidArticleMetadata(article: Record<string, unknown>): boolean {
   if (article.aiJudgements !== undefined && !(Array.isArray(article.aiJudgements) && article.aiJudgements.length >= 1 &&
       article.aiJudgements.length <= 2 && article.aiJudgements.every(isAiJudgement) &&
       new Set(article.aiJudgements.map(item => (item as AiJudgement).provider)).size === article.aiJudgements.length)) return false;
+  if (article.aiRelevance !== undefined && !(article.aiRelevance === 'unrelated' && article.classificationMethod !== 'llm' &&
+      Array.isArray(article.aiJudgements) && article.aiJudgements.length === 2 &&
+      article.aiJudgements.every(item => isRecord(item) && item.relevant === false))) return false;
   if (article.summary !== undefined && !(isRecord(article.summary) && isBoundedText(article.summary.text, 200) &&
       (article.summary.basis === 'title_description' || article.summary.basis === 'title_only') &&
       isBoundedText(article.summary.generatedBy, 40))) return false;
@@ -474,13 +484,13 @@ function isAiStatus(value: unknown): boolean {
       ['ok', 'idle', 'not_configured', 'rate_limited', 'error', 'timeout'].includes(item.status) &&
       typeof item.judgedCount === 'number' && Number.isSafeInteger(item.judgedCount) && item.judgedCount >= 0 &&
       (item.retryAt === undefined || isTimestamp(item.retryAt))) &&
-    typeof value.hiddenCount === 'number' && Number.isSafeInteger(value.hiddenCount) && value.hiddenCount >= 0 &&
+    typeof value.unrelatedCount === 'number' && Number.isSafeInteger(value.unrelatedCount) && value.unrelatedCount >= 0 &&
     isBoundedText(value.promptVersion, 40);
 }
 
 function isSourceState(value: unknown): boolean {
   return isRecord(value) && isBoundedText(value.id, 40) && isBoundedText(value.label, 60) &&
-    typeof value.status === 'string' && ['ok', 'empty', 'not_configured', 'rate_limited', 'error'].includes(value.status) &&
+    typeof value.status === 'string' && ['ok', 'empty', 'skipped', 'not_configured', 'rate_limited', 'error'].includes(value.status) &&
     typeof value.articleCount === 'number' && Number.isSafeInteger(value.articleCount) && value.articleCount >= 0 &&
     (value.retryAt === undefined || isTimestamp(value.retryAt));
 }
@@ -496,7 +506,8 @@ function isFactorBox(value: unknown, articleIds: ReadonlySet<string>): boolean {
 }
 
 function isFactorSummary(value: unknown, articles: readonly NewsArticle[]): boolean {
-  const ids = new Set(articles.map(article => article.id));
+  // Articles both models judged unrelated stay listed but are never cited as evidence.
+  const ids = new Set(articles.filter(article => article.aiRelevance !== 'unrelated').map(article => article.id));
   return isRecord(value) && isFactorBox(value.positive, ids) && isFactorBox(value.negative, ids) &&
     isBoundedTextArray(value.chips, 0, 8, 120) && isBoundedText(value.note, 300);
 }

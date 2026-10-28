@@ -1,8 +1,5 @@
 import 'dotenv/config';
-import {
-  COMPANY_NEWS_IDENTITY, companies, matchesCompanyTitle,
-  type AiJudgement, type AiProviderId, type Company, type NewsArticle,
-} from '../packages/core/src/index.js';
+import { companies, type AiJudgement, type AiProviderId, type Company, type NewsArticle } from '../packages/core/src/index.js';
 import { decideConsensus, LlmError, MAX_LLM_ITEMS, validateJudgements, type JudgeRequest, type LlmJudge, type ValidJudgement, type ValidationNote } from '../server/llm.js';
 import { createLlmJudges } from '../server/llm-judges.js';
 import { createNewsProvider } from '../server/news-provider.js';
@@ -18,14 +15,10 @@ import { terminalText } from './terminal-text.js';
 
 const SOURCE_WAIT_MS = 35_000;
 const MODEL_WAIT_MS = 25_000;
+// GDELT asks for one request every five seconds; companies are spaced a little wider.
 const GDELT_SPACING_MS = 6_000;
 const VERDICTS = { positive: '긍정', negative: '부정', neutral: '중립', uncertain: '판단 불가' } as const;
 const RESULTS = { confirmed: '합의', provisional: '잠정', withheld: '유보', pending: '대기', irrelevant: '관련 없음 합의' } as const;
-/** `repeat` takes one word, so each company gets the single word its articles repeat. */
-const REPEAT_WORDS: Record<string, string> = {
-  'krx:005930': 'Samsung', 'krx:000660': 'Hynix', 'krx:035420': 'Naver', 'krx:005380': 'Hyundai',
-  'nasdaq:AAPL': 'Apple', 'nasdaq:NVDA': 'Nvidia', 'nasdaq:MSFT': 'Microsoft', 'nasdaq:TSLA': 'Tesla',
-};
 
 const seconds = (ms: number) => (ms / 1000).toFixed(1);
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -50,39 +43,13 @@ async function ask(judge: LlmJudge, request: JudgeRequest): Promise<Answer> {
   }
 }
 
-/** One extra GDELT request with `repeat3:` added, to compare how many titles name the company. */
-async function gdeltRepeatTest(company: Company): Promise<string> {
-  const identity = COMPANY_NEWS_IDENTITY[company.id];
-  const word = REPEAT_WORDS[company.id];
-  if (!identity || !word) return 'repeat3 비교: 대상 아님';
-  const now = new Date();
-  const time = (date: Date) => date.toISOString().replace(/[-:T]/g, '').slice(0, 14);
-  const url = new URL('https://api.gdeltproject.org/api/v2/doc/doc');
-  for (const [key, value] of Object.entries({
-    query: `repeat3:"${word}" ${identity.searchQuery}`, mode: 'artlist', format: 'json', maxrecords: '50', sort: 'datedesc',
-    startdatetime: time(new Date(now.getTime() - 7 * 86_400_000)), enddatetime: time(now),
-  })) url.searchParams.set(key, value);
-  const started = Date.now();
-  try {
-    const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(30_000), headers: { Accept: 'application/json' } });
-    const elapsed = seconds(Date.now() - started);
-    if (!response.ok || !response.headers.get('content-type')?.includes('json')) return `repeat3 비교: 실패(HTTP ${response.status}, ${elapsed}초)`;
-    const payload = await response.json() as { articles?: Array<{ title?: unknown }> };
-    const rows = Array.isArray(payload.articles) ? payload.articles : [];
-    const named = rows.filter(row => typeof row.title === 'string' && matchesCompanyTitle(company.id, row.title)).length;
-    return `repeat3 비교: 받은 ${rows.length}건 중 제목에 회사명 ${named}건 · ${elapsed}초`;
-  } catch {
-    return `repeat3 비교: 실패(시간 초과 또는 연결 오류, ${seconds(Date.now() - started)}초)`;
-  }
-}
-
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const flags = args.filter(arg => arg.startsWith('--'));
   const ids = args.filter(arg => !arg.startsWith('--'));
   const targets = (ids.length ? ids : ['nasdaq:AAPL', 'krx:005930']).map(id => companies.find(company => company.id === id));
-  if (targets.some(company => !company) || targets.length > 4 || flags.some(flag => flag !== '--gdelt-test')) {
-    console.error('회사 ID를 1~4개 적어 주세요. 예: npm run ai:check -- nasdaq:AAPL krx:005930 --gdelt-test');
+  if (targets.some(company => !company) || targets.length > 4 || flags.length > 0) {
+    console.error('회사 ID를 1~4개 적어 주세요. 예: npm run ai:check -- nasdaq:AAPL krx:005930');
     process.exitCode = 1;
     return;
   }
@@ -102,17 +69,14 @@ async function main(): Promise<void> {
     const started = Date.now();
     let articles: NewsArticle[] = [];
     try {
-      const result = await provider.getArticles(company, new Date(), { deadline: Date.now() + SOURCE_WAIT_MS });
+      // The scheduled path, so GDELT is asked as in the daily collection.
+      const result = await provider.getArticles(company, new Date(), { deadline: Date.now() + SOURCE_WAIT_MS, scheduled: true });
       console.log(`출처 ${seconds(Date.now() - started)}초 · ${(result.sources ?? []).map(source => `${source.label} ${source.status} ${source.articleCount}건`).join(' · ') || result.provider}`);
       for (const note of result.notes ?? []) if (/GDELT 기사 \d+건/.test(note)) console.log(`  ${note}`);
       articles = result.articles.slice(0, MAX_LLM_ITEMS);
     } catch (error) {
       const sources = error instanceof ProviderError ? error.sources ?? [] : [];
       console.log(`출처 실패(${error instanceof ProviderError ? error.code : 'error'}) · ${sources.map(source => `${source.label} ${source.status}`).join(' · ')}`);
-    }
-    if (flags.includes('--gdelt-test')) {
-      await sleep(GDELT_SPACING_MS);
-      console.log(`  ${await gdeltRepeatTest(company)}`);
     }
     if (articles.length) {
       const items = articles.map((article, i) => ({
@@ -138,7 +102,11 @@ async function main(): Promise<void> {
         }
         samples.push({ article, byModel });
         const judgements = [...byModel].map(([id, value]): AiJudgement => ({ provider: id, model: id, relevant: value.relevant, sentiment: value.sentiment, judgedAt: new Date().toISOString() }));
-        const result = RESULTS[decideConsensus(judgements).consensus];
+        const decided = decideConsensus(judgements).consensus;
+        // A provider score keeps its direction in the app; only an agreed "unrelated" sets it apart.
+        const result = article.classificationMethod === 'provider'
+          ? decided === 'irrelevant' ? '관련 없음 합의(요인 제외)' : '점수 유지'
+          : RESULTS[decided];
         const reference = article.classificationMethod === 'provider'
           ? `Marketaux ${VERDICTS[article.sentiment as 'positive' | 'negative' | 'neutral']}${article.sentimentScore !== undefined ? `(${article.sentimentScore > 0 ? '+' : ''}${article.sentimentScore})` : ''}`
           : `${article.sourceProvider ?? '출처'} 점수 없음`;

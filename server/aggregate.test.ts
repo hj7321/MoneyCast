@@ -115,3 +115,25 @@ test('when every source fails the combined state keeps each outcome and never hi
   ]);
   await assert.rejects(keyed.getArticles(company, now), (error: unknown) => error instanceof ProviderError && error.reason === 'invalid_key');
 });
+
+test('a skipped source is reported but never counts as a success that would hide a failure', async () => {
+  const skipped = provider(async () => ({ provider: 'GDELT', articles: [], skipped: true }) as never);
+  const ok = await createMultiSourceProvider([
+    { id: 'marketaux', label: 'Marketaux', provider: provider(async () => ({ provider: 'Marketaux', articles: [article('m1')] })) },
+    { id: 'gdelt', label: 'GDELT', provider: skipped },
+  ]).getArticles(company, now);
+  assert.equal(ok.provider, 'Marketaux');
+  assert.deepEqual(ok.sources?.map(source => [source.id, source.status]), [['marketaux', 'ok'], ['gdelt', 'skipped']]);
+  // Marketaux out of quota and GDELT not asked: a failure, so the last good result can be shown instead.
+  await assert.rejects(createMultiSourceProvider([
+    { id: 'marketaux', label: 'Marketaux', provider: provider(async () => { throw new ProviderError('rate_limited', undefined, 60000); }) },
+    { id: 'gdelt', label: 'GDELT', provider: skipped },
+  ]).getArticles(company, now), (error: unknown) => {
+    assert.ok(error instanceof ProviderError);
+    assert.equal(error.code, 'rate_limited');
+    assert.deepEqual(error.sources?.map(source => source.status), ['rate_limited', 'skipped']);
+    return true;
+  });
+  const none = await createMultiSourceProvider([{ id: 'gdelt', label: 'GDELT', provider: skipped }]).getArticles(company, now);
+  assert.deepEqual([none.articles, none.sources?.map(source => source.status)], [[], ['skipped']]);
+});

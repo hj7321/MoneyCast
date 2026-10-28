@@ -17,19 +17,19 @@
 
 `NEWS_PROVIDER`가 `marketaux`(기본)이면 `NEWS_SOURCES`의 출처를 함께 조회합니다. 기본값은 `marketaux,gdelt`이며, 알 수 없는 출처 이름은 설정 오류입니다. 게이트웨이(`NEWS_PROVIDER=gateway`)는 단독으로만 사용합니다.
 
-- 출처마다 제한 시간·쿨다운·오류를 따로 처리하고(`Promise.allSettled`), 응답의 `sources`에 출처별 `ok`·`empty`·`not_configured`·`rate_limited`·`error`와 기사 수, 재시도 시각을 남깁니다. 기사마다 수집 출처(`sourceProvider`)를 표시합니다.
+- 출처마다 제한 시간·쿨다운·오류를 따로 처리하고(`Promise.allSettled`), 응답의 `sources`에 출처별 `ok`·`empty`·`skipped`(예약 수집 때만 조회)·`not_configured`·`rate_limited`·`error`와 기사 수, 재시도 시각을 남깁니다. 기사마다 수집 출처(`sourceProvider`)를 표시합니다.
 - 같은 기사는 하나로 합칩니다. URL은 호스트 소문자화·`www.`/`m.`/`amp.` 제거·추적 파라미터 제거·쿼리 정렬로, 제목은 `[속보]` 같은 태그와 " - 매체" 꼬리를 지운 뒤 비교합니다. 같은 제목이거나 48시간 안에 2-gram 유사도 0.8 이상이면 같은 기사로 보고, 분류된 기사를 대표로 남겨 나머지는 `alsoReportedBy`(최대 10곳)에 둡니다.
-- 일부 출처만 실패하면 성공한 출처로 결과를 만들고 30분만 캐시합니다. 모두 실패하면 7일 이내의 마지막 정상 결과를 `servedFrom: "stale"`과 `refreshAttemptedAt`으로 표시해 반환하며, 이 응답은 CDN에 캐시하지 않습니다. 정상 결과가 없으면 기존 오류 상태를 반환합니다.
+- 일부 출처만 실패하면 성공한 출처로 결과를 만들고 30분만 캐시합니다. 건너뛴 출처(`skipped`)는 실패로 보지 않으므로 정상 결과의 6시간 캐시를 유지하고, 성공으로도 세지 않습니다. 모두 실패하면 7일 이내의 마지막 정상 결과를 `servedFrom: "stale"`과 `refreshAttemptedAt`으로 표시해 반환하며, 이 응답은 CDN에 캐시하지 않습니다. 정상 결과가 없으면 기존 오류 상태를 반환합니다.
 
 ## GDELT DOC 2.0
 
-[GDELT DOC 2.0 API](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/)는 키가 필요 없습니다. 고정 주소 `https://api.gdeltproject.org/api/v2/doc/doc`에 `mode=artlist`, `format=json`, 최근 7일, 최신순으로 요청합니다. 회사별 영어 검색식(예: `"Samsung Electronics"`)을 쓰며, GDELT는 영어 기계 번역 색인을 검색하므로 다른 언어 기사도 찾을 수 있습니다.
+[GDELT DOC 2.0 API](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/)는 키가 필요 없습니다. **예약 수집에서만** 고정 주소 `https://api.gdeltproject.org/api/v2/doc/doc`에 `mode=artlist`, `format=json`, `maxrecords=75`(GDELT 기본값), 최근 7일, 최신순으로 요청합니다. 요청 시 갱신에서는 요청하지 않고 출처 상태를 `skipped`로 둡니다. 검색식은 회사 이름을 세 번 이상 쓴 기사만 찾는 `repeat3:"<단어>"`에 회사별 영어 검색식을 더합니다(예: `repeat3:"Samsung" "Samsung Electronics"`). `repeat`는 한 단어만 받고, 제목만 검색하는 연산자는 없습니다. GDELT는 영어 기계 번역 색인을 검색하므로 다른 언어 기사도 찾을 수 있습니다.
 
 - 제목·URL·도메인·언어·처음 확인한 시각(`seendate`)만 제공되고 설명과 감성 점수는 없습니다. 시각은 `timeKind: "seen"`으로 표시하며 게시 시각과 다를 수 있습니다.
 - 제목에 회사명이 있고 제외어(다른 계열사·우선주·동명이인 등)가 없을 때만 포함하며 `identity: "name_match"`로 표시합니다. HTTPS 원문 링크만 사용하고 최대 15건입니다.
 - 프로세스당 5초에 1회만 요청하고, 대기가 5초를 넘으면 그 요청은 호출 제한으로 처리합니다. 429나 "limit requests" 응답은 60초 쉽니다.
-- 응답에 10~16초가 걸리는 경우가 많아, 호출한 쪽이 남긴 시간만큼(3~30초) 기다립니다. 요청 시 갱신은 10초, 예약 수집은 30초이며, 기한이 없으면 8초입니다. 실패는 서버 로그에 `GDELT request failed: timeout after 10s`, `HTTP 500`, `network error`처럼 종류만 남깁니다.
-- 2026-10-28 확인: 영어 번역 본문까지 검색하므로 `"Samsung Electronics"` 결과 50건 중 제목에 회사명이 있는 기사는 1건뿐이었습니다(한국어 44건). 공용 IP에서는 첫 요청부터 429가 오기도 했습니다. `npm run ai:check -- <회사> --gdelt-test`로 `repeat3:` 검색식의 적중률을 비교할 수 있습니다.
+- 응답에 10~16초가 걸리는 경우가 많아, 예약 수집이 남긴 시간만큼(3~30초, 보통 30초) 기다리며 기한이 없으면 8초입니다. 실패는 서버 로그에 `GDELT request failed: timeout after 10s`, `HTTP 500`, `network error`처럼 종류만 남깁니다.
+- 2026-10-28 확인: 영어 번역 본문까지 검색하므로 이전 검색식 `"Samsung Electronics"`는 결과 50건 중 제목에 회사명이 있는 기사가 1건뿐이었습니다(한국어 44건). `repeat3:` 검색식은 엔비디아에서 50건 중 11건이었습니다. 사용자 PC(가정용 IP)에서도 5번 중 4번 429가 왔고 공용 IP에서는 첫 요청부터 오기도 해, 화면 요청에서는 부르지 않습니다. `npm run ai:check`는 예약 수집과 같은 경로로 GDELT를 부릅니다.
 - [이용 조건](https://www.gdeltproject.org/about.html)에 따라 화면에 GDELT Project 출처와 링크를 표시합니다.
 
 ## Marketaux 실제 뉴스 연결
@@ -44,7 +44,7 @@ MARKETAUX_API_TOKEN=your-server-only-token
 `npm run dev`는 `.env` 변경을 감지해 API를 다시 시작합니다. `npm start`는 설정 변경 후 직접 다시 시작해야 합니다. 개발 서버를 중복 실행하지 마세요. 키가 없으면 외부 API를 호출하지 않고 `not_configured`를 반환합니다.
 
 - 고정 HTTPS 주소 `https://api.marketaux.com/v1/news/all`에 서버에서만 요청합니다. 제공자 인증 규격상 토큰은 상류 요청의 `api_token` 쿼리에만 포함되며, 요청 URL·오류 본문을 로그나 클라이언트로 전달하지 않습니다. 리디렉션은 허용하지 않습니다.
-- 최근 7일, 회사별 최대 3건, 유사 기사 그룹화, 기업 엔터티 필터를 적용합니다. 언어는 제한하지 않으며 원문 언어를 표시합니다. 기사 전체 본문·이미지·하이라이트를 복제하거나 번역하지 않습니다.
+- 최근 7일, 회사별 최대 3건, 유사 기사 그룹화, 기업 엔터티 필터, 영어·한국어(`language=en,ko`)를 적용하고 원문 언어를 표시합니다. 기사 전체 본문·이미지·하이라이트를 복제하지 않습니다.
 - 미국 종목은 티커·회사명·국가·주식 유형·제공된 거래소를 대조합니다. 한국 종목은 `/v1/entity/search`에서 종목 코드·회사명·국가·거래소를 검증해 제공자 티커를 찾습니다. 티커 접미사를 임의로 붙이지 않습니다. 식별 결과는 6시간 메모리 캐시하며, 후보가 없거나 모호하면 `identity_unverified` 사유의 안전한 오류를 반환합니다. 기업명이 같아도 다른 시장·주식 유형·우선주는 선택한 보통주를 대신하지 않습니다.
 - 매체가 제공한 `description`은 태그를 지운 일반 텍스트로 최대 300자만 저장합니다. `snippet`·`highlights`·본문은 저장하거나 표시하지 않습니다.
 - 기사마다 선택한 회사와 일치한 엔터티의 `sentiment_score`만 사용합니다. -1~1 범위에서 양수/음수/0을 긍정/부정/중립으로 표시하고, 점수가 없으면 `unclassified`/미분류입니다. 미분류는 판단 집계에 포함하지 않습니다. 감성 점수는 뉴스 문맥 분류이며 상승 확률이 아닙니다. 점수·분류 주체·제공자 기업 식별 정보·언어를 추적합니다.
@@ -119,11 +119,11 @@ NEWS_API_KEY=your-server-only-key
 | `retryAt` | 호출 제한 시 수동 재요청을 허용하는 시각 |
 | `provider`, `analysisVersion` | 결과에 기사를 낸 출처와 집계 규칙 버전(`news-evidence-v3`) |
 | `factorSummary` | 긍정·부정 박스의 종합 문장(박스당 최대 3줄, 문장마다 근거 기사 ID), 상태(`none`·`single`·`repeated`·`mixed`), 주의 칩 |
-| `sources` | 출처별 상태·기사 수·재시도 시각 |
+| `sources` | 출처별 상태(`skipped`는 예약 수집 때만 조회하는 출처)·기사 수·재시도 시각 |
 | `servedFrom`, `refreshAttemptedAt` | `stale`이면 새로 고침이 실패해 이전 결과를 보여주는 중이며, 실패한 시도 시각을 함께 둠 |
-| `ai` | 모델별 상태(`ok`·`idle`·`not_configured`·`rate_limited`·`error`·`timeout`)와 판단 건수, 관련 없음으로 숨긴 기사 수, 프롬프트 버전 |
+| `ai` | 모델별 상태(`ok`·`idle`·`not_configured`·`rate_limited`·`error`·`timeout`)와 판단 건수, 두 모델이 모두 관련 없다고 본 기사 수(`unrelatedCount`), 프롬프트 버전 |
 
-기사에는 선택 필드로 `description`(매체 설명), `rationaleLines`(분류 근거 1~5줄), `topics`(고정 주제 키), `sourceProvider`, `timeKind`(`published`·`seen`), `identity`(`entity_verified`·`name_match`), `alsoReportedBy`, `summary`(AI 요약과 그 기준 `title_description`·`title_only`), `aiJudgements`(모델별 판단), `aiConsensus`(`confirmed`·`provisional`·`withheld`·`pending`)가 붙습니다. 공용 검증기는 `llm` 분류가 `confirmed`일 때만 방향을 갖도록 하고, 종합 문장이 실제 기사 ID만 가리키는지 확인합니다. 이 필드가 없는 v2 응답도 그대로 유효합니다.
+기사에는 선택 필드로 `description`(매체 설명), `rationaleLines`(분류 근거 1~5줄), `topics`(고정 주제 키), `sourceProvider`, `timeKind`(`published`·`seen`), `identity`(`entity_verified`·`name_match`), `alsoReportedBy`, `summary`(AI 요약과 그 기준 `title_description`·`title_only`), `aiJudgements`(모델별 판단), `aiConsensus`(`confirmed`·`provisional`·`withheld`·`pending`), `aiRelevance`(`unrelated`: 두 모델 모두 관련 없음)가 붙습니다. 공용 검증기는 `llm` 분류가 `confirmed`일 때만 방향을 갖도록 하고, `aiRelevance`는 두 모델의 판단이 모두 '관련 없음'일 때만 허용하며, 종합 문장이 관련성 낮은 기사를 뺀 실제 기사 ID만 가리키는지 확인합니다. 이 필드가 없는 v2 응답도 그대로 유효합니다.
 
 `newsWindow`, `cachedUntil`, `retryAt`은 공용 계약에서 선택 필드이며, 현재 서버는 수집 기간과 캐시 만료를 모든 분석 상태에 포함하고 호출 제한 상태에만 재시도 시각을 추가합니다. 오류 응답에서도 비밀값이나 제공자 오류 원문은 반환하지 않습니다.
 
@@ -132,24 +132,25 @@ NEWS_API_KEY=your-server-only-key
 `vercel.json`의 Cron이 매일 `0 21 * * *`(UTC, 06:00~06:59 KST)에 `/api/cron/collect`를 호출합니다. 8개 회사를 차례로 새로 고치며(출처 요청 간격 때문에 병렬로 하지 않음), 시작 후 200초가 지나면 남은 회사는 `skipped`로 돌려 요청 시 갱신에 맡깁니다. Cron은 재시도하지 않고 중복 실행될 수 있으므로 회사 스냅샷을 덮어쓰기만 합니다.
 
 - 저장소는 **비공개** Vercel Blob입니다(`access: "private"`, 덮어쓰기, 무작위 접미사 없음). Vercel에서는 스토어를 프로젝트에 연결하면 OIDC(`BLOB_STORE_ID`)로, 로컬에서는 `BLOB_READ_WRITE_TOKEN`으로 인증합니다. 둘 다 없으면 스냅샷 없이 동작합니다.
-- 경로는 `news/news-evidence-v3/<회사 ID>.json`이고, 최근 분석·갱신 시각·7일 기사 목록(최대 30건, 관련 없음으로 숨긴 기사와 AI 판단·요약 포함)을 담습니다. 읽을 때 형식·버전·회사·크기(1MiB)를 검증하고 맞지 않으면 버립니다.
+- 경로는 `news/news-evidence-v3/<회사 ID>.json`이고, 최근 분석·갱신 시각·7일 기사 목록(최대 30건, 관련성 낮은 기사와 AI 판단·요약 포함)을 담습니다. 읽을 때 형식·버전·회사·크기(1MiB)를 검증하고 맞지 않으면 버립니다.
 - 요청은 메모리 → 스냅샷 → 실시간 순으로 읽습니다. 스냅샷이 아직 유효하면 출처와 모델을 호출하지 않습니다. 만료된 스냅샷의 기사 목록은 새 기사와 합쳐 주간 근거를 이어 갑니다.
 - 내용이 같으면 6시간에 한 번만 다시 씁니다(Hobby 고급 작업 월 2천 회). 읽기·쓰기 실패는 경고만 남기고 응답에는 영향을 주지 않습니다.
 
 ## AI 교차 판단
 
-Gemini 키나 Cloudflare 키가 있으면 감성 점수가 없는 기사를 두 모델이 따로 판단합니다. 키가 하나도 없으면 이 단계를 건너뜁니다. 원하는 모델의 키가 빠져 있으면 그 모델은 `not_configured`로 표시되고, 다른 모델의 판단은 `provisional`로 남습니다.
+Gemini 키나 Cloudflare 키가 있으면 감성 점수가 없는 기사의 방향을 두 모델이 따로 판단하고, 감성 점수가 있는 기사도 이 회사 기사인지 한 번씩 확인합니다(방향은 바꾸지 않음). 키가 하나도 없으면 이 단계를 건너뜁니다. 원하는 모델의 키가 빠져 있으면 그 모델은 `not_configured`로 표시되고, 다른 모델의 판단은 `provisional`로 남습니다.
 
 | 모델 | 요청 | 맡는 일 |
 | --- | --- | --- |
 | Gemini(`GEMINI_MODEL`, 기본 `gemini-3.5-flash-lite`) | `POST https://generativelanguage.googleapis.com/v1beta/models/<모델>:generateContent`, 키는 `x-goog-api-key` 헤더, `responseMimeType: application/json`과 응답 스키마 | 방향·근거 구절·이유·주제·한국어 요약 |
 | Cloudflare Workers AI(`CLOUDFLARE_AI_MODEL`, 기본 `@cf/qwen/qwen3-30b-a3b-fp8`) | `POST https://api.cloudflare.com/client/v4/accounts/<계정>/ai/run/<모델>`, `Authorization: Bearer <토큰>`, `temperature: 0` | 방향·근거 구절·이유(요약 없음) |
 
-- 두 요청은 같은 입력으로 **동시에** 보내며, 어느 쪽도 다른 모델의 답을 받지 않습니다. 최종 결과는 코드의 합의 규칙이 정합니다: 같은 방향이면 `confirmed`(`classificationMethod: "llm"`), 방향이 다르거나 한쪽이라도 `uncertain`이거나 관련성 판단이 다르면 `withheld`, 한 모델만 답하면 `provisional`, 둘 다 답하지 않으면 `pending`, 둘 다 관련 없다고 하면 목록에서 숨깁니다. `confirmed`만 방향을 가지며 나머지는 `unclassified`로 집계에서 빠집니다.
+- 두 요청은 같은 입력으로 **동시에** 보내며, 어느 쪽도 다른 모델의 답을 받지 않습니다. 최종 결과는 코드의 합의 규칙이 정합니다: 같은 방향이면 `confirmed`(`classificationMethod: "llm"`), 방향이 다르거나 한쪽이라도 `uncertain`이거나 관련성 판단이 다르면 `withheld`, 한 모델만 답하면 `provisional`, 둘 다 답하지 않으면 `pending`, 둘 다 관련 없다고 하면 `aiRelevance: "unrelated"`입니다. `confirmed`만 방향을 가지며 나머지는 `unclassified`로 집계에서 빠집니다.
+- 점수 기사는 둘 다 관련 없다고 할 때만 `aiRelevance: "unrelated"`를 붙이고 점수는 참고로 남깁니다. 한 모델만 관련 없다고 하면 그대로 집계합니다. `unrelated` 기사는 숨기지 않고 목록 아래에 접어 두며, 근거 수준·건수·요약 문장·종합 문장에서 모두 뺍니다. 최근 기사가 모두 `unrelated`이면 요약 문장이 그렇다고 밝히고 판단을 유보합니다.
 - 입력은 회사명·별칭·종목 코드·거래소와 기사별 요청 내 임시 ID·제목·매체 설명·매체·언어입니다. 기사 텍스트 속 지시는 따르지 않도록 지시하고 도구는 주지 않습니다.
-- 검증: 응답 JSON 형식, 요청한 ID와 한 번씩만 답했는지, 근거 구절이 제목·설명에 실제로 있는지(긍정·부정은 근거 필수), 이유·요약에 입력에 없는 숫자가 있는지, 투자 권유·확률·주가 전망 표현이 있는지(기사가 보도한 증권사 의견은 허용), 길이(근거 80자·이유 120자·요약 160자). 근거나 이유가 검증에 실패하면 그 기사의 해당 모델 답을 버리고, 요약만 실패하면 요약만 버립니다.
-- 호출 1회당 기사 최대 15건입니다. 이미 판단한 모델에는 같은 기사를 다시 보내지 않고, `provisional` 기사는 빠진 모델에만 보냅니다. 요약이 없는 기사는 Gemini에 요약만 요청할 수 있습니다.
-- 시간 예산: 요청 시 갱신은 전체 18초(출처 10초), 예약 수집은 회사당 60초(출처 35초)이며 모델 호출 1회는 최대 25초입니다. Marketaux 점수가 있어 요약만 필요한 기사는 요약만 검증합니다. 남은 시간이 6초 미만이면 호출하지 않고 `timeout`으로 둡니다. 마감 뒤에 도착한 답은 버립니다.
+- 검증: 응답 JSON 형식, 요청한 ID와 한 번씩만 답했는지, 근거 구절이 제목·설명에 실제로 있는지(긍정·부정은 근거 필수), 이유·요약에 입력에 없는 숫자가 있는지, 투자 권유·확률·주가 전망 표현이 있는지(기사가 보도한 증권사 의견은 허용), 길이(근거 80자·이유 120자·요약 160자). 근거 구절이 원문에 그대로 있으면 80자를 넘어도 버리지 않고 앞 80자만 남깁니다(`evidence_trimmed`). 근거나 이유가 검증에 실패하면 그 기사의 해당 모델 답을 버리고, 요약만 실패하면 요약만 버립니다.
+- 호출 1회당 기사 최대 15건입니다. 이미 판단한 모델에는 같은 기사를 다시 보내지 않고, `provisional` 기사는 빠진 모델에만 보냅니다. 점수 기사는 두 모델의 관련성 확인이 끝나면 다시 보내지 않습니다. 요약이 없는 기사는 Gemini에 요약만 요청할 수 있습니다.
+- 시간 예산: 요청 시 갱신은 전체 18초(출처 10초), 예약 수집은 회사당 60초(출처 35초)이며 모델 호출 1회는 최대 25초입니다. Marketaux 점수가 있는 기사는 관련성과 요약만 쓰므로 근거·이유 검사를 하지 않습니다. 남은 시간이 6초 미만이면 호출하지 않고 `timeout`으로 둡니다. 마감 뒤에 도착한 답은 버립니다.
 - 한도: Gemini 429는 `RetryInfo`의 대기 시간(1분~1시간, 없으면 15분), Cloudflare 429는 하루 무료량 소진(코드 3036)이면 다음 00:00 UTC까지, 그 밖에는 1분 쉽니다. 쉬는 동안에는 외부 호출을 보내지 않습니다.
 - 모델 실패·한도·시간 초과·예상하지 못한 오류는 뉴스 응답을 막지 않으며, 기사는 출처의 분류 그대로 남습니다. 키는 헤더로만 보내고, 키가 응답에 되돌아오면 그 응답을 버립니다.
 
@@ -157,11 +158,11 @@ Gemini 키나 Cloudflare 키가 있으면 감성 점수가 없는 기사를 두 
 
 서버를 실행한 상태에서 프로젝트 루트에서 `npm run news:check`를 실행하면 삼성전자의 뉴스 연결을 확인합니다. `npm run news:check -- nasdaq:AAPL`처럼 목록에 있는 회사 ID를 지정할 수도 있습니다. 루트 `.env`의 `PORT`를 사용하며 기본값은 8787입니다. 서버를 새로 시작하거나 외부 제공자에 직접 요청하지 않고 로컬 API를 통해 확인하므로, 서버 캐시가 없다면 제공자 호출 쿼터가 사용될 수 있습니다.
 
-출력은 회사 식별 정보, 상태, 제공자, 기사 수, 기준 시각, 대상 기간과 진단 문구입니다. `--ai`를 붙이면 AI가 판단한 기사마다 번호·합의 상태·두 모델의 판단·근거 구절·제목(제어 문자 제거, 70자)을 한 줄씩 보여 주고, 두 모델이 모두 답한 기사 중 같은 판단의 비율을 계산합니다. 모델 실패는 서버 로그에 `Gemini request failed: HTTP 400 INVALID_ARGUMENT`, `Cloudflare request failed: HTTP 429 (code 3036)`, `Cloudflare answers discarded or trimmed: evidence_not_in_text 2 (of 15)`처럼 상태·코드·사유별 건수만 남깁니다. 키와 제공자 오류 원문은 출력하지 않습니다. 요청별 제한 시간은 20초입니다. 미설정·호출 제한·오류·잘못된 응답·연결 실패는 종료 코드 1이며, `ready`와 `insufficient`는 정상 응답 수신으로 종료 코드 0입니다. `insufficient`나 기사 0건은 뉴스 근거 또는 전망을 확보했다는 뜻이 아닙니다.
+출력은 회사 식별 정보, 상태, 제공자, 기사 수, 기준 시각, 대상 기간과 진단 문구입니다. `--ai`를 붙이면 AI가 판단한 기사(관련성 낮은 기사와 관련성만 확인한 점수 기사 포함)마다 번호·결과(합의·잠정·유보·대기·관련 없음·점수 유지)·두 모델의 판단·근거 구절·제목(제어 문자 제거, 70자)을 한 줄씩 보여 주고, 두 모델이 모두 답한 기사 중 같은 판단의 비율을 계산합니다. 모델 실패는 서버 로그에 `Gemini request failed: HTTP 400 INVALID_ARGUMENT`, `Cloudflare request failed: HTTP 429 (code 3036)`, `Cloudflare answers discarded or trimmed: evidence_not_in_text 2 (of 15)`처럼 상태·코드·사유별 건수만 남깁니다. 키와 제공자 오류 원문은 출력하지 않습니다. 요청별 제한 시간은 20초입니다. 미설정·호출 제한·오류·잘못된 응답·연결 실패는 종료 코드 1이며, `ready`와 `insufficient`는 정상 응답 수신으로 종료 코드 0입니다. `insufficient`나 기사 0건은 뉴스 근거 또는 전망을 확보했다는 뜻이 아닙니다.
 
 ## 근거 수준의 의미와 한계
 
-- 최근 7일 구간 안에 게시된 분류 확인 기사 3건 미만, 전부 오래된 기사, 전부 중립, 긍정·부정 상충은 `insufficient`입니다. 분류 확인 기사는 제공자 점수가 있는 기사와 두 AI가 합의한 기사입니다. 미분류·잠정·판단 유보 기사는 목록에 표시하되 충족 수와 요인 집계에서 제외합니다. 미래 시각의 기사도 근거 집계에 포함하지 않습니다.
+- 최근 7일 구간 안에 게시된 분류 확인 기사 3건 미만, 전부 오래된 기사, 전부 중립, 긍정·부정 상충은 `insufficient`입니다. 분류 확인 기사는 제공자 점수가 있는 기사와 두 AI가 합의한 기사이며, 두 AI가 모두 관련 없다고 본 기사는 점수가 있어도 빠집니다. 미분류·잠정·판단 유보·관련성 낮은 기사는 목록에 표시하되 충족 수와 요인 집계에서 제외합니다. 미래 시각의 기사도 근거 집계에 포함하지 않습니다.
 - 분류를 확인한 최근 기사 3건 이상이고, 긍정 또는 부정 요인이 있으며, 양쪽 분류가 상충하지 않을 때만 `ready`/`moderate`입니다. 이는 기사 집합의 수량·최신성에 따른 표시 규칙이며 예측 정확도나 사실 신뢰도 점수가 아닙니다.
 - 다음 주 기간은 서울 날짜 기준 다음 월요일~금요일입니다. 거래소 휴장일과 시장별 시차를 정확히 반영하려면 시장 달력 연동이 필요합니다.
 - `asOf`, 기사 원문 URL·게시 시각·ID, 회사 ID, 제공자, `analysisVersion`을 응답에 남겨 향후 저장·사후 비교를 확장할 수 있습니다. 스냅샷은 최근 7일만 보관하며 실현 수익률 비교나 정확도 통계는 제공하지 않습니다.

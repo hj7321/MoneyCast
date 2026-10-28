@@ -95,7 +95,7 @@ function factorBox(direction: Direction, articles: NewsArticle[], opposite: News
  * the cards. Provisional, withheld and pending AI labels stay unclassified, so
  * only provider scores and two-model agreement reach the boxes.
  */
-export function synthesizeFactors(articles: NewsArticle[], now: Date, options: { ai?: boolean } = {}): {
+export function synthesizeFactors(articles: NewsArticle[], now: Date, options: { ai?: boolean; unrelated?: number } = {}): {
   factorSummary: FactorSummary; positiveFactors: string[]; negativeFactors: string[];
 } {
   const positive = articles.filter(article => article.sentiment === 'positive');
@@ -111,6 +111,7 @@ export function synthesizeFactors(articles: NewsArticle[], now: Date, options: {
   if (unscored > 0) chips.push(`감성 점수 없는 기사 ${unscored}건은 방향 집계 제외`);
   if (waiting > 0) chips.push(`AI 교차 확인 대기 ${waiting}건`);
   if (withheld > 0) chips.push(`AI 판단 유보 ${withheld}건`);
+  if (options.unrelated) chips.push(`관련성 낮아 뺀 기사 ${options.unrelated}건`);
   const factorSummary: FactorSummary = {
     positive: factorBox('positive', positive, negative, now.getTime()),
     negative: factorBox('negative', negative, positive, now.getTime()),

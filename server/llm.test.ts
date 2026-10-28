@@ -66,7 +66,7 @@ test('both models judge independently from the same text, in parallel, and agree
     reason: '제품 결함에 따른 리콜 확대는 회사에 불리한 소식입니다.', summary: '제품 리콜 대상을 넓힌다는 내용의 기사입니다.' }), { wait: overlap });
   const cloudflare = scripted('cloudflare', () => ({ sentiment: 'negative', evidence: '리콜 대상 확대', reason: '리콜 확대는 불리한 소식입니다.' }), { wait: overlap });
   const classifier = createAiClassifier([gemini, cloudflare], { clock: () => now.getTime() })!;
-  const { articles, hidden, status } = await classifier.apply(company, [unscored('g1', recall)], { budgetMs: 18_000, eligible: always });
+  const { articles, status } = await classifier.apply(company, [unscored('g1', recall)], { budgetMs: 18_000, eligible: always });
   assert.equal(peak, 2);
   const [first] = gemini.requests;
   const [second] = cloudflare.requests;
@@ -78,7 +78,6 @@ test('both models judge independently from the same text, in parallel, and agree
   const secondPrompt = JSON.stringify(buildPrompt(second!));
   assert.equal(secondPrompt, JSON.stringify(buildPrompt({ ...first!, topics: false, items: first!.items.map(item => ({ ...item, summarize: false })) })));
   assert.ok(!secondPrompt.includes('제품 결함') && !secondPrompt.includes('넓힌다는'));
-  assert.equal(hidden.length, 0);
   const article = articles[0]!;
   assert.ok(isNewsArticle(article));
   assert.equal(article.sentiment, 'negative');
@@ -94,7 +93,7 @@ test('both models judge independently from the same text, in parallel, and agree
   ]);
   assert.deepEqual(article.summary, { text: '제품 리콜 대상을 넓힌다는 내용의 기사입니다.', basis: 'title_only', generatedBy: 'Gemini' });
   assert.deepEqual(article.topics, ['product']);
-  assert.deepEqual(status, { promptVersion: LLM_PROMPT_VERSION, hiddenCount: 0, providers: [
+  assert.deepEqual(status, { promptVersion: LLM_PROMPT_VERSION, unrelatedCount: 0, providers: [
     { id: 'gemini', label: 'Gemini', model: 'gemini-test-model', status: 'ok', judgedCount: 1 },
     { id: 'cloudflare', label: 'Cloudflare', model: 'cloudflare-test-model', status: 'ok', judgedCount: 1 },
   ] });
@@ -123,16 +122,18 @@ test('the agreement rule: disagreement, cannot-judge and relevance conflicts wit
     : item.title === titles.unrelated ? { relevant: false, sentiment: 'neutral' } : { sentiment: 'neutral' });
   const result = await createAiClassifier([gemini, cloudflare], { clock: () => now.getTime() })!.apply(company,
     [unscored('s', titles.split), unscored('u', titles.unrelated), unscored('m', titles.mixed)], { budgetMs: 18_000, eligible: always });
-  assert.deepEqual(result.articles.map(item => [item.id, item.aiConsensus, item.sentiment]), [['s', 'withheld', 'unclassified'], ['m', 'withheld', 'unclassified']]);
+  assert.deepEqual(result.articles.map(item => [item.id, item.aiConsensus, item.sentiment, item.aiRelevance]), [
+    ['s', 'withheld', 'unclassified', undefined], ['u', undefined, 'unclassified', 'unrelated'], ['m', 'withheld', 'unclassified', undefined]]);
   assert.deepEqual(result.articles[0]!.rationaleLines, [
     "Gemini '긍정' · Cloudflare '중립' → 판단이 달라 유보합니다.",
     'Gemini 근거: 「수주 확대 기대」 / Cloudflare 근거: 「검토 단계」',
     '긍정·부정 요인 집계에서 제외합니다.',
   ]);
-  assert.equal(result.articles[1]!.rationaleLines![0], 'Cloudflare는 이 회사 관련 기사로, Gemini는 관련 없는 기사로 판단해 관련성이 불확실합니다.');
-  assert.deepEqual(result.hidden.map(item => item.id), ['u']);
-  assert.equal(result.status.hiddenCount, 1);
-  assert.ok(result.hidden.every(isNewsArticle) && result.articles.every(isNewsArticle));
+  // Both models calling it unrelated keeps it listed, set apart, so a person can check the call.
+  assert.deepEqual(result.articles[1]!.rationaleLines, ["AI 두 모델이 따로 판단: Gemini '관련 없음' · Cloudflare '관련 없음' → 이 회사 기사가 아니라고 보고 요인 집계에서 뺐습니다."]);
+  assert.equal(result.articles[2]!.rationaleLines![0], 'Cloudflare는 이 회사 관련 기사로, Gemini는 관련 없는 기사로 판단해 관련성이 불확실합니다.');
+  assert.equal(result.status.unrelatedCount, 1);
+  assert.ok(result.articles.every(isNewsArticle));
 });
 
 test('a single answer stays provisional and is cross-checked later; failures of both leave it pending', async () => {
@@ -203,20 +204,22 @@ test('the time budget, the per-call cap and provider-scored articles limit what 
   assert.equal(cloudflare.requests[0]!.items.length, MAX_LLM_ITEMS);
   assert.ok(!gemini.requests[0]!.items.some(item => item.title === outside.title));
   const skipped = result.articles.filter(item => item.aiConsensus === 'pending');
-  assert.equal(skipped.length, 2);
+  assert.equal(skipped.length, 3);
   assert.match(skipped[0]!.rationaleLines![0]!, /Gemini 이번 갱신 미확인 · Cloudflare 이번 갱신 미확인/);
-  // A provider score is never overridden; the summary-only pass happens once the cap allows it.
+  // A provider score is never overridden: the models only check relevance, so no quote is required of them.
+  assert.equal(gemini.requests[0]!.items.find(item => item.title === '삼성전자 실적 발표')?.judge, false);
+  assert.equal(gemini.requests[0]!.items.find(item => item.title === '삼성전자 소식 0')?.judge, true);
   const kept = result.articles.find(item => item.id === 'mx')!;
   assert.equal(kept.sentiment, 'positive');
   assert.equal(kept.classificationMethod, 'provider');
-  assert.equal(kept.aiJudgements, undefined);
+  assert.equal(kept.aiJudgements?.length, 2);
+  assert.equal(kept.aiRelevance, undefined);
+  assert.equal(kept.summary?.basis, 'title_description');
   const next = await classifier.apply(company, result.articles, { budgetMs: 18_000, eligible: article => article.id !== 'old' });
-  assert.deepEqual(gemini.requests[1]!.items.map(item => [item.title, item.summarize]).slice(0, 3), [
-    ['삼성전자 소식 15', true], ['삼성전자 소식 16', true], ['삼성전자 실적 발표', true],
+  assert.deepEqual(gemini.requests[1]!.items.map(item => [item.title, item.summarize, item.judge]), [
+    ['삼성전자 소식 14', true, true], ['삼성전자 소식 15', true, true], ['삼성전자 소식 16', true, true],
   ]);
-  assert.equal(next.articles.find(item => item.id === 'mx')!.summary?.basis, 'title_description');
-  assert.equal(gemini.requests[1]!.items.find(item => item.title === '삼성전자 실적 발표')?.judge, false);
-  assert.equal(gemini.requests[1]!.items.find(item => item.title === '삼성전자 소식 15')?.judge, true);
+  assert.equal(next.articles.filter(item => item.aiConsensus === 'pending').length, 0);
   const untouched = next.articles.find(item => item.id === 'old')!;
   assert.equal(untouched.aiConsensus, undefined);
   assert.deepEqual(untouched.rationaleLines, outside.rationaleLines);
@@ -232,6 +235,8 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
     { key: 'a6', title: '삼성전자 노조 협상 타결', source: 'a', summarize: true },
     { key: 'a7', title: '삼성전자 협력사 지원', source: 'a', summarize: true },
     { key: 'a8', title: '삼성전자 미국 공장 착공', description: '텍사스 테일러 공장 착공식이 열렸다.', source: 'a', summarize: true },
+    { key: 'a9', title: 'Samsung Electronics wins a large order', source: 'a', summarize: false,
+      description: 'Samsung Electronics said on Tuesday it had won a large foundry order from a global customer, its biggest this year.' },
   ] };
   const long = '가'.repeat(400);
   const notes = new Map<ValidationNote, number>();
@@ -246,9 +251,13 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
     { id: 'a7', relevant: true, sentiment: 'neutral', evidence: '', reason: '', summary: '' },
     { id: 'a8', relevant: true, sentiment: 'neutral', evidence: '', reason: '', summary: long, topic: 'not-a-topic' },
     { id: 'zz', relevant: true, sentiment: 'positive', evidence: '신제품', reason: '', summary: '' },
+    { id: 'a9', relevant: true, sentiment: 'positive', reason: '', summary: '',
+      evidence: 'Samsung Electronics said on Tuesday it had won a large foundry order from a global customer, its biggest this year.' },
   ] }, request, notes);
-  assert.deepEqual([...valid.keys()], ['a4', 'a5', 'a6', 'a8']);
-  assert.deepEqual(Object.fromEntries(notes), { evidence_not_in_text: 1, no_evidence: 1, reason_numbers: 1, summary_advice: 2, duplicate: 1 });
+  assert.deepEqual([...valid.keys()], ['a4', 'a5', 'a6', 'a8', 'a9']);
+  assert.deepEqual(Object.fromEntries(notes), { evidence_not_in_text: 1, no_evidence: 1, reason_numbers: 1, summary_advice: 2, duplicate: 1, evidence_trimmed: 1 });
+  // A long verbatim quote is kept as its opening part instead of costing the judgement.
+  assert.equal(valid.get('a9')!.evidence, 'Samsung Electronics said on Tuesday it had won a large foundry order from a glob');
   assert.equal(valid.get('a4')!.summary, undefined);
   assert.equal(valid.get('a5')!.summary, '증권사가 투자의견을 매수로 올렸다는 기사입니다.');
   assert.equal(valid.get('a6')!.summary, undefined);
@@ -262,7 +271,7 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
   assert.equal(validateJudgements({ items: [{ id: 'b1', relevant: true, sentiment: 'neutral', evidence: '', reason: '',
     summary: '10조 원 흑자라는 기사입니다.' }] }, summaryOnly).get('b1')?.summary, undefined);
   assert.throws(() => validateJudgements({ answers: [] }, request), LlmError);
-  assert.throws(() => validateJudgements({ items: Array.from({ length: 17 }, () => ({})) }, request), LlmError);
+  assert.throws(() => validateJudgements({ items: Array.from({ length: request.items.length * 2 + 1 }, () => ({})) }, request), LlmError);
   assert.deepEqual(parseModelJson('<think>먼저 생각</think>\n```json\n{"items":[]}\n```'), { items: [] });
   assert.throws(() => parseModelJson('죄송하지만 답할 수 없습니다.'), LlmError);
 });
@@ -397,10 +406,10 @@ test('the service counts agreed articles in the factors, keeps judgements in the
   let instant = now;
   const result = await createNewsService(provider, () => instant, { store, classifier }).getAnalysis(company);
   assert.ok(isNewsAnalysis(result, company.id));
-  assert.deepEqual(result.articles.map(item => [item.id, item.sentiment, item.classificationMethod]), [
-    ['mx', 'positive', 'provider'], ['g1', 'positive', 'llm'],
+  assert.deepEqual(result.articles.map(item => [item.id, item.sentiment, item.classificationMethod, item.aiRelevance]), [
+    ['mx', 'positive', 'provider', undefined], ['g1', 'positive', 'llm', undefined], ['g2', 'unclassified', 'unavailable', 'unrelated'],
   ]);
-  assert.equal(result.ai?.hiddenCount, 1);
+  assert.equal(result.ai?.unrelatedCount, 1);
   assert.match(result.factorSummary!.positive.lines[0]!.text, /'실적·가이던스' 관련 기사 2건이 긍정으로 분류됐습니다\(서로 다른 출처 2곳, 최근 10\/26, 제공자 점수 1·AI 합의 1\)/);
   assert.equal(result.factorSummary!.note, FACTOR_NOTE_WITH_AI);
   assert.ok(result.risks.some(risk => risk.startsWith('AI 요약·분류는 기사 제목과 매체 설명만 보고 생성했으며')));
@@ -412,8 +421,8 @@ test('the service counts agreed articles in the factors, keeps judgements in the
   instant = new Date(now.getTime() + 61_000);
   const again = await createNewsService(provider, () => instant, { store, classifier }).getAnalysis(company);
   assert.equal(gemini.requests.length + cloudflare.requests.length, calls);
-  assert.deepEqual(again.articles.map(item => [item.id, item.classificationMethod]), [['mx', 'provider'], ['g1', 'llm']]);
-  assert.equal(again.ai?.hiddenCount, 1);
+  assert.deepEqual(again.articles.map(item => [item.id, item.classificationMethod]), [['mx', 'provider'], ['g1', 'llm'], ['g2', 'unavailable']]);
+  assert.equal(again.ai?.unrelatedCount, 1);
   assert.deepEqual(again.ai?.providers.map(item => item.status), ['idle', 'idle']);
 });
 
@@ -431,4 +440,50 @@ test('a classifier failure leaves the source articles untouched and the response
   } finally {
     console.warn = warn;
   }
+});
+
+test('two "unrelated" answers set a scored article apart without changing its score, and nothing counts it', async () => {
+  const roundup = (id: string, score: number): NewsArticle => ({
+    ...unscored(id, `Tech and AI sectors surge ${id}`, { sourceProvider: 'Marketaux', identity: 'entity_verified', timeKind: 'published', source: `${id}.example`,
+      rationaleLines: ["Marketaux가 이 기사에서 '삼성전자' 언급 문맥에 매긴 감성 점수 +0.5 (−1~1, 0보다 크면 긍정·작으면 부정)", '기사 분위기 지표이며 주가 방향이나 확률을 뜻하지 않습니다.'] }),
+    sentiment: 'positive', classificationMethod: 'provider', sentimentScore: score,
+  });
+  const unrelatedJudge = (id: 'gemini' | 'cloudflare') => scripted(id, () => ({ relevant: false, sentiment: 'neutral' }));
+  const classifier = createAiClassifier([unrelatedJudge('gemini'), unrelatedJudge('cloudflare')], { clock: () => now.getTime() })!;
+  const articles = [roundup('r1', 0.88), roundup('r2', 0.4), roundup('r3', 0.5)];
+  const provider = { name: 'Marketaux', cacheTtlMs: 60_000, async getArticles() { return { provider: 'Marketaux', articles }; } };
+  const result = await createNewsService(provider, () => now, { classifier }).getAnalysis(company);
+  assert.ok(isNewsAnalysis(result, company.id));
+  assert.deepEqual(result.articles.map(item => [item.sentiment, item.sentimentScore, item.aiRelevance]),
+    [['positive', 0.88, 'unrelated'], ['positive', 0.4, 'unrelated'], ['positive', 0.5, 'unrelated']]);
+  assert.deepEqual(result.articles[0]!.rationaleLines, [
+    "AI 관련성 확인: Gemini '관련 없음' · Cloudflare '관련 없음' → 이 회사 기사가 아니라고 보고 요인 집계에서 뺐습니다(Marketaux 점수는 참고로만 표시).",
+    ...articles[0]!.rationaleLines!,
+  ]);
+  assert.equal(result.status, 'insufficient');
+  assert.equal(result.evidence, 'none');
+  assert.equal(result.summary, '최근 기사 3건이 모두 이 회사와 관련성이 낮아 다음 주 방향 판단을 유보합니다.');
+  assert.equal(result.factorSummary!.positive.state, 'none');
+  assert.ok(result.factorSummary!.chips.includes('관련성 낮아 뺀 기사 3건'));
+  assert.equal(result.ai?.unrelatedCount, 3);
+  // Applying again never stacks the relevance line.
+  const again = await classifier.apply(company, result.articles, { budgetMs: 18_000, eligible: always });
+  assert.deepEqual(again.articles[0]!.rationaleLines, result.articles[0]!.rationaleLines);
+  // One model alone cannot set a scored article apart.
+  const split = createAiClassifier([unrelatedJudge('gemini'), scripted('cloudflare', () => ({ sentiment: 'positive' }))], { clock: () => now.getTime() })!;
+  const kept = (await split.apply(company, [roundup('r4', 0.6)], { budgetMs: 18_000, eligible: always })).articles[0]!;
+  assert.deepEqual([kept.sentiment, kept.aiRelevance, kept.aiJudgements?.length], ['positive', undefined, 2]);
+  assert.deepEqual(kept.rationaleLines, roundup('r4', 0.6).rationaleLines);
+  // A gateway article has a single rationale and no lines: it keeps them until both models set it apart.
+  const { rationaleLines: _lines, sourceProvider: _source, sentimentScore: _score, ...gateway } = roundup('g1', 0.3);
+  const plain = { ...gateway, rationale: '게이트웨이 운영자가 작성한 분류 근거' };
+  const untouched = (await split.apply(company, [plain], { budgetMs: 18_000, eligible: always })).articles[0]!;
+  assert.deepEqual([untouched.rationaleLines, untouched.rationale, untouched.aiJudgements?.length], [undefined, plain.rationale, 2]);
+  const both = createAiClassifier([unrelatedJudge('gemini'), unrelatedJudge('cloudflare')], { clock: () => now.getTime() })!;
+  const apart = (await both.apply(company, [plain], { budgetMs: 18_000, eligible: always })).articles[0]!;
+  assert.deepEqual(apart.rationaleLines, [
+    "AI 관련성 확인: Gemini '관련 없음' · Cloudflare '관련 없음' → 이 회사 기사가 아니라고 보고 요인 집계에서 뺐습니다(제공자 분류는 참고로만 표시).",
+    plain.rationale,
+  ]);
+  assert.equal(apart.aiRelevance, 'unrelated');
 });

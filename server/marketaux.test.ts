@@ -45,7 +45,7 @@ test('Marketaux uses a fixed HTTPS host, server token and a bounded recent news 
     for (const key of ['filter_entities', 'must_have_entities', 'group_similar']) assert.equal(url.searchParams.get(key), 'true');
     assert.equal(url.searchParams.get('limit'), '3');
     assert.equal(url.searchParams.has('page'), false);
-    assert.equal(url.searchParams.has('language'), false);
+    assert.equal(url.searchParams.get('language'), 'en,ko');
     assert.equal(url.searchParams.get('published_after'), '2026-10-20T00:00:00');
     assert.equal(url.searchParams.get('published_before'), '2026-10-27T00:00:00');
     assert.equal(init?.redirect, 'error');

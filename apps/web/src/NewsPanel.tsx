@@ -9,6 +9,7 @@ const VISIBLE_ARTICLES = 8;
 
 /** Card badge: provider or agreed labels as is; a single model's view is marked provisional. */
 function badge(article: NewsArticle): { label: string; className: string } {
+  if (article.aiRelevance === 'unrelated') return { label: '관련성 낮음', className: 'unrelated' };
   if (article.aiConsensus === 'confirmed') return { label: `${sentimentLabels[article.sentiment]} · AI 합의`, className: article.sentiment };
   if (article.aiConsensus === 'withheld') return { label: '판단 유보', className: 'withheld' };
   if (article.aiConsensus === 'provisional') {
@@ -29,6 +30,8 @@ function aiStatusLabel(model: AiProviderState) {
 }
 const formatTime = (value: string) => `${new Date(value).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} KST`;
 const articleAnchor = (index: number) => `news-article-${index}`;
+const unrelatedAnchor = (index: number) => `news-unrelated-${index}`;
+const isRelated = (article: NewsArticle) => article.aiRelevance !== 'unrelated';
 function shorten(value: string, max: number) {
   const chars = [...value];
   return chars.length <= max ? value : `${chars.slice(0, max - 1).join('')}…`;
@@ -37,6 +40,7 @@ function shorten(value: string, max: number) {
 function sourceStatusLabel(source: NewsSourceState) {
   if (source.status === 'ok') return `${source.label} 정상 ${source.articleCount}건`;
   if (source.status === 'empty') return `${source.label} 기사 없음`;
+  if (source.status === 'skipped') return `${source.label} 예약 수집 때만 조회`;
   if (source.status === 'not_configured') return `${source.label} 미설정`;
   if (source.status === 'rate_limited') return `${source.label} 호출 제한${source.retryAt ? `(재시도 ${formatTime(source.retryAt)})` : ''}`;
   return `${source.label} 실패`;
@@ -66,9 +70,9 @@ function FactorGrid({ analysis, onEvidence }: { analysis: NewsAnalysis; onEviden
 }
 
 /** What the article is about (summary) and why it carries its label (rationale). */
-function ArticleCard({ article, index, provider }: { article: NewsArticle; index: number; provider: string | null }) {
+function ArticleCard({ article, anchor, provider }: { article: NewsArticle; anchor: string; provider: string | null }) {
   const label = badge(article);
-  return <article id={articleAnchor(index)} tabIndex={-1}>
+  return <article id={anchor} tabIndex={-1}>
     <div className="article-meta"><span className={`sentiment ${label.className}`}>{label.label}</span><span>{article.source} · {article.timeKind === 'seen' ? `${article.sourceProvider ?? '수집기'} 확인` : '게시'}: {formatTime(article.publishedAt)}</span>{article.language && <span>원문 언어: {languageLabel(article.language)}</span>}{article.sourceProvider && <span>수집: {article.sourceProvider}</span>}</div>
     <h3><a href={article.url} target="_blank" rel="noopener noreferrer">{article.title}<Icon name="external" size={15}/></a></h3>
     <div className="article-summary">{article.summary ? <>
@@ -139,10 +143,13 @@ export function NewsPanel() {
     ? { asOf: shown.asOf, reason: shown === fallback ? error || analysis?.message : shown.message } : null;
   const marketaux = /marketaux/i.test(`${shown?.provider ?? ''} ${shown?.message ?? ''}`);
   const aiOutput = !!shown?.articles.some(article => article.summary || article.aiJudgements);
+  // Articles both models judged unrelated are folded below the list; factors never point at them.
+  const related = shown?.articles.filter(isRelated) ?? [];
+  const unrelated = shown?.articles.filter(article => !isRelated(article)) ?? [];
   useEffect(() => {
     if (!focusId || !shown) return;
     // Hash links would change the app route; move focus to the card instead.
-    const target = document.getElementById(articleAnchor(shown.articles.findIndex(article => article.id === focusId)));
+    const target = document.getElementById(articleAnchor(shown.articles.filter(isRelated).findIndex(article => article.id === focusId)));
     target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
     target?.focus({ preventScroll: true });
     setFocusId(null);
@@ -163,20 +170,22 @@ export function NewsPanel() {
             : pending ? <div className="empty-state"><div className="state-illustration"><Icon name="news" size={32}/><span className="illustration-dot"/></div><span className="status-badge">데이터 연동 대기</span><h3>좋은 판단은, 확인된 근거에서</h3><p>{analysis?.message || '아직 뉴스 제공자가 연결되지 않았습니다. 실제 기사가 연결되면 출처와 불확실성을 함께 보여드려요.'}</p><div className="connection-notice"><Icon name="shield" size={18}/><span>뉴스가 없으면 방향을 추측하지 않습니다.</span></div><details className="setup-details"><summary>뉴스 연동 설정 안내</summary><p><a href="https://www.marketaux.com/" target="_blank" rel="noopener noreferrer">Marketaux 무료 계정</a>에서 API 토큰을 발급한 뒤 프로젝트 루트의 <code>.env</code>에 <code>NEWS_PROVIDER=marketaux</code>와 서버 전용 <code>MARKETAUX_API_TOKEN</code>을 설정하고 API 서버를 재시작하세요. 키는 브라우저나 앱에 입력하지 않습니다. 기존 게이트웨이 설정은 서버 README를 확인해 주세요.</p></details></div>
               : shown ? <>
                 {stale && <div className="stale-banner" role="status"><strong>이전 결과</strong><p>새 기사를 불러오지 못해 {formatTime(stale.asOf)} 기준 결과({elapsedLabel(stale.asOf)})를 보여드립니다.{stale.reason ? ` ${stale.reason}` : ''}</p><button className="stale-retry" onClick={() => setRetry(n => n + 1)} disabled={refreshDisabled}>다시 시도</button></div>}
-                <div className="evidence-summary"><span className={`status-badge ${shown.status === 'insufficient' ? 'orange' : ''}`}>{shown.status === 'insufficient' ? '근거 부족 · 판단 유보' : '뉴스 참고 · 불확실성 존재'}</span><h3>{shown.summary}</h3><p>근거 수준: {shown.evidence === 'moderate' ? '보통' : shown.evidence === 'low' ? '낮음' : '없음'} · 기사 {shown.articles.length}건</p>
+                <div className="evidence-summary"><span className={`status-badge ${shown.status === 'insufficient' ? 'orange' : ''}`}>{shown.status === 'insufficient' ? '근거 부족 · 판단 유보' : '뉴스 참고 · 불확실성 존재'}</span><h3>{shown.summary}</h3><p>근거 수준: {shown.evidence === 'moderate' ? '보통' : shown.evidence === 'low' ? '낮음' : '없음'} · 기사 {related.length}건{unrelated.length ? ` · 관련성 낮음 ${unrelated.length}건` : ''}</p>
                   {shown.sources && <p className="source-status">출처 상태: {shown.sources.map(sourceStatusLabel).join(' · ')}</p>}
-                  {shown.ai && <p className="source-status">AI 판단: {shown.ai.providers.map(aiStatusLabel).join(' · ')}{shown.ai.hiddenCount > 0 ? ` · 관련 없는 기사 ${shown.ai.hiddenCount}건 숨김` : ''}</p>}</div>
+                  {shown.ai && <p className="source-status">AI 판단: {shown.ai.providers.map(aiStatusLabel).join(' · ')}{shown.ai.unrelatedCount > 0 ? ` · 관련성 낮은 기사 ${shown.ai.unrelatedCount}건은 아래에 접어 둠` : ''}</p>}</div>
                 <FactorGrid analysis={shown} onEvidence={id => {
-                  if (shown.articles.findIndex(article => article.id === id) >= VISIBLE_ARTICLES) setExpanded(true);
+                  if (related.findIndex(article => article.id === id) >= VISIBLE_ARTICLES) setExpanded(true);
                   setFocusId(id);
                 }}/>
-                {shown.articles.length === 0 && <div className="article-empty">수집 기간에 확인된 기사가 없습니다.</div>}
-                {shown.articles.some(article => article.sentiment === 'unclassified') && <p className="news-provider-note">{shown.ai ? '미분류·잠정·판단 유보 기사는 긍정·부정 요인 집계에서 제외합니다.' : '미분류 기사는 긍정·부정 요인 집계에서 제외합니다.'}</p>}
-                <div className="article-list">{(expanded ? shown.articles : shown.articles.slice(0, VISIBLE_ARTICLES)).map((article, index) => <ArticleCard key={article.id} article={article} index={index} provider={shown.provider}/>)}</div>
-                {shown.articles.length > VISIBLE_ARTICLES && <button type="button" className="article-more" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? '기사 접기' : `기사 ${shown.articles.length - VISIBLE_ARTICLES}건 더 보기`}</button>}
+                {related.length === 0 && <div className="article-empty">{unrelated.length ? '이 회사와 관련성이 높은 기사가 없습니다.' : '수집 기간에 확인된 기사가 없습니다.'}</div>}
+                {related.some(article => article.sentiment === 'unclassified') && <p className="news-provider-note">{shown.ai ? '미분류·잠정·판단 유보 기사는 긍정·부정 요인 집계에서 제외합니다.' : '미분류 기사는 긍정·부정 요인 집계에서 제외합니다.'}</p>}
+                <div className="article-list">{(expanded ? related : related.slice(0, VISIBLE_ARTICLES)).map((article, index) => <ArticleCard key={article.id} article={article} anchor={articleAnchor(index)} provider={shown.provider}/>)}</div>
+                {related.length > VISIBLE_ARTICLES && <button type="button" className="article-more" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? '기사 접기' : `기사 ${related.length - VISIBLE_ARTICLES}건 더 보기`}</button>}
+                {unrelated.length > 0 && <details className="unrelated-articles"><summary>관련성 낮은 기사 {unrelated.length}건 — 두 AI가 모두 이 회사 기사가 아니라고 판단해 요인에서 뺐습니다</summary>
+                  <div className="article-list">{unrelated.map((article, index) => <ArticleCard key={article.id} article={article} anchor={unrelatedAnchor(index)} provider={shown.provider}/>)}</div></details>}
                 <div className="risk-box"><h4>전망이 빗나갈 수 있는 이유</h4>{shown.risks.map((s, i) => <p key={i}>{s}</p>)}</div>
               </> : null}
-        {marketaux && <p className="news-provider-note">Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 원문 언어를 제한하지 않아 해외 기사가 포함될 수 있으며, 기사 부족·상충 시 판단을 유보합니다.</p>}
+        {marketaux && <p className="news-provider-note">Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 영어·한국어 기사만 조회하며, 기사 부족·상충 시 판단을 유보합니다.</p>}
         {aiOutput && <p className="news-provider-note">일부 요약·분류는 AI(Gemini·Cloudflare Workers AI)가 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다. 원문에서 확인하세요.</p>}
         {shown?.articles.some(article => article.sourceProvider === 'GDELT') && <p className="news-provider-note">일부 기사 목록은 <a href="https://www.gdeltproject.org" target="_blank" rel="noopener noreferrer">GDELT Project</a> 검색 결과입니다. GDELT 시각은 기사를 처음 확인한 시각이며 게시 시각과 다를 수 있습니다.</p>}
         {shown && <div className="analysis-footer">

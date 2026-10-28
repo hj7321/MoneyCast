@@ -36,7 +36,10 @@ export interface JudgeItem {
   source: string;
   language?: string;
   summarize: boolean;
-  /** False when only a summary is wanted, as for articles that already carry a provider score. */
+  /**
+   * False when the answer serves only a summary or a relevance check, as for
+   * articles that already carry a provider score; quotes and reasons are then not required.
+   */
   judge?: boolean;
 }
 
@@ -158,7 +161,7 @@ export interface ValidJudgement {
 }
 
 /** Why an answer was discarded or trimmed; counted for diagnostics, never stored with content. */
-export type ValidationNote = 'missing' | 'duplicate' | 'shape' | 'evidence_too_long' | 'evidence_not_in_text' | 'no_evidence' |
+export type ValidationNote = 'missing' | 'duplicate' | 'shape' | 'evidence_trimmed' | 'evidence_not_in_text' | 'no_evidence' |
   'reason_numbers' | 'reason_advice' | 'summary_numbers' | 'summary_advice';
 
 function validateItem(entry: Record<string, unknown>, input: JudgeItem, request: JudgeRequest, allowedNumbers: ReadonlySet<string>,
@@ -181,10 +184,15 @@ function validateItem(entry: Record<string, unknown>, input: JudgeItem, request:
     const summary = checkedSummary();
     return { relevant: entry.relevant, sentiment, ...(summary ? { summary } : {}) };
   }
-  const evidence = typeof entry.evidence === 'string' ? plainText(entry.evidence, 1000) : undefined;
+  const quoted = typeof entry.evidence === 'string' ? plainText(entry.evidence, 1000) : undefined;
   // Evidence must be the article's own words; an invented quote discards the whole judgement.
-  if (evidence && [...evidence].length > MAX_EVIDENCE) { note('evidence_too_long'); return null; }
-  if (evidence && (normalize(evidence).length < 2 || !normalize(source).includes(normalize(evidence)))) { note('evidence_not_in_text'); return null; }
+  if (quoted && (normalize(quoted).length < 2 || !normalize(source).includes(normalize(quoted)))) { note('evidence_not_in_text'); return null; }
+  // A long quote is still verbatim, and so is its opening part, which is what is kept.
+  let evidence = quoted;
+  if (quoted && [...quoted].length > MAX_EVIDENCE) {
+    note('evidence_trimmed');
+    evidence = [...quoted].slice(0, MAX_EVIDENCE).join('').trimEnd();
+  }
   if (entry.relevant && (sentiment === 'positive' || sentiment === 'negative') && !evidence) { note('no_evidence'); return null; }
   const reason = typeof entry.reason === 'string' ? plainText(entry.reason, MAX_REASON) : undefined;
   if (reason && unknownNumbers(reason)) { note('reason_numbers'); return null; }
@@ -246,7 +254,9 @@ export function aiManaged(article: NewsArticle): boolean {
 
 function needsJudgement(article: NewsArticle, id: AiProviderId): boolean {
   const judgements = article.aiJudgements ?? [];
-  if (!aiManaged(article) || judgements.some(item => item.provider === id)) return false;
+  if (judgements.some(item => item.provider === id)) return false;
+  // A provider score keeps its direction; each model checks once that the article is about the company.
+  if (!aiManaged(article)) return true;
   const { consensus } = decideConsensus(judgements);
   return consensus === 'pending' || consensus === 'provisional';
 }
@@ -257,7 +267,7 @@ export function carryAiState(article: NewsArticle, previous: NewsArticle | undef
   return {
     ...article,
     ...(!article.summary && previous.summary ? { summary: previous.summary } : {}),
-    ...(aiManaged(article) && !article.aiJudgements && previous.aiJudgements ? { aiJudgements: previous.aiJudgements } : {}),
+    ...(!article.aiJudgements && previous.aiJudgements ? { aiJudgements: previous.aiJudgements } : {}),
   };
 }
 
@@ -275,6 +285,8 @@ const DISCLAIMER = '기사 분위기 판단이며 주가 방향·확률이 아�
 const EXCLUDED = '긍정·부정 요인 집계에서 제외합니다.';
 
 const verdict = (item: AiJudgement) => `${LABELS[item.provider]} '${item.relevant ? SENTIMENT_LABELS[item.sentiment] : '관련 없음'}'`;
+/** Marks the line this module adds to a provider's own rationale, so it is never added twice. */
+const RELEVANCE_LEAD = 'AI 관련성 확인:';
 
 function aiRationale(article: NewsArticle, judgements: AiJudgement[], consensus: ConsensusDecision['consensus'],
   missing: ReadonlyMap<AiProviderId, MissingReason>, providers: readonly AiProviderId[]): string[] {
@@ -318,26 +330,52 @@ function aiRationale(article: NewsArticle, judgements: AiJudgement[], consensus:
   return [`제공자 감성 점수가 없고, AI 판단도 아직 없습니다(${reasons}, 다음 갱신 때 재시도).`, EXCLUDED];
 }
 
+const ordered = (judgements: readonly AiJudgement[], providers: readonly AiProviderId[]) =>
+  [...judgements].sort((a, b) => providers.indexOf(a.provider) - providers.indexOf(b.provider));
+
 /** Recomputes the label, method, rationale and topic of an AI-managed article from its judgements. */
 function applyConsensus(article: NewsArticle, judgements: AiJudgement[], missing: ReadonlyMap<AiProviderId, MissingReason>,
-  providers: readonly AiProviderId[]): { article: NewsArticle; hidden: boolean } {
-  const ordered = [...judgements].sort((a, b) => providers.indexOf(a.provider) - providers.indexOf(b.provider));
-  const decision = decideConsensus(ordered);
-  const { sentimentScore: _score, aiConsensus: _consensus, aiJudgements: _judgements, ...rest } = article;
+  providers: readonly AiProviderId[]): NewsArticle {
+  const sorted = ordered(judgements, providers);
+  const decision = decideConsensus(sorted);
+  const { sentimentScore: _score, aiConsensus: _consensus, aiJudgements: _judgements, aiRelevance: _relevance, ...rest } = article;
   const keywords = classifyNewsTopics(`${article.title} ${article.description ?? ''}`);
-  const aiTopic = ordered.find(item => item.provider === 'gemini')?.topic;
+  const aiTopic = sorted.find(item => item.provider === 'gemini')?.topic;
   const topics = keywords[0] === 'other' && aiTopic && aiTopic !== 'other' ? [aiTopic] : keywords;
   if (decision.consensus === 'irrelevant') {
-    const lines = [`${ordered.map(verdict).join(' · ')} → 이 회사와 관련 없는 기사로 보고 목록에서 제외합니다.`];
-    return { hidden: true, article: { ...rest, sentiment: 'unclassified', classificationMethod: 'unavailable',
-      aiJudgements: ordered, rationaleLines: lines, rationale: lines[0]!, topics } };
+    // Kept visible, folded below the list, so the call can be checked; nothing counts it.
+    const lines = [`AI 두 모델이 따로 판단: ${sorted.map(verdict).join(' · ')} → 이 회사 기사가 아니라고 보고 요인 집계에서 뺐습니다.`];
+    return { ...rest, sentiment: 'unclassified', classificationMethod: 'unavailable', aiJudgements: sorted, aiRelevance: 'unrelated',
+      rationaleLines: lines, rationale: lines[0]!, topics };
   }
-  const lines = aiRationale(article, ordered, decision.consensus, missing, providers).slice(0, 5);
-  return { hidden: false, article: {
+  const lines = aiRationale(article, sorted, decision.consensus, missing, providers).slice(0, 5);
+  return {
     ...rest, sentiment: decision.sentiment, classificationMethod: decision.consensus === 'confirmed' ? 'llm' : 'unavailable',
-    aiConsensus: decision.consensus, ...(ordered.length ? { aiJudgements: ordered } : {}),
+    aiConsensus: decision.consensus, ...(sorted.length ? { aiJudgements: sorted } : {}),
     rationaleLines: lines, rationale: lines.join(' '), topics,
-  } };
+  };
+}
+
+/**
+ * A provider-scored article keeps its direction. Only when both models judge
+ * it not to be about the company is it set apart; its score stays visible for reference.
+ */
+function applyRelevance(article: NewsArticle, judgements: AiJudgement[], providers: readonly AiProviderId[]): NewsArticle {
+  const sorted = ordered(judgements, providers);
+  const { aiJudgements: _judgements, aiRelevance: _relevance, ...rest } = article;
+  const unrelated = sorted.length === 2 && sorted.every(item => !item.relevant);
+  // The source's own wording stays as it came, so a card without rationale lines keeps its provenance notes.
+  const own = article.rationaleLines?.filter(line => !line.startsWith(RELEVANCE_LEAD));
+  const fallback = plainText(article.rationale, 300);
+  const reference = `${article.sourceProvider ?? '제공자'} ${article.sentimentScore === undefined ? '분류' : '점수'}`;
+  const lines = unrelated
+    ? [`${RELEVANCE_LEAD} ${sorted.map(verdict).join(' · ')} → 이 회사 기사가 아니라고 보고 요인 집계에서 뺐습니다(${reference}는 참고로만 표시).`,
+      ...(own ?? (fallback ? [fallback] : []))].slice(0, 5)
+    : own;
+  return {
+    ...rest, ...(sorted.length ? { aiJudgements: sorted } : {}), ...(unrelated ? { aiRelevance: 'unrelated' as const } : {}),
+    ...(lines ? { rationaleLines: lines, rationale: lines.join(' ') } : {}),
+  };
 }
 
 export interface AiClassifier {
@@ -347,7 +385,7 @@ export interface AiClassifier {
    * within the deadline. Model failures never fail the news response.
    */
   apply(company: Company, articles: NewsArticle[], options: { budgetMs: number; eligible(article: NewsArticle): boolean }):
-    Promise<{ articles: NewsArticle[]; hidden: NewsArticle[]; status: AiStatus }>;
+    Promise<{ articles: NewsArticle[]; status: AiStatus }>;
 }
 
 export function createAiClassifier(
@@ -394,7 +432,8 @@ export function createAiClassifier(
           items: [...byKey].map(([key, article]) => ({
             key, title: article.title, ...(article.description ? { description: article.description } : {}),
             source: article.source, ...(article.language ? { language: article.language } : {}),
-            summarize: judge === summarizer && !article.summary, judge: judgeTargets.includes(article),
+            // A scored article is asked only whether it is about the company, so no quote is required.
+            summarize: judge === summarizer && !article.summary, judge: aiManaged(article) && judgeTargets.includes(article),
           })),
         };
         const controller = new AbortController();
@@ -437,20 +476,20 @@ export function createAiClassifier(
         }
         states.set(judge.id, state('ok', valid.size));
       }));
-      const visible: NewsArticle[] = [];
-      const hidden: NewsArticle[] = [];
+      const result: NewsArticle[] = [];
       for (const article of articles) {
         const summary = summaries.get(article.id);
         const current = summary ? { ...article, summary } : article;
-        // Articles outside the window are never sent, so they keep their source wording until judged.
-        if (!aiManaged(current) || (!eligible(current) && !current.aiJudgements)) { visible.push(current); continue; }
         const judgements = [...(current.aiJudgements ?? []), ...(added.get(current.id) ?? [])];
-        const result = applyConsensus(current, judgements, missing.get(current.id) ?? new Map(), providers);
-        (result.hidden ? hidden : visible).push(result.article);
+        if (!aiManaged(current)) { result.push(applyRelevance(current, judgements, providers)); continue; }
+        // Articles outside the window are never sent, so they keep their source wording until judged.
+        if (!eligible(current) && !current.aiJudgements) { result.push(current); continue; }
+        result.push(applyConsensus(current, judgements, missing.get(current.id) ?? new Map(), providers));
       }
       return {
-        articles: visible, hidden,
-        status: { providers: providers.map(id => states.get(id)!), hiddenCount: hidden.length, promptVersion: LLM_PROMPT_VERSION },
+        articles: result,
+        status: { providers: providers.map(id => states.get(id)!), unrelatedCount: result.filter(item => item.aiRelevance === 'unrelated').length,
+          promptVersion: LLM_PROMPT_VERSION },
       };
     },
   };

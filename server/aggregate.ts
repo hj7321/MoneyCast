@@ -95,7 +95,8 @@ function failureStatus(error: unknown): NewsSourceState['status'] {
 
 /** All failed: report the combined state while keeping every source outcome. */
 function combinedFailure(errors: unknown[], sources: NewsSourceState[]): ProviderError {
-  const statuses = sources.map(source => source.status);
+  // A source that was not queried says nothing about whether the others are configured.
+  const statuses = sources.map(source => source.status).filter(status => status !== 'skipped');
   const retryDelays = errors.flatMap(error => error instanceof ProviderError && error.code === 'rate_limited' &&
     typeof error.retryAfterMs === 'number' ? [error.retryAfterMs] : []);
   const reason = errors.find((error): error is ProviderError => error instanceof ProviderError && error.reason !== undefined)?.reason;
@@ -120,15 +121,20 @@ export function createMultiSourceProvider(entries: NewsSourceEntry[]): NewsProvi
       const sources: NewsSourceState[] = settled.map((outcome, i) => {
         const { id, label } = entries[i]!;
         if (outcome.status === 'fulfilled') {
-          return { id, label, status: outcome.value.articles.length ? 'ok' : 'empty', articleCount: outcome.value.articles.length };
+          const status = outcome.value.skipped ? 'skipped' : outcome.value.articles.length ? 'ok' : 'empty';
+          return { id, label, status, articleCount: outcome.value.articles.length };
         }
         const status = failureStatus(outcome.reason);
         const delay = outcome.reason instanceof ProviderError ? outcome.reason.retryAfterMs : undefined;
         return { id, label, status, articleCount: 0,
           ...(status === 'rate_limited' && typeof delay === 'number' ? { retryAt: new Date(now.getTime() + delay).toISOString() } : {}) };
       });
-      const succeeded = settled.flatMap((outcome, i) => outcome.status === 'fulfilled' ? [{ entry: entries[i]!, result: outcome.value }] : []);
-      if (!succeeded.length) throw combinedFailure(settled.map(outcome => outcome.status === 'rejected' ? outcome.reason : undefined), sources);
+      // A skipped source is not a success: when every queried source failed, the caller falls back to earlier results.
+      const succeeded = settled.flatMap((outcome, i) => outcome.status === 'fulfilled' && !outcome.value.skipped ? [{ entry: entries[i]!, result: outcome.value }] : []);
+      if (!succeeded.length) {
+        if (settled.every(outcome => outcome.status === 'fulfilled')) return { provider: entries.map(entry => entry.label).join(' · '), articles: [], sources };
+        throw combinedFailure(settled.map(outcome => outcome.status === 'rejected' ? outcome.reason : undefined), sources);
+      }
       // Name the sources that actually contributed articles.
       const contributed = succeeded.filter(item => item.result.articles.length > 0);
       return {

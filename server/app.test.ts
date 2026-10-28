@@ -163,7 +163,7 @@ test('serverless entry handles public and rewritten API URLs without a listening
   assert.equal(method.status, 405);
 });
 
-test('default sources combine Marketaux and GDELT; an exhausted Marketaux quota still returns GDELT articles', async t => {
+test('on demand only Marketaux is asked; the scheduled refresh adds GDELT and later reads serve it', async t => {
   const now = new Date('2026-10-27T00:00:00.000Z');
   const token = 'only-a-fixture-token-never-real';
   const hosts: string[] = [];
@@ -174,22 +174,30 @@ test('default sources combine Marketaux and GDELT; an exhausted Marketaux quota 
     return new Response(JSON.stringify({ articles: [{ url: 'https://news.example/apple-1', title: 'Apple 테스트 기사', seendate: '20261026T010000Z',
       domain: 'news.example', language: 'English' }] }), { headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
-  const app = createApp(createNewsService(createNewsProvider({ MARKETAUX_API_TOKEN: token }, upstream), () => now),
-    { staticDirectory: null, clock: () => now.getTime() });
+  const service = createNewsService(createNewsProvider({ MARKETAUX_API_TOKEN: token }, upstream), () => now);
+  const app = createApp(service, { staticDirectory: null, clock: () => now.getTime() });
   app.listen(0, '127.0.0.1');
   await once(app, 'listening');
   t.after(() => { app.closeAllConnections(); app.close(); });
-  const response = await fetch(`http://127.0.0.1:${(app.address() as AddressInfo).port}/api/news?companyId=nasdaq%3AAAPL`);
+  const endpoint = `http://127.0.0.1:${(app.address() as AddressInfo).port}/api/news?companyId=nasdaq%3AAAPL`;
+  // GDELT is slow and throttles, so a reader's request never waits for it.
+  const first: unknown = await (await fetch(endpoint)).json();
+  assert.ok(isNewsAnalysis(first, 'nasdaq:AAPL'));
+  assert.deepEqual(hosts, ['api.marketaux.com']);
+  assert.equal(first.status, 'rate_limited');
+  assert.deepEqual(first.sources?.map(source => [source.id, source.status]), [['marketaux', 'rate_limited'], ['gdelt', 'skipped']]);
+  await service.refresh(companies.find(company => company.id === 'nasdaq:AAPL')!);
+  assert.deepEqual(hosts, ['api.marketaux.com', 'api.gdeltproject.org']);
+  const response = await fetch(endpoint);
   const result: unknown = await response.json();
   assert.ok(isNewsAnalysis(result, 'nasdaq:AAPL'));
-  assert.deepEqual(hosts.sort(), ['api.gdeltproject.org', 'api.marketaux.com']);
   assert.equal(result.status, 'insufficient');
   assert.equal(result.provider, 'GDELT');
   assert.deepEqual(result.articles.map(article => [article.sourceProvider, article.sentiment]), [['GDELT', 'unclassified']]);
   assert.deepEqual(result.sources?.map(source => [source.id, source.status]), [['marketaux', 'rate_limited'], ['gdelt', 'ok']]);
   assert.equal(result.cachedUntil, '2026-10-27T00:30:00.000Z');
   assert.equal(response.headers.get('vercel-cdn-cache-control'), 'public, s-maxage=1800');
-  assert.ok(!JSON.stringify(result).includes(token));
+  assert.ok(!JSON.stringify([first, result]).includes(token));
 });
 
 test('stale fallbacks are never cached by the CDN', async () => {

@@ -309,8 +309,10 @@ test('when every source fails the last successful result is shown as stale and r
 
 test('sources get ten seconds on demand and thirty-five seconds during scheduled collection', async () => {
   const deadlines: Array<number | undefined> = [];
-  const provider = { name: 'Test', cacheTtlMs: 60_000, async getArticles(_company: unknown, _now: Date, options?: { deadline?: number }) {
+  const modes: Array<boolean | undefined> = [];
+  const provider = { name: 'Test', cacheTtlMs: 60_000, async getArticles(_company: unknown, _now: Date, options?: { deadline?: number; scheduled?: boolean }) {
     deadlines.push(options?.deadline);
+    modes.push(options?.scheduled);
     return { provider: 'Test', articles: [] };
   } };
   const at = new Date('2026-10-27T00:00:00Z');
@@ -318,5 +320,6 @@ test('sources get ten seconds on demand and thirty-five seconds during scheduled
   await service.getAnalysis(companies[0]!);
   await service.refresh(companies[0]!);
   assert.deepEqual(deadlines, [at.getTime() + ON_DEMAND_SOURCE_MS, at.getTime() + SCHEDULED_SOURCE_MS]);
+  assert.deepEqual(modes, [false, true]);
   assert.deepEqual([ON_DEMAND_SOURCE_MS, SCHEDULED_SOURCE_MS], [10_000, 35_000]);
 });

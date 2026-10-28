@@ -12,6 +12,8 @@ export interface CompanyNewsIdentity {
   excludeTerms: readonly string[];
   /** English search expression; GDELT searches English machine translations. */
   searchQuery: string;
+  /** A single word the article must repeat three times; GDELT's repeat operator takes one word. */
+  repeatWord: string;
 }
 
 export const COMPANY_NEWS_IDENTITY: Readonly<Record<string, CompanyNewsIdentity>> = {
@@ -20,48 +22,56 @@ export const COMPANY_NEWS_IDENTITY: Readonly<Record<string, CompanyNewsIdentity>
     titleTerms: ['삼성전자', 'Samsung Electronics'],
     excludeTerms: ['삼성전자우', '삼성전자 우선주', 'Samsung Electronics preferred'],
     searchQuery: '"Samsung Electronics"',
+    repeatWord: 'Samsung',
   },
   'krx:000660': {
     entityNames: ['SK하이닉스', '에스케이하이닉스', 'SK Hynix'],
     titleTerms: ['SK하이닉스', '하이닉스', 'SK Hynix', 'Hynix'],
     excludeTerms: [],
     searchQuery: '"SK Hynix"',
+    repeatWord: 'Hynix',
   },
   'krx:035420': {
     entityNames: ['NAVER', '네이버'],
     titleTerms: ['네이버', 'Naver'],
     excludeTerms: [],
     searchQuery: '"Naver"',
+    repeatWord: 'Naver',
   },
   'krx:005380': {
     entityNames: ['현대자동차', 'Hyundai Motor'],
     titleTerms: ['현대자동차', '현대차', 'Hyundai Motor'],
     excludeTerms: ['현대차증권', '현대모비스', '현대건설', '현대제철', 'Hyundai Mobis', 'Hyundai Steel', 'Hyundai Heavy'],
     searchQuery: '"Hyundai Motor"',
+    repeatWord: 'Hyundai',
   },
   'nasdaq:AAPL': {
     entityNames: ['Apple'],
     titleTerms: ['Apple', '애플', 'AAPL'],
     excludeTerms: ['Apple Hospitality', 'Apple Bank', 'apple cider'],
     searchQuery: '("Apple Inc" OR "Apple shares" OR "Apple stock" OR "Apple iPhone" OR "Tim Cook")',
+    repeatWord: 'Apple',
   },
   'nasdaq:NVDA': {
     entityNames: ['Nvidia'],
     titleTerms: ['Nvidia', '엔비디아', 'NVDA'],
     excludeTerms: [],
     searchQuery: '"Nvidia"',
+    repeatWord: 'Nvidia',
   },
   'nasdaq:MSFT': {
     entityNames: ['Microsoft'],
     titleTerms: ['Microsoft', '마이크로소프트', 'MSFT'],
     excludeTerms: [],
     searchQuery: '"Microsoft"',
+    repeatWord: 'Microsoft',
   },
   'nasdaq:TSLA': {
     entityNames: ['Tesla'],
     titleTerms: ['Tesla', '테슬라', 'TSLA'],
     excludeTerms: ['Nikola Tesla', 'Tesla coil'],
     searchQuery: '"Tesla"',
+    repeatWord: 'Tesla',
   },
 };
 

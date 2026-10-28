@@ -6,11 +6,15 @@ export interface NewsProviderResult {
   notes?: string[];
   /** Per-source outcomes when several sources were combined. */
   sources?: NewsSourceState[];
+  /** The source was not queried this time; it neither succeeded nor failed. */
+  skipped?: boolean;
 }
 
 /** How long the caller can wait; sources with slow APIs use it instead of a short fixed timeout. */
 export interface NewsRequestOptions {
   deadline?: number;
+  /** Daily collection, where nobody waits on the response; slow sources run only then. */
+  scheduled?: boolean;
 }
 
 export interface NewsProvider {

@@ -360,7 +360,7 @@ test('runtime news validator checks source labels, time kinds, identity, mirrors
   assert.equal(isNewsAnalysis({
     ...valid, servedFrom: 'stale', refreshAttemptedAt: '2026-10-27T00:00:00Z',
     sources: [{ id: 'marketaux', label: 'Marketaux', status: 'rate_limited', articleCount: 0, retryAt: '2026-10-27T00:15:00Z' },
-      { id: 'gdelt', label: 'GDELT', status: 'ok', articleCount: 3 }],
+      { id: 'gdelt', label: 'GDELT', status: 'ok', articleCount: 3 }, { id: 'later', label: 'Later', status: 'skipped', articleCount: 0 }],
     articles: [{ ...article, sourceProvider: 'GDELT', timeKind: 'seen', identity: 'name_match',
       alsoReportedBy: [{ source: 'b.example', url: 'https://b.example/a' }] }],
   }), true);
@@ -386,7 +386,7 @@ test('runtime news validator lets only two-model agreement carry an AI direction
   const cloudflare = { ...gemini, provider: 'cloudflare', model: '@cf/test/model' };
   const confirmed = { ...article, sentiment: 'positive', classificationMethod: 'llm', aiConsensus: 'confirmed', aiJudgements: [gemini, cloudflare],
     summary: { text: '테스트 전용 요약', basis: 'title_only', generatedBy: 'Gemini' } };
-  const ai = { promptVersion: 'news-judge-v1', hiddenCount: 1, providers: [
+  const ai = { promptVersion: 'news-judge-v1', unrelatedCount: 1, providers: [
     { id: 'gemini', label: 'Gemini', model: 'gemini-test', status: 'ok', judgedCount: 2 },
     { id: 'cloudflare', label: 'Cloudflare', model: '@cf/test/model', status: 'rate_limited', judgedCount: 0, retryAt: judgedAt },
   ] };
@@ -408,8 +408,25 @@ test('runtime news validator lets only two-model agreement carry an AI direction
     { summary: { text: '요약', basis: 'article_body', generatedBy: 'Gemini' } },
   ]) assert.equal(isNewsAnalysis({ ...valid, articles: [{ ...confirmed, ...invalid }] }), false, JSON.stringify(invalid));
   for (const invalid of [
-    { ...ai, providers: [] }, { ...ai, providers: [...ai.providers, ai.providers[0]] }, { ...ai, hiddenCount: -1 },
+    { ...ai, providers: [] }, { ...ai, providers: [...ai.providers, ai.providers[0]] }, { ...ai, unrelatedCount: -1 },
     { ...ai, promptVersion: '' }, { ...ai, providers: [{ ...ai.providers[0], status: 'great' }] },
     { ...ai, providers: [{ ...ai.providers[0], judgedCount: 0.5 }] }, { ...ai, providers: [{ ...ai.providers[0], id: 'openai' }] },
   ]) assert.equal(isNewsAnalysis({ ...valid, ai: invalid, articles: [confirmed] }), false, JSON.stringify(invalid));
+});
+
+test('runtime news validator sets an article apart only when both models judged it unrelated', () => {
+  const valid = validAnalysis();
+  const article = { ...valid.articles[0]!, sentiment: 'positive', classificationMethod: 'provider', sentimentScore: 0.4 };
+  const judgedAt = '2026-10-27T00:00:00Z';
+  const unrelated = (provider: string) => ({ provider, model: 'm', relevant: false, sentiment: 'neutral', judgedAt });
+  const set = { ...article, aiRelevance: 'unrelated', aiJudgements: [unrelated('gemini'), unrelated('cloudflare')] };
+  assert.equal(isNewsAnalysis({ ...valid, articles: [set] }), true);
+  const cited = { state: 'single', lines: [{ text: '테스트 전용 종합 문장', topic: 'other', articleIds: [set.id] }], chips: [] };
+  const none = { state: 'none', lines: [], chips: [] };
+  assert.equal(isNewsAnalysis({ ...valid, articles: [set], factorSummary: { positive: cited, negative: none, chips: [], note: '테스트 전용 안내' } }), false);
+  for (const invalid of [
+    { aiRelevance: 'maybe' }, { aiJudgements: [unrelated('gemini')] },
+    { aiJudgements: [unrelated('gemini'), { ...unrelated('cloudflare'), relevant: true }] },
+    { sentiment: 'positive', classificationMethod: 'llm', aiConsensus: 'confirmed', sentimentScore: undefined },
+  ]) assert.equal(isNewsAnalysis({ ...valid, articles: [{ ...set, ...invalid }] }), false, JSON.stringify(invalid));
 });

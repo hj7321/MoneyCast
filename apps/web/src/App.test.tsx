@@ -432,15 +432,23 @@ test('AI labels show agreement, provisional and withheld states with model statu
       aiJudgements: [{ provider: 'gemini', model: 'g', relevant: true, sentiment: 'positive', evidence: '수주 확대 기대', judgedAt },
         { provider: 'cloudflare', model: 'c', relevant: true, sentiment: 'neutral', judgedAt }],
       rationaleLines: ["Gemini '긍정' · Cloudflare '중립' → 판단이 달라 유보합니다."] },
+    { ...gdelt, id: 'ai-unrelated', url: 'https://a.example.test/4', title: '테스트 전용: 다른 회사의 신제품 소식', sentiment: 'unclassified',
+      classificationMethod: 'unavailable', aiRelevance: 'unrelated',
+      aiJudgements: [{ provider: 'gemini', model: 'g', relevant: false, sentiment: 'uncertain', judgedAt },
+        { provider: 'cloudflare', model: 'c', relevant: false, sentiment: 'uncertain', judgedAt }],
+      rationaleLines: ["AI 두 모델이 따로 판단: Gemini '관련 없음' · Cloudflare '관련 없음' → 이 회사 기사가 아니라고 보고 요인 집계에서 뺐습니다."] },
   ];
-  fixture.ai = { promptVersion: 'news-judge-v1', hiddenCount: 1, providers: [
+  fixture.ai = { promptVersion: 'news-judge-v1', unrelatedCount: 1, providers: [
     { id: 'gemini', label: 'Gemini', model: 'gemini-test', status: 'ok', judgedCount: 3 },
     { id: 'cloudflare', label: 'Cloudflare', model: '@cf/test/model', status: 'rate_limited', judgedCount: 0, retryAt: '2026-10-28T00:00:00.000Z' },
   ] };
   globalThis.fetch = (async () => response(fixture)) as typeof fetch;
   open('news');
-  assert.ok(await screen.findByText(/AI 판단: Gemini 정상 3건 · Cloudflare 한도 도달\(재시도 .*\) · 관련 없는 기사 1건 숨김/));
-  const [confirmed, provisional, withheld] = Array.from(document.querySelectorAll<HTMLElement>('.article-list article'));
+  assert.ok(await screen.findByText(/AI 판단: Gemini 정상 3건 · Cloudflare 한도 도달\(재시도 .*\) · 관련성 낮은 기사 1건은 아래에 접어 둠/));
+  assert.ok(screen.getByText(/기사 3건 · 관련성 낮음 1건/));
+  const [main, folded] = Array.from(document.querySelectorAll<HTMLElement>('.article-list'));
+  const [confirmed, provisional, withheld, ...rest] = Array.from(main!.querySelectorAll<HTMLElement>('article'));
+  assert.equal(rest.length, 0);
   assert.ok(within(confirmed!).getByText('부정 · AI 합의'));
   assert.ok(within(confirmed!).getByText('핵심 요약 · AI 요약(제목만 기준, 본문 미확인)'));
   assert.ok(within(confirmed!).getByText('테스트 전용: 리콜 대상을 넓힌다는 내용입니다.'));
@@ -448,14 +456,29 @@ test('AI labels show agreement, provisional and withheld states with model statu
   assert.ok(within(provisional!).getByText('긍정 · 잠정'));
   assert.ok(within(provisional!).getByText('요약 정보 없음 — 원문에서 확인하세요.'));
   assert.ok(within(withheld!).getByText('판단 유보'));
+  // Set apart, not hidden: folded below the list with its own badge and reason.
+  const details = document.querySelector('details.unrelated-articles') as HTMLDetailsElement;
+  assert.equal(details.open, false);
+  assert.ok(within(details).getByText('관련성 낮은 기사 1건 — 두 AI가 모두 이 회사 기사가 아니라고 판단해 요인에서 뺐습니다'));
+  assert.equal(folded!.closest('details'), details);
+  const card = within(folded!).getByRole('article');
+  assert.ok(within(card).getByText('관련성 낮음'));
+  assert.ok(within(card).getByText('테스트 전용: 다른 회사의 신제품 소식'));
+  assert.ok(within(card).getByText(/이 회사 기사가 아니라고 보고 요인 집계에서 뺐습니다/));
+  assert.equal(card.id, 'news-unrelated-0');
   assert.ok(screen.getByText(/미분류·잠정·판단 유보 기사는 긍정·부정 요인 집계에서 제외합니다/));
   assert.ok(screen.getByText(/일부 요약·분류는 AI\(Gemini·Cloudflare Workers AI\)가 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다/));
 });
 
 test('long article lists show eight cards first and expand on request or when evidence points further down', async () => {
   const fixture = marketauxFixture();
-  fixture.articles = Array.from({ length: 10 }, (_, index) => ({ ...fixture.articles[0]!, id: `many-${index}`,
-    url: `https://publisher.example.test/many-${index}`, title: `Test fixture: article ${index}` }));
+  const judgedAt = '2026-10-26T21:00:00.000Z';
+  // A folded article ahead of the list must not shift where evidence links land.
+  const unrelated = { ...fixture.articles[0]!, id: 'many-unrelated', url: 'https://publisher.example.test/other', title: 'Test fixture: another company',
+    aiRelevance: 'unrelated' as const, aiJudgements: [{ provider: 'gemini' as const, model: 'g', relevant: false, sentiment: 'uncertain' as const, judgedAt },
+      { provider: 'cloudflare' as const, model: 'c', relevant: false, sentiment: 'uncertain' as const, judgedAt }] };
+  fixture.articles = [unrelated, ...Array.from({ length: 10 }, (_, index) => ({ ...fixture.articles[0]!, id: `many-${index}`,
+    url: `https://publisher.example.test/many-${index}`, title: `Test fixture: article ${index}` }))];
   fixture.positiveFactors = ['테스트 전용: 마지막 기사만 근거로 든 문장입니다.'];
   fixture.factorSummary = {
     positive: { state: 'single', chips: [], lines: [{ text: fixture.positiveFactors[0]!, topic: 'other', articleIds: ['many-9'] }] },
@@ -464,8 +487,9 @@ test('long article lists show eight cards first and expand on request or when ev
   globalThis.fetch = (async () => response(fixture)) as typeof fetch;
   open('news');
   await screen.findByText('테스트 전용: 마지막 기사만 근거로 든 문장입니다.');
-  const cards = () => document.querySelectorAll('.article-list article').length;
+  const cards = () => document.querySelector('.article-list')!.querySelectorAll('article').length;
   assert.equal(cards(), 8);
+  assert.equal(document.querySelectorAll('details.unrelated-articles article').length, 1);
   fireEvent.click(screen.getByRole('button', { name: '기사 2건 더 보기' }));
   assert.equal(cards(), 10);
   fireEvent.click(screen.getByRole('button', { name: '기사 접기' }));

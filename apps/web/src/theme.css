@@ -92,3 +92,7 @@
 .sentiment.withheld { background: #efedf5; color: #574b73; }
 .article-more { margin-top: 12px; min-height: 40px; border: 1px solid #d5ddd5; border-radius: 6px; background: #fff; color: #2f4b3c; font: inherit; font-size: 15px; padding: 8px 14px; cursor: pointer; }
 .article-more:hover { background: #f3f6f3; }
+.sentiment.unrelated { background: #eef0f2; color: #555e69; }
+.unrelated-articles { margin-top: 14px; border: 1px solid #e4e9e4; border-radius: 8px; background: #fafbfa; padding: 10px 14px; }
+.unrelated-articles summary { cursor: pointer; color: #3d4a42; font-size: 15px; line-height: 1.6; }
+.unrelated-articles .article-list { margin-top: 10px; }

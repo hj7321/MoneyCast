@@ -12,7 +12,7 @@ const COOLDOWN_MS = 60_000;
 const TIMEOUT_MS = 8_000;
 const MIN_TIMEOUT_MS = 3_000;
 const MAX_TIMEOUT_MS = 30_000;
-const MAX_ROWS = 50;
+const MAX_ROWS = 75;
 const MAX_ARTICLES = 15;
 const LANGUAGES: Record<string, string> = {
   english: 'en', korean: 'ko', japanese: 'ja', chinese: 'zh', spanish: 'es', french: 'fr', german: 'de',
@@ -79,6 +79,8 @@ export function createGdeltProvider(
   return {
     name: 'GDELT', cacheTtlMs: NEWS_CACHE_TTL_MS,
     async getArticles(company, now, options): Promise<NewsProviderResult> {
+      // GDELT answers in 10-16 seconds and throttles often, so only scheduled collection asks it.
+      if (!options?.scheduled) return { provider: 'GDELT', articles: [], skipped: true };
       const identity = COMPANY_NEWS_IDENTITY[company.id];
       if (!identity) throw new ProviderError('error', 'identity_unverified');
       if (blockedUntil > clock()) throw new ProviderError('rate_limited', undefined, blockedUntil - clock());
@@ -89,7 +91,8 @@ export function createGdeltProvider(
       if (wait > 0) await sleep(wait);
       const url = new URL(API);
       for (const [key, value] of Object.entries({
-        query: identity.searchQuery, mode: 'artlist', format: 'json', maxrecords: String(MAX_ROWS), sort: 'datedesc',
+        // Articles that repeat the name three times are more often about the company, so more titles name it.
+        query: `repeat3:"${identity.repeatWord}" ${identity.searchQuery}`, mode: 'artlist', format: 'json', maxrecords: String(MAX_ROWS), sort: 'datedesc',
         startdatetime: gdeltTime(new Date(now.getTime() - 7 * DAY)), enddatetime: gdeltTime(now),
       })) url.searchParams.set(key, value);
       const controller = new AbortController();

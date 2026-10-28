@@ -40,7 +40,7 @@ export const SCHEDULED_BUDGET_MS = 60_000;
 export const SCHEDULED_SOURCE_MS = 35_000;
 
 /** Absolute deadlines for one refresh: sources first, then the models until `total`. */
-interface RefreshBudget { sources: number; total: number }
+interface RefreshBudget { sources: number; total: number; scheduled: boolean }
 const AI_RISK = 'AI 요약·분류는 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다. 본문과 사실 여부는 확인하지 않았습니다.';
 
 function snapshotDigest(analysis: NewsAnalysis, pool: NewsArticle[]): string {
@@ -83,13 +83,13 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
 
   /** Model judgements are an addition: any failure leaves the articles exactly as the sources sent them. */
   async function judge(company: Company, articles: NewsArticle[], deadline: number, eligible: (article: NewsArticle) => boolean):
-    Promise<{ articles: NewsArticle[]; hidden: NewsArticle[]; status?: AiStatus }> {
-    if (!classifier) return { articles, hidden: [] };
+    Promise<{ articles: NewsArticle[]; status?: AiStatus }> {
+    if (!classifier) return { articles };
     try {
       return await classifier.apply(company, articles, { budgetMs: deadline - clock().getTime(), eligible });
     } catch {
       console.warn('News AI classification failed');
-      return { articles, hidden: [] };
+      return { articles };
     }
   }
 
@@ -102,7 +102,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       newsWindow: { start: new Date(now.getTime() - 7 * 86400000).toISOString(), end: now.toISOString() },
     };
     try {
-      const result = await provider.getArticles(company, now, { deadline: budget.sources });
+      const result = await provider.getArticles(company, now, { deadline: budget.sources, scheduled: budget.scheduled });
       const inWindow = (article: NewsArticle) => {
         const publishedAt = Date.parse(article.publishedAt);
         return publishedAt >= now.getTime() - 7 * 86400000 && publishedAt <= now.getTime();
@@ -115,8 +115,11 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       const judged = await judge(company, merged, budget.total, inWindow);
       const articles = judged.articles;
       const fresh = articles.filter(inWindow);
-      const classified = fresh.filter(article => article.sentiment !== 'unclassified');
-      const unclassifiedCount = fresh.length - classified.length;
+      // Articles both models judged unrelated stay listed, but no count or factor uses them.
+      const related = fresh.filter(article => article.aiRelevance !== 'unrelated');
+      const unrelatedCount = fresh.length - related.length;
+      const classified = related.filter(article => article.sentiment !== 'unclassified');
+      const unclassifiedCount = related.length - classified.length;
       const positive = classified.filter(article => article.sentiment === 'positive');
       const negative = classified.filter(article => article.sentiment === 'negative');
       const conflicting = positive.length > 0 && negative.length > 0;
@@ -124,19 +127,19 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       let summary = base.summary;
       if (articles.length === 0) summary = '관련 기사가 없어 다음 주 방향 판단을 유보합니다.';
       else if (fresh.length === 0) summary = '최근 7일 이내 기사가 없어 다음 주 방향 판단을 유보합니다.';
+      else if (related.length === 0) summary = `최근 기사 ${fresh.length}건이 모두 이 회사와 관련성이 낮아 다음 주 방향 판단을 유보합니다.`;
       else if (conflicting) summary = '긍정·부정 근거가 상충하여 다음 주 방향 판단을 유보합니다.';
-      else if (classified.length < 3 && unclassifiedCount > 0) summary = `최근 기사 ${fresh.length}건 중 ${unclassifiedCount}건은 분류 미확인입니다. 분류된 기사 ${classified.length}건만으로 다음 주 방향을 판단하기에 근거가 부족합니다.`;
-      else if (fresh.length < 3) summary = '최근 기사가 3건 미만으로, 다음 주 방향을 판단하기에 근거가 부족합니다.';
+      else if (classified.length < 3 && unclassifiedCount > 0) summary = `최근 기사 ${related.length}건 중 ${unclassifiedCount}건은 분류 미확인입니다. 분류된 기사 ${classified.length}건만으로 다음 주 방향을 판단하기에 근거가 부족합니다.`;
+      else if (related.length < 3) summary = '최근 기사가 3건 미만으로, 다음 주 방향을 판단하기에 근거가 부족합니다.';
       else if (positive.length === 0 && negative.length === 0) summary = '분류를 확인한 최근 기사가 모두 중립으로 분류되어 다음 주 방향 판단을 유보합니다.';
       else if (sufficient) summary = `${positive.length > 0 ? '긍정' : '부정'}적으로 분류된 뉴스 요인이 있습니다. 다음 주 주가 방향은 불확실하며, 이 요약은 상승·하락 예측이 아닙니다.`;
-      const factors = synthesizeFactors(fresh, now, { ai: !!judged.status });
+      const factors = synthesizeFactors(related, now, { ai: !!judged.status, unrelated: unrelatedCount });
       const aiOutput = articles.some(article => article.summary || article.aiJudgements);
-      // Hidden articles stay in the pool with their judgements so they are not judged again.
-      const pool = [...fresh, ...judged.hidden.filter(inWindow)]
-        .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)).slice(0, SNAPSHOT_POOL_LIMIT);
+      // The pool keeps unrelated articles with their judgements, so they are not judged again.
+      const pool = [...fresh].sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)).slice(0, SNAPSHOT_POOL_LIMIT);
       return { pool, analysis: {
         ...base, provider: result.provider, articles, status: sufficient ? 'ready' : 'insufficient',
-        evidence: sufficient ? 'moderate' : fresh.length > 0 ? 'low' : 'none', summary,
+        evidence: sufficient ? 'moderate' : related.length > 0 ? 'low' : 'none', summary,
         positiveFactors: factors.positiveFactors, negativeFactors: factors.negativeFactors,
         factorSummary: factors.factorSummary,
         ...(result.sources ? { sources: result.sources } : {}),
@@ -223,7 +226,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       const inflight = pending.get(company.id);
       if (inflight) return inflight;
       const request = (async () => {
-        const budget = { sources: now + ON_DEMAND_SOURCE_MS, total: now + ON_DEMAND_BUDGET_MS };
+        const budget = { sources: now + ON_DEMAND_SOURCE_MS, total: now + ON_DEMAND_BUDGET_MS, scheduled: false };
         const snapshot = await readSnapshot(company.id);
         if (snapshot && isFresh(snapshot.analysis, clock().getTime())) {
           // A collected result is still fresh: serve it without calling any provider.
@@ -239,7 +242,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
     /** Scheduled collection: always queries providers and always saves a successful snapshot. */
     async refresh(company: Company): Promise<NewsAnalysis> {
       const start = clock().getTime();
-      return complete(company, await readSnapshot(company.id), true, { sources: start + SCHEDULED_SOURCE_MS, total: start + SCHEDULED_BUDGET_MS });
+      return complete(company, await readSnapshot(company.id), true, { sources: start + SCHEDULED_SOURCE_MS, total: start + SCHEDULED_BUDGET_MS, scheduled: true });
     },
   };
 }
