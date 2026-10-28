@@ -1,7 +1,9 @@
-import type { Company, NewsAnalysis } from '../packages/core/src/index.js';
+import { NEWS_CACHE_ANALYSIS_VERSION, type Company, type NewsAnalysis } from '../packages/core/src/index.js';
 import { ProviderError, type NewsProvider } from './provider.js';
+import { synthesizeFactors } from './synthesis.js';
 
-export const ANALYSIS_VERSION = 'news-evidence-v2';
+/** One version string for server results and client caches. */
+export const ANALYSIS_VERSION = NEWS_CACHE_ANALYSIS_VERSION;
 
 /** Next calendar Monday–Friday in Seoul; exchange holidays need a market calendar. */
 export function nextAnalysisWeek(now: Date): { start: string; end: string } {
@@ -56,11 +58,12 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       else if (fresh.length < 3) summary = '최근 기사가 3건 미만으로, 다음 주 방향을 판단하기에 근거가 부족합니다.';
       else if (positive.length === 0 && negative.length === 0) summary = '분류를 확인한 최근 기사가 모두 중립으로 분류되어 다음 주 방향 판단을 유보합니다.';
       else if (sufficient) summary = `${positive.length > 0 ? '긍정' : '부정'}적으로 분류된 뉴스 요인이 있습니다. 다음 주 주가 방향은 불확실하며, 이 요약은 상승·하락 예측이 아닙니다.`;
+      const factors = synthesizeFactors(fresh, now);
       return {
         ...base, provider: result.provider, articles, status: sufficient ? 'ready' : 'insufficient',
         evidence: sufficient ? 'moderate' : fresh.length > 0 ? 'low' : 'none', summary,
-        positiveFactors: [...new Set(positive.map(article => article.rationale))].slice(0, 4),
-        negativeFactors: [...new Set(negative.map(article => article.rationale))].slice(0, 4),
+        positiveFactors: factors.positiveFactors, negativeFactors: factors.negativeFactors,
+        factorSummary: factors.factorSummary,
         risks: [...new Set([
           ...base.risks, ...(result.notes ?? []),
           ...(unclassifiedCount > 0 ? [`분류 미확인 기사 ${unclassifiedCount}건은 긍정·부정·중립 집계에 포함하지 않았습니다.`] : []),

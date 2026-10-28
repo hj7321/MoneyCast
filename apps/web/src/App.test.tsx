@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, beforeEach, test } from 'node:test';
 import { createRequire } from 'node:module';
-import type { NewsAnalysis } from '@moneycast/core';
+import { NEWS_CACHE_ANALYSIS_VERSION, type NewsAnalysis } from '@moneycast/core';
 
 // jsdom is a test-only dependency. Install its browser globals before importing
 // React DOM and Testing Library, which capture document at module initialization.
@@ -349,6 +349,44 @@ test('Marketaux metadata keeps the original title, language, provider classifica
   assert.ok(screen.getByText(/무료 연동은 요청당 최대 3개 기사/));
 });
 
+test('factor boxes show synthesized sentences that jump to cards holding the summary and score rationale', async () => {
+  const fixture = marketauxFixture();
+  fixture.articles = [
+    { ...fixture.articles[0]!, description: '테스트 전용: 매체가 제공한 짧은 설명입니다.', rationaleLines: [
+      "Marketaux가 이 기사에서 '삼성전자' 언급 문맥에 매긴 감성 점수 +0.625 (−1~1, 0보다 크면 긍정·작으면 부정)",
+      '기사 분위기 지표이며 주가 방향이나 확률을 뜻하지 않습니다.',
+    ] },
+    { ...fixture.articles[0]!, id: 'test-second', url: 'https://publisher.example.test/second', title: 'Test fixture: second article',
+      rationaleLines: ['테스트 전용 두 번째 근거'] },
+  ];
+  fixture.positiveFactors = ['테스트 전용: 실적 관련 기사 1건만 긍정으로 분류됐습니다.'];
+  fixture.factorSummary = {
+    positive: { state: 'single', chips: ['단일 근거'], lines: [{ text: fixture.positiveFactors[0]!, topic: 'earnings', articleIds: ['test-second'] }] },
+    negative: { state: 'none', lines: [], chips: [] },
+    chips: ['분류된 기사 3건 미만'], note: '테스트 전용: 주제는 키워드로 묶은 참고 분류입니다.',
+  };
+  globalThis.fetch = (async () => response(fixture)) as typeof fetch;
+  open('news');
+  const sentence = await screen.findByText(/테스트 전용: 실적 관련 기사 1건만/);
+  const positiveBox = sentence.closest('.factor-grid > div') as HTMLElement;
+  assert.equal(within(positiveBox).queryByText(/감성 점수/), null);
+  assert.ok(within(positiveBox).getByText('단일 근거'));
+  assert.ok(screen.getByText('분류된 기사 3건 미만'));
+  assert.ok(screen.getByText('테스트 전용: 주제는 키워드로 묶은 참고 분류입니다.'));
+  assert.ok(screen.getByText('확인된 요인 없음'));
+  fireEvent.click(within(positiveBox).getByRole('button', { name: '근거 기사 1건' }));
+  assert.equal(document.activeElement?.id, 'news-article-1');
+  assert.equal(window.location.hash, '#news');
+  const [first, second] = Array.from(document.querySelectorAll<HTMLElement>('.article-list article'));
+  assert.ok(within(first!).getByText('핵심 요약 · 매체 설명(원문)'));
+  assert.ok(within(first!).getByText('테스트 전용: 매체가 제공한 짧은 설명입니다.'));
+  assert.equal(within(first!).getAllByRole('listitem').length, 2);
+  assert.ok(within(first!).getByText(/감성 점수 \+0.625/));
+  assert.ok(within(second!).getByText('요약 정보 없음 — 원문에서 확인하세요.'));
+  assert.ok(within(second!).getByText('테스트 전용 두 번째 근거'));
+  assert.equal(within(second!).queryByText(/제공자 분류 ·/), null);
+});
+
 test('missing provider sentiment stays unclassified with no invented neutral label or score', async () => {
   const fixture = marketauxFixture();
   delete fixture.articles[0]!.sentimentScore;
@@ -550,7 +588,7 @@ test('reopening news and remounting the app reuse a valid six-hour company analy
   let calls = 0;
   const now = Date.now();
   const fixture: NewsAnalysis = {
-    ...newsFixture(), status: 'insufficient', provider: 'Marketaux', analysisVersion: 'news-evidence-v2',
+    ...newsFixture(), status: 'insufficient', provider: 'Marketaux', analysisVersion: NEWS_CACHE_ANALYSIS_VERSION,
     asOf: new Date(now).toISOString(), cachedUntil: new Date(now + 6 * 60 * 60 * 1000).toISOString(),
     summary: '메뉴 이동 후에도 보존하는 실제 형식의 테스트 캐시입니다.',
   };

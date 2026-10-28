@@ -1,3 +1,5 @@
+import { isNewsTopicKey, type NewsTopicKey } from './news-topics.js';
+
 /** Shared calculation rules used unchanged by the web, native app and API. */
 export interface CalculatorInput {
   initial: number;
@@ -246,11 +248,38 @@ export interface NewsArticle {
   publishedAt: string;
   url: string;
   sentiment: NewsSentiment;
+  /** Single-string explanation kept for clients that predate `rationaleLines`. */
   rationale: string;
   language?: string;
   sentimentScore?: number;
   classificationMethod?: 'provider' | 'unavailable';
   providerEntity?: { symbol: string; name: string; exchange: string | null; country: string };
+  /** Publisher meta description supplied by the provider; never article body text. */
+  description?: string;
+  /** One to five short lines explaining why the article carries its label. */
+  rationaleLines?: string[];
+  /** Fixed topic keys used to group the factor summary. */
+  topics?: NewsTopicKey[];
+}
+
+export type FactorBoxState = 'none' | 'single' | 'repeated' | 'mixed';
+/** One synthesized sentence and the articles that support it. */
+export interface FactorLine {
+  text: string;
+  topic: NewsTopicKey;
+  articleIds: string[];
+}
+export interface FactorBox {
+  state: FactorBoxState;
+  lines: FactorLine[];
+  chips: string[];
+}
+/** Rule-based summary of classified articles; describes coverage, not prices. */
+export interface FactorSummary {
+  positive: FactorBox;
+  negative: FactorBox;
+  chips: string[];
+  note: string;
 }
 
 export interface NewsAnalysis {
@@ -270,6 +299,7 @@ export interface NewsAnalysis {
   newsWindow?: { start: string; end: string };
   cachedUntil?: string;
   retryAt?: string;
+  factorSummary?: FactorSummary;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -310,6 +340,14 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === 'string');
 }
 
+function isBoundedText(value: unknown, max: number): value is string {
+  return isNonemptyString(value) && value.length <= max;
+}
+
+function isBoundedTextArray(value: unknown, min: number, max: number, maxLength: number): value is string[] {
+  return Array.isArray(value) && value.length >= min && value.length <= max && value.every(item => isBoundedText(item, maxLength));
+}
+
 function hasValidArticleMetadata(article: Record<string, unknown>): boolean {
   if (article.language !== undefined && !isNonemptyString(article.language)) return false;
   if (article.classificationMethod !== undefined && article.classificationMethod !== 'provider' &&
@@ -327,7 +365,27 @@ function hasValidArticleMetadata(article: Record<string, unknown>): boolean {
     if (!isRecord(entity) || !['symbol', 'name', 'country'].every(key => isNonemptyString(entity[key])) ||
         !(entity.exchange === null || isNonemptyString(entity.exchange))) return false;
   }
+  if (article.description !== undefined && !isBoundedText(article.description, 300)) return false;
+  if (article.rationaleLines !== undefined && !isBoundedTextArray(article.rationaleLines, 1, 5, 300)) return false;
+  if (article.topics !== undefined && !(Array.isArray(article.topics) && article.topics.length >= 1 &&
+      article.topics.length <= 3 && article.topics.every(isNewsTopicKey))) return false;
   return true;
+}
+
+function isFactorBox(value: unknown, articleIds: ReadonlySet<string>): boolean {
+  if (!isRecord(value) || typeof value.state !== 'string' || !['none', 'single', 'repeated', 'mixed'].includes(value.state) ||
+      !Array.isArray(value.lines) || value.lines.length > 3 || !isBoundedTextArray(value.chips, 0, 6, 120)) return false;
+  // An empty box must say so, and every sentence must point at rendered articles.
+  return (value.state === 'none') === (value.lines.length === 0) && value.lines.every(line =>
+    isRecord(line) && isBoundedText(line.text, 300) && isNewsTopicKey(line.topic) &&
+    Array.isArray(line.articleIds) && line.articleIds.length >= 1 &&
+    line.articleIds.every(id => typeof id === 'string' && articleIds.has(id)));
+}
+
+function isFactorSummary(value: unknown, articles: readonly NewsArticle[]): boolean {
+  const ids = new Set(articles.map(article => article.id));
+  return isRecord(value) && isFactorBox(value.positive, ids) && isFactorBox(value.negative, ids) &&
+    isBoundedTextArray(value.chips, 0, 8, 120) && isBoundedText(value.note, 300);
 }
 
 /** Shared validation for provider adapters and both clients. */
@@ -362,9 +420,11 @@ export function isNewsAnalysis(value: unknown, expectedCompanyId?: string): valu
   if (value.newsWindow !== undefined && (!isRecord(value.newsWindow) ||
       !isTimestamp(value.newsWindow.start) || !isTimestamp(value.newsWindow.end) ||
       Date.parse(value.newsWindow.start) > Date.parse(value.newsWindow.end))) return false;
-  return value.articles.every(isNewsArticle);
+  if (!value.articles.every(isNewsArticle)) return false;
+  return value.factorSummary === undefined || isFactorSummary(value.factorSummary, value.articles);
 }
 
 export const INVESTMENT_NOTICE = '뉴스는 미래 주가의 방향이나 원인을 증명하지 않습니다. 이 정보는 투자 참고용이며 개인 맞춤형 매수·매도 권유가 아닙니다. 투자 판단과 손실의 책임은 투자자 본인에게 있습니다.';
 
 export { createNewsCache, NEWS_CACHE_TTL_MS, NEWS_CACHE_ANALYSIS_VERSION, type NewsCacheStorage } from './news-cache.js';
+export { NEWS_TOPICS, NEWS_TOPIC_KEYS, classifyNewsTopics, isNewsTopicKey, newsTopicLabel, type NewsTopicKey } from './news-topics.js';

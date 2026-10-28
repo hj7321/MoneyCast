@@ -1,7 +1,7 @@
 import { companies, isNewsAnalysis, type NewsAnalysis } from './index.js';
 
 export const NEWS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-export const NEWS_CACHE_ANALYSIS_VERSION = 'news-evidence-v2';
+export const NEWS_CACHE_ANALYSIS_VERSION = 'news-evidence-v3';
 const CACHE_SCHEMA = 1;
 const STORAGE_PREFIX = 'moneycast.news.v1.';
 const MAX_STORED_CHARS = 1_048_576;

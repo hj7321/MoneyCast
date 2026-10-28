@@ -317,3 +317,39 @@ test('runtime news validator validates news window and cache/retry timestamps in
     }
   }
 });
+
+test('runtime news validator accepts bounded descriptions, rationale lines and known topics only', () => {
+  const valid = validAnalysis();
+  const article = valid.articles[0]!;
+  assert.equal(isNewsAnalysis({ ...valid, articles: [{
+    ...article, description: '매체가 제공한 짧은 설명', rationaleLines: ['한 줄', '두 줄'], topics: ['earnings', 'product'],
+  }] }), true);
+  assert.equal(isNewsAnalysis({ ...valid, articles: [{ ...article, rationaleLines: ['1', '2', '3', '4', '5'] }] }), true);
+  for (const invalid of [
+    { description: '' }, { description: 'x'.repeat(301) }, { description: 1 },
+    { rationaleLines: [] }, { rationaleLines: ['1', '2', '3', '4', '5', '6'] }, { rationaleLines: [''] },
+    { rationaleLines: ['x'.repeat(301)] }, { rationaleLines: 'one line' },
+    { topics: [] }, { topics: ['price_up'] }, { topics: ['earnings', 'product', 'deal', 'macro'] },
+  ]) assert.equal(isNewsAnalysis({ ...valid, articles: [{ ...article, ...invalid }] }), false, JSON.stringify(invalid));
+});
+
+test('runtime news validator requires factor sentences to cite rendered articles and empty boxes to be explicit', () => {
+  const valid = validAnalysis();
+  const box = { state: 'single', lines: [{ text: '테스트 전용 종합 문장', topic: 'other', articleIds: ['test-only'] }], chips: ['단일 근거'] };
+  const none = { state: 'none', lines: [], chips: [] };
+  const summary = { positive: box, negative: none, chips: [], note: '테스트 전용 안내' };
+  assert.equal(isNewsAnalysis({ ...valid, factorSummary: summary }), true);
+  for (const invalid of [
+    { ...summary, positive: { ...box, lines: [{ ...box.lines[0], articleIds: ['missing-article'] }] } },
+    { ...summary, positive: { ...box, lines: [{ ...box.lines[0], articleIds: [] }] } },
+    { ...summary, positive: { ...box, lines: [{ ...box.lines[0], topic: 'guaranteed_up' }] } },
+    { ...summary, positive: { ...box, state: 'none' } },
+    { ...summary, negative: { ...none, state: 'single' } },
+    { ...summary, positive: { ...box, state: 'certain' } },
+    { ...summary, positive: { ...box, lines: [box.lines[0], box.lines[0], box.lines[0], box.lines[0]] } },
+    { ...summary, note: '' },
+    { ...summary, chips: [1] },
+    { positive: box, negative: none, chips: [] },
+    null, [],
+  ]) assert.equal(isNewsAnalysis({ ...valid, factorSummary: invalid }), false, JSON.stringify(invalid));
+});

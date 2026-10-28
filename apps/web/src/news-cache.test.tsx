@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { companies, createNewsCache, NEWS_CACHE_TTL_MS, type NewsAnalysis, type NewsCacheStorage } from '@moneycast/core';
+import { companies, createNewsCache, NEWS_CACHE_ANALYSIS_VERSION, NEWS_CACHE_TTL_MS, type NewsAnalysis, type NewsCacheStorage } from '@moneycast/core';
 
 const company = companies[0]!;
 const beginning = Date.parse('2026-10-28T00:00:00.000Z');
@@ -9,7 +9,7 @@ function fixture(instant = beginning): NewsAnalysis {
     company, status: 'insufficient', articles: [], asOf: new Date(instant).toISOString(),
     period: { start: '2026-11-02', end: '2026-11-06' }, evidence: 'none',
     summary: '테스트 전용: 기사가 없어 판단을 유보합니다.', positiveFactors: [], negativeFactors: [], risks: [],
-    provider: 'Marketaux', analysisVersion: 'news-evidence-v2',
+    provider: 'Marketaux', analysisVersion: NEWS_CACHE_ANALYSIS_VERSION,
     cachedUntil: new Date(instant + NEWS_CACHE_TTL_MS).toISOString(),
   };
 }

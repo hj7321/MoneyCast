@@ -1,11 +1,52 @@
 import { useEffect, useState } from 'react';
-import { companies, searchCompanies, INVESTMENT_NOTICE, type Company, type NewsAnalysis } from '@moneycast/core';
+import { companies, searchCompanies, INVESTMENT_NOTICE, type Company, type NewsAnalysis, type NewsArticle } from '@moneycast/core';
 import { Icon } from './icons';
 import { CompanyAvatar } from './CompanyAvatar';
 import { loadCachedNews, peekCachedNews } from './news-cache';
 
 const sentimentLabels = { positive: '긍정', negative: '부정', neutral: '중립', unclassified: '미분류' };
 const formatTime = (value: string) => `${new Date(value).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} KST`;
+const articleAnchor = (index: number) => `news-article-${index}`;
+function shorten(value: string, max: number) {
+  const chars = [...value];
+  return chars.length <= max ? value : `${chars.slice(0, max - 1).join('')}…`;
+}
+
+/** Synthesized sentences when the server provides them; plain factor strings otherwise. */
+function FactorGrid({ analysis, onEvidence }: { analysis: NewsAnalysis; onEvidence: (articleId: string) => void }) {
+  const boxes = [['positive', '긍정 요인', analysis.positiveFactors], ['negative', '부정 요인', analysis.negativeFactors]] as const;
+  return <>
+    <div className="factor-grid">{boxes.map(([direction, title, legacy]) => {
+      const box = analysis.factorSummary?.[direction];
+      return <div key={direction}><h4>{title}</h4>
+        {box ? box.lines.length ? box.lines.map((line, i) => <p key={i} className="factor-line">{line.text} <button type="button" className="evidence-link" onClick={() => onEvidence(line.articleIds[0]!)}>근거 기사 {line.articleIds.length}건</button></p>) : <p>확인된 요인 없음</p>
+          : legacy.length ? legacy.map((s, i) => <p key={i}>{s}</p>) : <p>확인된 요인 없음</p>}
+        {box && box.chips.length > 0 && <ul className="factor-chips" aria-label={`${title} 주의 사항`}>{box.chips.map(chip => <li key={chip}>{chip}</li>)}</ul>}
+      </div>;
+    })}</div>
+    {analysis.factorSummary && <>
+      {analysis.factorSummary.chips.length > 0 && <ul className="factor-chips overall" aria-label="종합 주의 사항">{analysis.factorSummary.chips.map(chip => <li key={chip}>{chip}</li>)}</ul>}
+      <p className="news-provider-note">{analysis.factorSummary.note}</p>
+    </>}
+  </>;
+}
+
+/** What the article is about (summary) and why it carries its label (rationale). */
+function ArticleCard({ article, index, provider }: { article: NewsArticle; index: number; provider: string | null }) {
+  return <article id={articleAnchor(index)} tabIndex={-1}>
+    <div className="article-meta"><span className={`sentiment ${article.sentiment}`}>{sentimentLabels[article.sentiment]}</span><span>{article.source} · 게시: {formatTime(article.publishedAt)}</span>{article.language && <span>원문 언어: {languageLabel(article.language)}</span>}</div>
+    <h3><a href={article.url} target="_blank" rel="noopener noreferrer">{article.title}<Icon name="external" size={15}/></a></h3>
+    <div className="article-summary"><span className="article-block-label">핵심 요약{article.description ? ' · 매체 설명(원문)' : ''}</span>
+      <p>{article.description ? shorten(article.description, 160) : '요약 정보 없음 — 원문에서 확인하세요.'}</p></div>
+    {article.rationaleLines ? <div className="article-rationale"><span className="article-block-label">분류 근거</span>
+      <ol>{article.rationaleLines.slice(0, 5).map((line, i) => <li key={i}>{line}</li>)}</ol></div> : <>
+      <p>{article.rationale}</p>
+      {article.classificationMethod === 'provider' && <p className="article-provenance">{provider || '뉴스 제공자'} 제공자 분류{article.sentimentScore !== undefined ? ` · 기사 감성 점수 ${String(article.sentimentScore)} (−1~1)` : ''} · 주가 상승 확률이 아닙니다.</p>}
+      {article.classificationMethod === 'unavailable' && <p className="article-provenance">제공자 감성 점수가 없어 분류하지 않았습니다.</p>}
+      {article.providerEntity && <p className="article-provenance">제공자 기업 식별: {article.providerEntity.name} · {article.providerEntity.symbol} · {article.providerEntity.exchange || '거래소 정보 미제공'} · {article.providerEntity.country.toUpperCase()}</p>}
+    </>}
+  </article>;
+}
 function languageLabel(code: string) {
   try { return new Intl.DisplayNames(['ko'], { type: 'language' }).of(code) || code; }
   catch { return code; }
@@ -67,17 +108,15 @@ export function NewsPanel() {
             : pending ? <div className="empty-state"><div className="state-illustration"><Icon name="news" size={32}/><span className="illustration-dot"/></div><span className="status-badge">데이터 연동 대기</span><h3>좋은 판단은, 확인된 근거에서</h3><p>{analysis?.message || '아직 뉴스 제공자가 연결되지 않았습니다. 실제 기사가 연결되면 출처와 불확실성을 함께 보여드려요.'}</p><div className="connection-notice"><Icon name="shield" size={18}/><span>뉴스가 없으면 방향을 추측하지 않습니다.</span></div><details className="setup-details"><summary>뉴스 연동 설정 안내</summary><p><a href="https://www.marketaux.com/" target="_blank" rel="noopener noreferrer">Marketaux 무료 계정</a>에서 API 토큰을 발급한 뒤 프로젝트 루트의 <code>.env</code>에 <code>NEWS_PROVIDER=marketaux</code>와 서버 전용 <code>MARKETAUX_API_TOKEN</code>을 설정하고 API 서버를 재시작하세요. 키는 브라우저나 앱에 입력하지 않습니다. 기존 게이트웨이 설정은 서버 README를 확인해 주세요.</p></details></div>
               : analysis ? <>
                 <div className="evidence-summary"><span className={`status-badge ${analysis.status === 'insufficient' ? 'orange' : ''}`}>{analysis.status === 'insufficient' ? '근거 부족 · 판단 유보' : '뉴스 참고 · 불확실성 존재'}</span><h3>{analysis.summary}</h3><p>근거 수준: {analysis.evidence === 'moderate' ? '보통' : analysis.evidence === 'low' ? '낮음' : '없음'} · 기사 {analysis.articles.length}건</p></div>
-                <div className="factor-grid"><div><h4>긍정 요인</h4>{analysis.positiveFactors.length ? analysis.positiveFactors.map((s, i) => <p key={i}>{s}</p>) : <p>확인된 요인 없음</p>}</div><div><h4>부정 요인</h4>{analysis.negativeFactors.length ? analysis.negativeFactors.map((s, i) => <p key={i}>{s}</p>) : <p>확인된 요인 없음</p>}</div></div>
+                <FactorGrid analysis={analysis} onEvidence={id => {
+                  // Hash links would change the app route; move focus to the card instead.
+                  const target = document.getElementById(articleAnchor(analysis.articles.findIndex(article => article.id === id)));
+                  target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+                  target?.focus({ preventScroll: true });
+                }}/>
                 {analysis.articles.length === 0 && <div className="article-empty">수집 기간에 확인된 기사가 없습니다.</div>}
                 {analysis.articles.some(article => article.sentiment === 'unclassified') && <p className="news-provider-note">미분류 기사는 긍정·부정 요인 집계에서 제외합니다.</p>}
-                <div className="article-list">{analysis.articles.map(article => <article key={article.id}>
-                  <div className="article-meta"><span className={`sentiment ${article.sentiment}`}>{sentimentLabels[article.sentiment]}</span><span>{article.source} · 게시: {formatTime(article.publishedAt)}</span>{article.language && <span>원문 언어: {languageLabel(article.language)}</span>}</div>
-                  <h3><a href={article.url} target="_blank" rel="noopener noreferrer">{article.title}<Icon name="external" size={15}/></a></h3>
-                  <p>{article.rationale}</p>
-                  {article.classificationMethod === 'provider' && <p className="article-provenance">{analysis.provider || '뉴스 제공자'} 제공자 분류{article.sentimentScore !== undefined ? ` · 기사 감성 점수 ${String(article.sentimentScore)} (−1~1)` : ''} · 주가 상승 확률이 아닙니다.</p>}
-                  {article.classificationMethod === 'unavailable' && <p className="article-provenance">제공자 감성 점수가 없어 분류하지 않았습니다.</p>}
-                  {article.providerEntity && <p className="article-provenance">제공자 기업 식별: {article.providerEntity.name} · {article.providerEntity.symbol} · {article.providerEntity.exchange || '거래소 정보 미제공'} · {article.providerEntity.country.toUpperCase()}</p>}
-                </article>)}</div>
+                <div className="article-list">{analysis.articles.map((article, index) => <ArticleCard key={article.id} article={article} index={index} provider={analysis.provider}/>)}</div>
                 <div className="risk-box"><h4>전망이 빗나갈 수 있는 이유</h4>{analysis.risks.map((s, i) => <p key={i}>{s}</p>)}</div>
               </> : null}
         {marketaux && <p className="news-provider-note">Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 원문 언어를 제한하지 않아 해외 기사가 포함될 수 있으며, 기사 부족·상충 시 판단을 유보합니다.</p>}

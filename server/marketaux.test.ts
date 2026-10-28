@@ -280,3 +280,37 @@ test('provider factory honors explicit modes, supports old gateways and rejects 
   assert.equal(createNewsProvider({ NEWS_PROVIDER: 'gateway' }, fetcher).name, '사용자 뉴스 게이트웨이');
   await rejects(createNewsProvider({ NEWS_PROVIDER: 'typo' }, fetcher).getArticles(apple, now), 'error');
 });
+
+test('publisher descriptions become bounded plain text while body snippets and highlights are dropped', async () => {
+  const result = await providerFor([
+    article('described', appleEntity, {
+      description: '  <b>Apple</b> &amp; partners  expand\nproduction  ', snippet: 'BODY TEXT MUST NOT BE KEPT',
+      entities: [{ ...appleEntity, highlights: [{ highlight: 'HIGHLIGHT MUST NOT BE KEPT', sentiment: 0.4, highlighted_in: 'main_text' }] }],
+    }),
+    article('long', appleEntity, { description: 'x'.repeat(400) }),
+    article('blank', appleEntity, { description: '   ' }),
+  ]).getArticles(apple, now);
+  const byId = new Map(result.articles.map(item => [item.id, item]));
+  assert.equal(byId.get('described')?.description, 'Apple & partners expand production');
+  assert.equal([...byId.get('long')!.description!].length, 300);
+  assert.ok(byId.get('long')!.description!.endsWith('…'));
+  assert.equal(byId.get('blank')?.description, undefined);
+  assert.doesNotMatch(JSON.stringify(result), /MUST NOT BE KEPT/);
+  for (const item of result.articles) assert.ok(isNewsArticle(item));
+});
+
+test('classified articles explain the provider score in at most five lines, separate from factor sentences', async () => {
+  const result = await providerFor([
+    article('scored', { ...appleEntity, sentiment_score: 0.45 }),
+    article('missing', { ...appleEntity, sentiment_score: undefined }),
+  ]).getArticles(apple, now);
+  const [scored, missing] = result.articles;
+  assert.deepEqual(scored?.rationaleLines, [
+    "Marketaux가 이 기사에서 '애플' 언급 문맥에 매긴 감성 점수 +0.45 (−1~1, 0보다 크면 긍정·작으면 부정)",
+    '제공자 기업 식별: Apple Inc. · AAPL · 거래소 정보 미제공 · US',
+    '기사 분위기 지표이며 주가 방향이나 확률을 뜻하지 않습니다.',
+  ]);
+  assert.equal(scored?.rationale, scored?.rationaleLines?.join(' '));
+  assert.deepEqual(missing?.rationaleLines, ['Marketaux가 이 기업의 감성 점수를 제공하지 않아 미분류로 표시합니다.', '긍정·부정 요인 집계에서 제외합니다.']);
+  for (const item of result.articles) assert.ok(item.rationaleLines!.length <= 5);
+});

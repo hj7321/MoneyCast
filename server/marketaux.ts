@@ -1,5 +1,5 @@
 import { NEWS_CACHE_TTL_MS, type Company, type NewsArticle } from '../packages/core/src/index.js';
-import { boundedJson, parseProviderResponse, ProviderError, type NewsProvider, type NewsProviderResult } from './provider.js';
+import { boundedJson, parseProviderResponse, plainText, ProviderError, type NewsProvider, type NewsProviderResult } from './provider.js';
 
 const API = 'https://api.marketaux.com';
 const DAY = 86_400_000;
@@ -167,14 +167,22 @@ export function createMarketauxProvider(
           if (score !== undefined && score !== null && (typeof score !== 'number' || !Number.isFinite(score) || score < -1 || score > 1)) throw new ProviderError('error');
           const scored = typeof score === 'number';
           const sentiment: NewsArticle['sentiment'] = !scored ? 'unclassified' : score > 0 ? 'positive' : score < 0 ? 'negative' : 'neutral';
-          const rationale = scored
-            ? `Marketaux가 ${company.name} 관련 문맥에 제공한 감성 점수 ${String(score)}를 ${sentiment === 'positive' ? '긍정' : sentiment === 'negative' ? '부정' : '중립'}으로 분류했습니다. 기사 분위기이며 주가 방향이나 확률을 뜻하지 않습니다.`
-            : 'Marketaux가 이 기업의 감성 점수를 제공하지 않아 미분류로 표시하며 방향 근거 집계에서 제외합니다.';
+          const rationaleLines = scored ? [
+            `Marketaux가 이 기사에서 '${company.name}' 언급 문맥에 매긴 감성 점수 ${score > 0 ? '+' : ''}${String(score)} (−1~1, 0보다 크면 긍정·작으면 부정)`,
+            `제공자 기업 식별: ${match.name} · ${match.symbol} · ${match.exchange ?? '거래소 정보 미제공'} · ${match.country.toUpperCase()}`,
+            '기사 분위기 지표이며 주가 방향이나 확률을 뜻하지 않습니다.',
+          ] : [
+            'Marketaux가 이 기업의 감성 점수를 제공하지 않아 미분류로 표시합니다.',
+            '긍정·부정 요인 집계에서 제외합니다.',
+          ];
+          // Only the publisher's meta description is kept; body snippets and highlights are not.
+          const description = plainText(row.description, 300);
           articles.push({
             id: row.uuid, title: row.title, source: row.source, publishedAt: row.published_at, url: row.url,
-            sentiment, rationale, classificationMethod: scored ? 'provider' : 'unavailable',
+            sentiment, rationale: rationaleLines.join(' '), rationaleLines, classificationMethod: scored ? 'provider' : 'unavailable',
             ...(scored ? { sentimentScore: score } : {}),
             ...(typeof row.language === 'string' ? { language: row.language } : {}),
+            ...(description ? { description } : {}),
             providerEntity: { symbol: match.symbol, name: match.name, country: match.country, exchange: match.exchange },
           });
         }

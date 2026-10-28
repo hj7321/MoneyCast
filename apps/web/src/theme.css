@@ -68,3 +68,16 @@
 
 /* Restore the original button typography while keeping all four labels at 14px. */
 .calculator-card .goal-picker button > .goal-type-label { font-size: 14px; line-height: inherit; font-weight: inherit; }
+
+/* Factor sentences link to their supporting cards; cards separate summary and rationale. */
+.factor-grid .factor-line { line-height: 1.65; }
+.factor-grid .factor-line + .factor-line { margin-top: 8px; }
+.evidence-link { margin-left: 4px; padding: 0; border: 0; background: none; color: #2f6b4b; font: inherit; font-size: 14px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.factor-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+.factor-chips li { border-radius: 999px; background: #eef2ee; color: #45524a; font-size: 13px; line-height: 1.5; padding: 3px 10px; }
+.factor-chips.overall { margin-top: 12px; }
+.article-block-label { display: block; margin: 12px 0 4px; color: #45524a; font-size: 13px; font-weight: 650; }
+.article-summary p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.article-rationale ol { margin: 0; padding-left: 20px; }
+.article-rationale li { color: #111; font-size: 15px; line-height: 1.6; overflow-wrap: anywhere; }
+.article-list article:focus-visible, .article-list article:focus { outline: 2px solid #7fae8f; outline-offset: 2px; }

@@ -39,9 +39,14 @@ test('sufficient fresh news yields a qualified summary and traceable source/time
   assert.equal(result.evidence, 'moderate');
   assert.match(result.summary, /불확실/);
   assert.equal(result.asOf, now.toISOString());
-  assert.equal(result.analysisVersion, 'news-evidence-v2');
+  assert.equal(result.analysisVersion, 'news-evidence-v3');
   assert.equal(result.provider, 'Test');
-  assert.equal(result.positiveFactors.length, 3);
+  // Three same-source articles on one topic become one sentence citing all three (ties by ID).
+  assert.equal(result.positiveFactors.length, 1);
+  assert.deepEqual(result.factorSummary?.positive.lines[0]?.articleIds, ['1', '2', '3']);
+  assert.match(result.positiveFactors[0]!, /3건이 긍정으로 분류됐지만 모두 같은 출처\(Test\)/);
+  assert.ok(result.factorSummary?.positive.chips.includes('단일 출처'));
+  assert.equal(result.factorSummary?.negative.state, 'none');
   assert.ok(result.risks.length >= 3);
 });
 
@@ -76,14 +81,15 @@ test('unclassified articles remain visible but do not satisfy the classified evi
   assert.equal(result.status, 'insufficient');
   assert.equal(result.evidence, 'low');
   assert.equal(result.articles.length, 3);
-  assert.equal(result.positiveFactors.length, 2);
+  assert.deepEqual(result.factorSummary?.positive.lines.map(line => line.articleIds), [['1', '2']]);
+  assert.ok(result.factorSummary?.chips.includes('감성 점수 없는 기사 1건은 방향 집계 제외'));
   assert.match(result.summary, /분류 미확인/);
   assert.match(result.summary, /분류된 기사 2건/);
   assert.ok(result.risks.some(risk => /분류 미확인 기사 1건.*포함하지/.test(risk)));
   assert.equal(isNewsAnalysis(result, company.id), true);
   const sufficient = await serviceWith([article('1'), article('2'), article('3', 'neutral'), article('4', 'unclassified')]).getAnalysis(company);
   assert.equal(sufficient.status, 'ready');
-  assert.equal(sufficient.positiveFactors.length, 2);
+  assert.deepEqual(sufficient.factorSummary?.positive.lines[0]?.articleIds, ['1', '2']);
 });
 
 test('evidence uses the exact reported news window rather than counting future or older articles', async () => {
@@ -94,7 +100,7 @@ test('evidence uses the exact reported news window rather than counting future o
     article('future', 'negative', '2026-10-27T00:00:00.001Z'),
   ]).getAnalysis(company);
   assert.equal(result.status, 'insufficient');
-  assert.equal(result.positiveFactors.length, 2);
+  assert.deepEqual(result.factorSummary?.positive.lines[0]?.articleIds, ['end', 'start']);
   assert.equal(result.negativeFactors.length, 0);
   assert.match(result.summary, /3건 미만/);
 });

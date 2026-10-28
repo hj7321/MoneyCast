@@ -365,15 +365,21 @@ function NewsScreen({ active }: { active: boolean }) {
                 onPress={() => void openArticle(article.url)} style={styles.article}>
                 <View style={styles.rowBetween}><Text style={styles.articleSource}>{article.source}</Text><Text style={styles.sentiment}>{sentimentLabels[article.sentiment]}</Text></View>
                 <Text style={styles.articleTitle}>{article.title} ↗</Text>
-                <Text style={styles.bodyMuted}>{article.rationale}</Text>
+                <Text style={[styles.tiny, styles.blackText]}>핵심 요약{article.description ? ' · 매체 설명(원문)' : ''}</Text>
+                <Text numberOfLines={3} style={styles.bodyMuted}>{article.description ?? '요약 정보 없음 — 원문에서 확인하세요.'}</Text>
+                {article.rationaleLines ? <>
+                  <Text style={[styles.tiny, styles.blackText]}>분류 근거</Text>
+                  {article.rationaleLines.slice(0, 5).map((line, index) => <Text key={index} style={styles.bodyMuted}>{index + 1}. {line}</Text>)}
+                </> : <Text style={styles.bodyMuted}>{article.rationale}</Text>}
                 <Text style={[styles.tiny, styles.blackText]}>게시: {formatNewsTime(article.publishedAt)}{article.language ? ` · 원문 언어: ${newsLanguageLabel(article.language)}` : ''}</Text>
-                {article.classificationMethod === 'provider' ? <Text style={[styles.tiny, styles.blackText]}>{analysis.provider || '뉴스 제공자'} 제공자 분류{article.sentimentScore !== undefined ? ` · 기사 감성 점수 ${String(article.sentimentScore)} (−1~1)` : ''} · 주가 상승 확률이 아닙니다.</Text> : null}
-                {article.classificationMethod === 'unavailable' ? <Text style={[styles.tiny, styles.blackText]}>제공자 감성 점수가 없어 분류하지 않았습니다.</Text> : null}
-                {article.providerEntity ? <Text style={[styles.tiny, styles.blackText]}>제공자 기업 식별: {article.providerEntity.name} · {article.providerEntity.symbol} · {article.providerEntity.exchange || '거래소 정보 미제공'} · {article.providerEntity.country.toUpperCase()}</Text> : null}
+                {!article.rationaleLines && article.classificationMethod === 'provider' ? <Text style={[styles.tiny, styles.blackText]}>{analysis.provider || '뉴스 제공자'} 제공자 분류{article.sentimentScore !== undefined ? ` · 기사 감성 점수 ${String(article.sentimentScore)} (−1~1)` : ''} · 주가 상승 확률이 아닙니다.</Text> : null}
+                {!article.rationaleLines && article.classificationMethod === 'unavailable' ? <Text style={[styles.tiny, styles.blackText]}>제공자 감성 점수가 없어 분류하지 않았습니다.</Text> : null}
+                {!article.rationaleLines && article.providerEntity ? <Text style={[styles.tiny, styles.blackText]}>제공자 기업 식별: {article.providerEntity.name} · {article.providerEntity.symbol} · {article.providerEntity.exchange || '거래소 정보 미제공'} · {article.providerEntity.country.toUpperCase()}</Text> : null}
               </Pressable>)}
               {[['긍정 요인', analysis.positiveFactors], ['부정 요인', analysis.negativeFactors], ['전망이 빗나갈 수 있는 이유', analysis.risks]].map(([title, factors]) =>
                 (factors as string[]).length > 0 && <View key={title as string} style={styles.factorSection}><Text style={styles.factorTitle}>{title as string}</Text>
                   {(factors as string[]).map((factor, index) => <Text key={index} style={styles.bodyMuted}>• {factor}</Text>)}</View>)}
+              {analysis.factorSummary ? <Text style={styles.tiny}>{[...analysis.factorSummary.chips, analysis.factorSummary.note].join(' · ')}</Text> : null}
               <Pressable accessibilityRole="button" accessibilityState={{ disabled: loading || retryDelayed }} disabled={loading || retryDelayed} onPress={() => setRetry(value => value + 1)} style={[styles.secondaryButton, (loading || retryDelayed) && styles.pressed]}><Text style={styles.secondaryButtonText}>연동 상태 새로고침</Text></Pressable>
             </> : null}
     </View>

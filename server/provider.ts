@@ -38,6 +38,18 @@ function boundedString(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max;
 }
 
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'", nbsp: ' ' };
+
+/** Provider metadata as display text: no markup, collapsed spaces, bounded length. */
+export function plainText(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.replace(/<[^>]*>/g, ' ').replace(/&(amp|lt|gt|quot|apos|#39|nbsp);/g, (_, name: string) => ENTITIES[name]!)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) return undefined;
+  const chars = [...text];
+  return chars.length <= max ? text : `${chars.slice(0, max - 1).join('')}…`;
+}
+
 function safeArticleUrl(value: unknown): value is string {
   if (!boundedString(value, 2048)) return false;
   try {
@@ -81,6 +93,9 @@ export function parseProviderResponse(value: unknown, company: Company, now: Dat
         symbol: article.providerEntity.symbol, name: article.providerEntity.name,
         exchange: article.providerEntity.exchange, country: article.providerEntity.country,
       } }),
+      ...(article.description === undefined ? {} : { description: article.description }),
+      ...(article.rationaleLines === undefined ? {} : { rationaleLines: [...article.rationaleLines] }),
+      ...(article.topics === undefined ? {} : { topics: [...article.topics] }),
     });
   }
   return { provider: payload.provider.trim(), articles: articles.sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)) };
