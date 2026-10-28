@@ -57,6 +57,37 @@ export interface LlmJudge {
   judge(request: JudgeRequest, signal: AbortSignal): Promise<unknown>;
 }
 
+/** One request to a model: instructions, the input as JSON text and the answer's JSON schema. */
+export interface LlmPrompt {
+  system: string;
+  user: string;
+  schema: Record<string, unknown>;
+  /** Defaults to each adapter's limit for the news judgement. */
+  maxOutputTokens?: number;
+}
+
+/**
+ * A model behind its HTTP API. Every feature uses the same client for a
+ * model, so a quota pause seen by one feature holds for all of them.
+ */
+export interface LlmClient {
+  id: AiProviderId;
+  label: string;
+  model: string;
+  unavailable(): { code: 'not_configured' | 'rate_limited'; retryAt?: number } | null;
+  /** Returns the model's parsed JSON. */
+  generate(prompt: LlmPrompt, signal: AbortSignal): Promise<unknown>;
+}
+
+/** The news judgement as one use of a client. */
+export function judgeWith(client: LlmClient): LlmJudge {
+  return {
+    id: client.id, label: client.label, model: client.model,
+    unavailable: () => client.unavailable(),
+    judge: (request, signal) => client.generate({ ...buildPrompt(request), schema: judgementSchema(request) }, signal),
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AccessibilityInfo,
@@ -18,16 +18,64 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import {
+  analyzeGoalText,
   calculateProjection,
+  CAR_SCOPE_LABELS,
+  CAR_SCOPE_NOTES,
+  categoryGoalName,
+  categoryGoalType,
+  categoryLabel,
   companies,
+  compareGoalTarget,
+  createGoalPlanner,
   DEFAULT_CALCULATOR_INPUT,
+  describeGoalResult,
+  describeGoalTarget,
+  describeInflation,
+  describeSwitchPrefill,
   formatCompactKRW,
   formatDurationMonths,
+  formatGoalFormula,
+  formatYearMonth,
   formatKRW,
+  GOAL_ITEM_LIMIT,
+  GOAL_LABEL_MAX_LENGTH,
+  GOAL_NAME_MAX_LENGTH,
+  GOAL_NOTE_MAX_LENGTH,
+  GOAL_PERSONAL_DATA_NOTICE,
+  GOAL_SOURCE_LABELS,
+  GOAL_SOURCE_NOTES,
+  GOAL_TYPES,
+  goalAiFailure,
+  goalAiNotice,
+  goalFactActions,
+  goalFoundSource,
+  goalQuestionText,
+  goalSwitchActions,
+  goalTypeName,
+  HOME_SCOPE_LABELS,
+  HOME_SCOPE_NOTES,
+  livingCostActions,
+  monthInputValue,
+  monthsFromTargetMonth,
+  parseGoalNumber,
+  periodEndMonth,
+  planGoalQuestions,
+  resolveGoalTarget,
   searchCompanies,
+  updateGoalPlanner,
   validateCalculatorInput,
   type CalculatorInput,
   type Company,
+  type GoalAiAvailability,
+  type GoalAiProvider,
+  type GoalCategory,
+  type GoalDrafts,
+  type GoalPlannerAction,
+  type GoalPlannerState,
+  type GoalQuestionId,
+  type GoalTargetResolution,
+  type GoalTextFacts,
   type NewsAnalysis,
   type NewsArticle,
 } from '@moneycast/core';
@@ -36,8 +84,10 @@ import { useFonts } from 'expo-font';
 import { MONEYCAST_FONTS } from './fonts';
 import { PlexFontProvider, Text, TextInput } from './Typography';
 import { API_URL, mobileNewsCache } from './news-cache';
+import { clarifyGoalText, GOAL_AI_OFF, loadGoalAiAvailability } from './goal-ai';
 
-type Field = Exclude<keyof CalculatorInput, 'years'> | 'months';
+// The target amount comes from the goal details below the goal chips.
+type Field = Exclude<keyof CalculatorInput, 'years' | 'target'> | 'months';
 type Tab = 'calculator' | 'news';
 type Projection = ReturnType<typeof calculateProjection>;
 const INITIAL_FORM: Record<Field, string> = {
@@ -45,14 +95,12 @@ const INITIAL_FORM: Record<Field, string> = {
   monthly: String(DEFAULT_CALCULATOR_INPUT.monthly),
   annualRate: String(DEFAULT_CALCULATOR_INPUT.annualRate),
   months: String(DEFAULT_CALCULATOR_INPUT.years * 12),
-  target: String(DEFAULT_CALCULATOR_INPUT.target),
 };
 const fields: { key: Field; label: string; unit: string; hint: string }[] = [
   { key: 'initial', label: '현재 시드머니', unit: '원', hint: '현재 보유 자산을 원 단위로 입력하세요.' },
   { key: 'monthly', label: '매월 모으는 금액', unit: '원', hint: '매월 말에 납입할 금액을 입력하세요.' },
   { key: 'annualRate', label: '연간 예상 수익률', unit: '%', hint: '보장되지 않는 가정입니다. 음수도 입력할 수 있습니다.' },
   { key: 'months', label: '목표 기간', unit: '개월', hint: '1개월부터 600개월(50년)까지 1개월 단위로 입력하세요.' },
-  { key: 'target', label: '목표 금액', unit: '원', hint: '0원을 입력하면 목표 비교 없이 예상 자산을 계산합니다.' },
 ];
 
 function Chip({ label, selected, onPress }: { label: string; selected?: boolean; onPress: () => void }) {
@@ -68,7 +116,7 @@ function UsageHelp({ feature }: { feature: Tab }) {
   const calculator = feature === 'calculator';
   const title = calculator ? '계산기 사용법' : '인사이트 사용법';
   const steps = calculator ? [
-    { title: '나의 목표를 골라요', body: '내 집 마련, 자동차, 여행 중 목표를 고르거나 금액을 직접 정하세요. 목표 금액을 0원으로 입력하면 목표 비교 없이 예상 자산만 볼 수 있어요.' },
+    { title: '나의 목표를 골라요', body: '자유 목표, 내 집 마련, 자동차, 여행 중 목표를 고르고 필요한 칸만 채우면 목표 금액이 계산돼요. 금액을 직접 입력해도 되고, 0원이거나 아직 모르면 목표 비교 없이 예상 자산만 볼 수 있어요.' },
     { title: '금액과 기간을 입력해요', body: '현재 시드머니와 매월 모으는 금액을 입력하고, 목표 기간은 1~600개월 사이에서 정하세요. 기본값 60개월은 5년이에요. 연간 예상 수익률은 보장된 전망이 아니라 직접 정하는 가정이에요.' },
     { title: '결과와 차트를 비교해요', body: '입력할 때마다 예상 자산, 납입 원금, 예상 수익과 목표 차액이 바로 달라져요. 차트의 막대를 누르면 선택한 시점의 금액을 확인할 수 있어요.' },
   ] : [
@@ -112,7 +160,7 @@ function UsageHelp({ feature }: { feature: Tab }) {
                 ? '월 수익률은 (1 + 연 수익률 / 100)^(1/12) − 1로 변환하며, 월 복리·월말 납입으로 계산해요. 계산 중에는 반올림하지 않고 표시할 때 원 단위로 반올림해요.'
                 : '실제 뉴스는 제공자 연동 후 표시돼요. 연동 대기 중에는 기사나 방향 전망을 만들어 보여주지 않아요. 서버 연결이나 제공자 설정이 필요하면 뉴스 화면에 안내해요.'}</Text>
               <Text style={styles.helpNoticeBody}>{calculator
-                ? '세금·수수료·물가상승률은 반영하지 않아요. 수익률은 입력한 가정이며 실제 수익을 보장하지 않아요. 원금 손실이 발생할 수 있어요.'
+                ? '세금·수수료는 반영하지 않아요. 물가상승은 켠 경우 목표 금액에만 가정으로 반영해요. 수익률은 입력한 가정이며 실제 수익을 보장하지 않아요. 원금 손실이 발생할 수 있어요.'
                 : '근거 수준은 예측 정확도가 아니에요. 뉴스는 미래 주가의 원인이나 방향을 증명하지 않으며, 이 정보는 개인 맞춤형 매수·매도 지시가 아니에요. 투자에는 원금 손실 위험이 있어요.'}</Text>
             </View>
           </ScrollView>
@@ -164,17 +212,293 @@ function GrowthChart({ projection, target }: { projection: Projection; target: n
   </View>;
 }
 
+/** One goal entry, with the calculator fields' look; amounts are kept without commas like the other fields. */
+function GoalInput({ label, value, onChange, unit = '원', error, hint, placeholder, text = false, maxLength = 22, multiline = false }: {
+  label: string; value: string; onChange: (value: string) => void; unit?: string; error?: string; hint?: string;
+  placeholder?: string; text?: boolean; maxLength?: number; multiline?: boolean;
+}) {
+  const parsed = text ? null : parseGoalNumber(value);
+  const amount = unit === '원' && parsed !== null && Number.isFinite(parsed) && parsed >= 0 ? formatCompactKRW(parsed) : '';
+  const note = [amount, hint].filter(Boolean).join(' · ');
+  return <View style={styles.field}>
+    <Text style={styles.fieldLabel}>{label}</Text>
+    <View style={[styles.inputWrap, error ? styles.inputError : null]}>
+      <TextInput value={value} onChangeText={next => onChange(text ? next : next.replace(/,/g, ''))}
+        accessibilityLabel={text ? label : `${label}, ${unit}`} accessibilityHint={hint} placeholder={placeholder} placeholderTextColor="#8b9897"
+        keyboardType={text ? 'default' : unit === '원' || unit === '%' ? 'decimal-pad' : 'number-pad'}
+        style={[styles.input, multiline && styles.inputMultiline]} selectTextOnFocus={!text} returnKeyType={multiline ? 'default' : 'done'} maxLength={maxLength} multiline={multiline} />
+      {text ? null : <Text style={styles.inputUnit}>{unit}</Text>}
+    </View>
+    {error ? <Text accessibilityRole="alert" style={styles.errorText}>{error}</Text> : note ? <Text style={styles.fieldHint}>{note}</Text> : null}
+  </View>;
+}
+
+function GoalChoice<T extends string>({ label, value, options, onChange, note }: {
+  label: string; value: T; options: readonly (readonly [T, string])[]; onChange: (value: T) => void; note?: string;
+}) {
+  return <View style={styles.field}>
+    <Text style={styles.fieldLabel}>{label}</Text>
+    <View style={styles.chips}>{options.map(([option, text]) => <Chip key={option} label={text} selected={value === option} onPress={() => onChange(option)} />)}</View>
+    {note ? <Text style={styles.fieldHint}>{note}</Text> : null}
+  </View>;
+}
+
+function GoalLink({ label, onPress, disabled = false }: { label: string; onPress: () => void; disabled?: boolean }) {
+  return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress}
+    style={({ pressed }) => [styles.goalLink, (pressed || disabled) && styles.pressed]}>
+    <Text style={styles.goalLinkText}>{label}</Text>
+  </Pressable>;
+}
+
+/** Another way to enter the saving period: the month the goal is due, applied to the period field. */
+function TargetMonthInput({ months, onMonths }: { months: number; onMonths: (months: number) => void }) {
+  const [text, setText] = useState('');
+  const [error, setError] = useState('');
+  const now = new Date();
+  const valid = Number.isInteger(months) && months >= 1 && months <= 600;
+  const apply = () => {
+    const result = monthsFromTargetMonth(text, now);
+    if ('months' in result) {
+      onMonths(result.months);
+      setText('');
+      setError('');
+    } else setError(result.error);
+  };
+  return <>
+    <GoalInput text label="목표 시점으로 정하기(선택)" value={text} maxLength={10} error={error}
+      placeholder={valid ? monthInputValue(periodEndMonth(months, now)) : '2028-03'} hint="2028-03처럼 연도와 월을 입력하고 적용을 누르면 목표 기간이 바뀌어요."
+      onChange={value => { setText(value); setError(''); }} />
+    <GoalLink label="목표 시점 적용" disabled={!text.trim()} onPress={apply} />
+  </>;
+}
+
+type FactKey = 'name' | 'amount' | 'items' | 'months';
+const ALL_CHOSEN: Record<FactKey, boolean> = { name: true, amount: true, items: true, months: true };
+const positiveNumber = (text: string) => {
+  const value = parseGoalNumber(text);
+  return value !== null && Number.isFinite(value) && value > 0 ? value : null;
+};
+const wholeMonths = (text: string) => {
+  const value = positiveNumber(text);
+  return value !== null && Number.isInteger(value) && value <= 600 ? value : null;
+};
+
+/**
+ * Reads the free goal's description on the device first; found facts apply
+ * only when ticked, at most two fixed questions ask for the rest, and the
+ * optional AI reading is offered only when the rules fall short.
+ */
+function GoalAssist({ state, dispatch, onPeriod }: {
+  state: GoalPlannerState; dispatch: React.Dispatch<GoalPlannerAction>; onPeriod: (months: number) => void;
+}) {
+  const note = state.drafts.free.note;
+  const [found, setFound] = useState<{ text: string; category: GoalCategory; title: string; facts: GoalTextFacts; personalData: boolean; provider?: GoalAiProvider } | null>(null);
+  const [chosen, setChosen] = useState(ALL_CHOSEN);
+  const [answered, setAnswered] = useState<GoalQuestionId[]>([]);
+  const [ai, setAi] = useState<GoalAiAvailability>(GOAL_AI_OFF);
+  const [asking, setAsking] = useState(false);
+  const [sent, setSent] = useState('');
+  const [notice, setNotice] = useState('');
+  const [living, setLiving] = useState({ monthly: '', months: '' });
+  const [period, setPeriod] = useState('');
+  const apply = (actions: readonly GoalPlannerAction[]) => actions.forEach(dispatch);
+  const analyze = () => {
+    const analysis = analyzeGoalText(note, new Date());
+    setFound({ text: note, category: analysis.category, title: categoryGoalName(analysis.category), facts: analysis.facts, personalData: analysis.personalData });
+    setChosen(ALL_CHOSEN);
+    setAnswered([]);
+    setNotice('');
+    void loadGoalAiAvailability().then(setAi);
+  };
+  const askAi = async () => {
+    const text = note;
+    setAsking(true);
+    setSent(text);
+    setNotice('');
+    const result = await clarifyGoalText(text);
+    setAsking(false);
+    if (result.status !== 'ok' || !result.category) {
+      setNotice(goalAiFailure(result, formatNewsTime));
+      return;
+    }
+    const category = result.category;
+    setFound(current => current && current.text === text ? {
+      ...current, category, title: result.title ?? categoryGoalName(category), provider: result.provider, facts: { ...current.facts, ...result.facts },
+    } : current);
+    setChosen(ALL_CHOSEN);
+    setAnswered([]);
+  };
+  const answer = (question: GoalQuestionId) => setAnswered(old => [...old, question]);
+  const findButton = <GoalLink label="설명에서 정보 찾기" disabled={!note.trim()} onPress={analyze} />;
+  if (!found) return findButton;
+
+  const { facts, category } = found;
+  const name = found.title && found.title !== state.drafts.free.name.trim() ? found.title : '';
+  const options: Array<{ key: FactKey; label: string }> = [
+    ...(name ? [{ key: 'name' as const, label: `목표 이름: ${name}` }] : []),
+    ...(facts.amount ? [{ key: 'amount' as const, label: `목표 금액: ${formatCompactKRW(facts.amount.value)} (“${facts.amount.text}”)` }] : []),
+    ...(facts.items ? [{ key: 'items' as const, label: `항목: ${facts.items.map(item => `${item.label || '항목'} ${formatCompactKRW(item.value)}`).join(' · ')}` }] : []),
+    ...(facts.months ? [{ key: 'months' as const, label: `목표 기간: ${formatDurationMonths(facts.months.value)} (“${facts.months.text}”)` }] : []),
+  ];
+  const picked = (key: FactKey) => chosen[key] && options.some(option => option.key === key);
+  const applyFound = () => {
+    apply(goalFactActions({
+      ...(picked('name') ? { name } : {}),
+      ...(picked('amount') && facts.amount ? { amount: facts.amount.value } : {}),
+      ...(picked('items') && facts.items ? { items: facts.items } : {}),
+    }, String));
+    if (picked('months') && facts.months) onPeriod(facts.months.value);
+    setNotice('선택한 정보를 적용했어요. 각 칸에서 언제든 고칠 수 있어요.');
+    if (picked('months')) answer('period');
+  };
+  const resolution = resolveGoalTarget('free', state.drafts, state.overrides.free);
+  const amountKnown = state.overrides.free !== undefined || (state.drafts.free.method === 'items' && resolution.source === 'details');
+  const questions = planGoalQuestions(found, { amountKnown }).filter(question => !answered.includes(question));
+  const type = categoryGoalType(category);
+  const prefill = describeSwitchPrefill(category, facts);
+  const monthly = positiveNumber(living.monthly);
+  const livingMonths = wholeMonths(living.months);
+  const periodMonths = wholeMonths(period);
+  const offerAi = ai.enabled && !found.provider && !found.personalData && note.trim() !== '' && note.length <= ai.maxLength &&
+    (!facts.amount && !facts.items || category === 'other') && sent !== note;
+
+  return <>
+    {findButton}
+    <View style={styles.goalAssist}>
+      <View style={styles.rowBetween}>
+        <Text accessibilityRole="header" style={styles.goalDetailsTitle}>설명에서 찾은 정보</Text>
+        <GoalLink label="닫기" onPress={() => setFound(null)} />
+      </View>
+      <Text style={styles.fieldHint}>{goalFoundSource(found.provider)} 분류: {categoryLabel(category)}</Text>
+      {found.text !== note ? <Text style={styles.fieldHint}>설명이 바뀌었어요. 다시 찾으려면 ‘설명에서 정보 찾기’를 눌러 주세요.</Text> : null}
+      {!facts.amount && !facts.items && !facts.months ? <Text style={styles.fieldHint}>설명에서 금액이나 기간을 찾지 못했어요.</Text> : null}
+      {options.length > 0 && <>
+        <View style={styles.chips}>{options.map(option => <Chip key={option.key} label={option.label} selected={chosen[option.key]}
+          onPress={() => setChosen(old => ({ ...old, [option.key]: !old[option.key] }))} />)}</View>
+        <GoalLink label="선택한 정보 적용" disabled={!options.some(option => chosen[option.key])} onPress={applyFound} />
+      </>}
+      {notice ? <Text style={styles.goalNotice}>{notice}</Text> : null}
+      {found.personalData ? <Text style={styles.goalNotice}>{GOAL_PERSONAL_DATA_NOTICE}</Text> : null}
+      {questions.map(question => <View key={question} style={styles.goalQuestion}>
+        <Text style={styles.fieldLabel}>{goalQuestionText(question, category)}</Text>
+        {question === 'amount' && <View style={styles.chips}>
+          <Chip label="금액 직접 입력" onPress={() => { dispatch({ type: 'freeMethod', method: 'direct' }); answer('amount'); }} />
+          <Chip label="항목별로 나눠 보기" onPress={() => { dispatch({ type: 'freeMethod', method: 'items' }); answer('amount'); }} />
+          <Chip label="아직 몰라요" onPress={() => { dispatch({ type: 'freeMethod', method: 'undecided' }); answer('amount'); }} />
+        </View>}
+        {question === 'livingCost' && <>
+          <GoalInput label="한 달 생활비" value={living.monthly} onChange={value => setLiving(old => ({ ...old, monthly: value }))} />
+          <GoalInput label="몇 개월치" unit="개월" value={living.months} onChange={value => setLiving(old => ({ ...old, months: value }))} />
+          <GoalLink label="적용" disabled={monthly === null || livingMonths === null}
+            onPress={() => { apply(livingCostActions(monthly!, livingMonths!, String)); answer('livingCost'); }} />
+        </>}
+        {question === 'switchType' && type && <>
+          {prefill ? <Text style={styles.fieldHint}>{prefill}</Text> : null}
+          <GoalLink label={`‘${goalTypeName(type)}’ 목표로 바꾸기`} onPress={() => apply(goalSwitchActions(category, facts, String))} />
+        </>}
+        {question === 'period' && <>
+          <GoalInput label="모을 기간" unit="개월" value={period} onChange={setPeriod} />
+          <GoalLink label="적용" disabled={periodMonths === null} onPress={() => { onPeriod(periodMonths!); answer('period'); }} />
+        </>}
+        <GoalLink label="건너뛰기" onPress={() => answer(question)} />
+      </View>)}
+      {offerAi && <View style={styles.goalQuestion}>
+        <Text style={styles.fieldHint}>{goalAiNotice(ai.providers)}</Text>
+        <GoalLink label={asking ? 'AI가 정리하고 있어요…' : 'AI로 다시 정리하기'} disabled={asking} onPress={() => void askAi()} />
+      </View>}
+    </View>
+  </>;
+}
+
+/** The selected type's required entries; the web also offers optional labels, costs and a memo. */
+function GoalDetails({ state, resolution, dispatch, onPeriod }: {
+  state: GoalPlannerState; resolution: GoalTargetResolution; dispatch: React.Dispatch<GoalPlannerAction>; onPeriod: (months: number) => void;
+}) {
+  const { goal, drafts } = state;
+  const { errors } = resolution;
+  if (goal === 'free') {
+    const free = drafts.free;
+    const setItems = (items: GoalDrafts['free']['items']) => dispatch({ type: 'update', goal: 'free', patch: { items } });
+    const setItem = (index: number, patch: Partial<GoalDrafts['free']['items'][number]>) =>
+      setItems(free.items.map((item, position) => position === index ? { ...item, ...patch } : item));
+    return <>
+      <GoalInput text label="목표 이름" value={free.name} maxLength={GOAL_NAME_MAX_LENGTH} placeholder="예: 결혼 자금" hint="결과에 이 이름으로 표시돼요."
+        onChange={name => dispatch({ type: 'update', goal: 'free', patch: { name } })} />
+      <GoalInput text multiline label="설명(선택)" value={free.note} maxLength={GOAL_NOTE_MAX_LENGTH} placeholder="예: 2년 안에 결혼, 예식 2천만 원이랑 신혼여행 500만 원"
+        hint="이 기기에서 먼저 정리하고, 앱을 닫으면 지워져요." onChange={note => dispatch({ type: 'update', goal: 'free', patch: { note } })} />
+      <GoalAssist state={state} dispatch={dispatch} onPeriod={onPeriod} />
+      <GoalChoice label="금액 정하는 방법" value={free.method} onChange={method => dispatch({ type: 'freeMethod', method })}
+        options={[['direct', '직접 입력'], ['items', '항목 합산'], ['undecided', '아직 모름']]} />
+      {free.method === 'items' && <>
+        {free.items.map((item, index) => <View key={index} style={styles.goalItem}>
+          <GoalInput text label={`항목 ${index + 1} 이름`} value={item.label} maxLength={GOAL_LABEL_MAX_LENGTH} placeholder="예: 예식장" onChange={label => setItem(index, { label })} />
+          <GoalInput label={`항목 ${index + 1} 금액`} value={item.amount} error={errors[`items.${index}.amount`]} onChange={amount => setItem(index, { amount })} />
+          {free.items.length > 1 && <GoalLink label={`항목 ${index + 1} 삭제`} onPress={() => setItems(free.items.filter((_, position) => position !== index))} />}
+        </View>)}
+        {free.items.length < GOAL_ITEM_LIMIT && <GoalLink label="+ 항목 추가" onPress={() => setItems([...free.items, { label: '', amount: '' }])} />}
+      </>}
+    </>;
+  }
+  if (goal === 'home' || goal === 'car') {
+    const home = goal === 'home';
+    const draft = home ? drafts.home : drafts.car;
+    const set = (patch: Partial<GoalDrafts['home'] & GoalDrafts['car']>) => dispatch({ type: 'update', goal, patch } as GoalPlannerAction);
+    return <>
+      {home
+        ? <GoalChoice label="모으려는 금액" value={drafts.home.scope} note={HOME_SCOPE_NOTES[drafts.home.scope]}
+          onChange={scope => dispatch({ type: 'update', goal: 'home', patch: { scope } })}
+          options={[['full', HOME_SCOPE_LABELS.full], ['equity', HOME_SCOPE_LABELS.equity], ['initial', HOME_SCOPE_LABELS.initial]]} />
+        : <GoalChoice label="모으려는 금액" value={drafts.car.scope} note={CAR_SCOPE_NOTES[drafts.car.scope]}
+          onChange={scope => dispatch({ type: 'update', goal: 'car', patch: { scope } })}
+          options={[['full', CAR_SCOPE_LABELS.full], ['initial', CAR_SCOPE_LABELS.initial]]} />}
+      <GoalInput label={home ? '예상 매입 가격' : '예상 차량 가격'} value={draft.price} error={errors.price} hint={home ? undefined : '트림·옵션을 포함한 금액'}
+        onChange={price => set({ price })} />
+      {home && drafts.home.scope === 'equity' && <GoalInput label="대출 예정 금액" value={drafts.home.loan} error={errors.loan} onChange={loan => set({ loan })} />}
+      {draft.scope === 'initial' && <>
+        <GoalChoice label="초기 자금 입력 방식" value={draft.initialBy} onChange={initialBy => set({ initialBy })} options={[['rate', '가격의 비율로'], ['amount', '금액으로']]} />
+        {draft.initialBy === 'rate'
+          ? <GoalInput label="초기 자금 비율" unit="%" value={draft.initialRate} error={errors.initialRate} onChange={initialRate => set({ initialRate })} />
+          : <GoalInput label="초기 자금" value={draft.initialAmount} error={errors.initialAmount} onChange={initialAmount => set({ initialAmount })} />}
+      </>}
+    </>;
+  }
+  const trip = drafts.travel;
+  const set = (patch: Partial<GoalDrafts['travel']>) => dispatch({ type: 'update', goal: 'travel', patch });
+  const nights = parseGoalNumber(trip.nights);
+  return <>
+    <GoalInput text label="여행지" value={trip.destination} maxLength={GOAL_LABEL_MAX_LENGTH} placeholder="예: 오사카" onChange={destination => set({ destination })} />
+    <GoalChoice label="예산 정하는 방법" value={trip.method} onChange={method => set({ method })} options={[['total', '총액 입력'], ['items', '항목별 계산']]}
+      note={trip.method === 'items' ? '항목 금액에 인원·박 수·일 수를 곱해 더해요. 비운 항목은 0원으로 계산해요.' : undefined} />
+    {trip.method === 'total'
+      ? <GoalInput label="총 예산" value={trip.total} error={errors.total} onChange={total => set({ total })} />
+      : <>
+        <GoalInput label="인원" unit="명" value={trip.travelers} error={errors.travelers} onChange={travelers => set({ travelers })} />
+        <GoalInput label="박 수" unit="박" value={trip.nights} error={errors.nights} onChange={value => set({ nights: value })} />
+        <GoalInput label="일 수" unit="일" value={trip.days} error={errors.days} hint="비우면 박 수 + 1일"
+          placeholder={nights !== null && Number.isInteger(nights) && nights >= 0 ? String(nights + 1) : undefined} onChange={days => set({ days })} />
+        <GoalInput label="항공권(1인 왕복)" value={trip.flight} error={errors.flight} onChange={flight => set({ flight })} />
+        <GoalInput label="숙박비(1박 전체)" value={trip.lodging} error={errors.lodging} onChange={lodging => set({ lodging })} />
+        <GoalInput label="현지 경비(1인 1일)" value={trip.daily} error={errors.daily} onChange={daily => set({ daily })} />
+        <GoalInput label="기타 비용" value={trip.other} error={errors.other} hint="보험·비자·쇼핑 등" onChange={other => set({ other })} />
+      </>}
+  </>;
+}
+
 function CalculatorScreen() {
   const [form, setForm] = useState(INITIAL_FORM);
-  const [preset, setPreset] = useState('직접 설정');
+  const [goalState, dispatchGoal] = useReducer(updateGoalPlanner, undefined, () => createGoalPlanner());
+  const override = goalState.overrides[goalState.goal];
+  const resolution = useMemo(() => resolveGoalTarget(goalState.goal, goalState.drafts, override), [goalState, override]);
   const { width } = useWindowDimensions();
   const months = form.months.trim() === '' ? Number.NaN : Number(form.months);
+  // Undecided goals compare against no target, like an explicit 0; an assumed price rise raises the amount compared.
+  const comparison = useMemo(() => compareGoalTarget(resolution, goalState.inflation, months), [resolution, goalState.inflation, months]);
   const input = useMemo(() => {
     const values = Object.fromEntries(Object.entries(form).map(([key, value]) =>
       [key, value.trim() === '' ? Number.NaN : Number(value)])) as Record<Field, number>;
     const { months: durationMonths, ...amounts } = values;
-    return { ...amounts, years: durationMonths / 12 } satisfies CalculatorInput;
-  }, [form]);
+    return { ...amounts, years: durationMonths / 12, target: comparison.target } satisfies CalculatorInput;
+  }, [form, comparison.target]);
   const errors = useMemo(() => {
     const result = validateCalculatorInput(input);
     if (result.years) { result.months = result.years; delete result.years; }
@@ -186,6 +510,12 @@ function CalculatorScreen() {
     try { return calculateProjection(input); } catch { return null; }
   }, [input, errors]);
   const change = (field: Field, text: string) => setForm(previous => ({ ...previous, [field]: text.replace(/,/g, '') }));
+  const targetText = override ?? (resolution.amount !== null && Number.isFinite(resolution.amount) ? String(resolution.amount) : '');
+  // A rejected price-rise rate is reported on its own field, not as a target error.
+  const targetError = comparison.error ? undefined : errors.target;
+  const targetInvalid = Boolean(targetError) || Object.keys(resolution.errors).length > 0;
+  const targetNote = resolution.source === 'manual' && targetError ? targetError : describeGoalTarget(resolution, formatCompactKRW);
+  const followable = override !== undefined && (goalState.goal !== 'free' || goalState.drafts.free.method !== 'direct');
   return <ScrollView contentContainerStyle={[styles.content, width > 700 && styles.tabletContent]} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
     <View style={styles.eyebrow}><View style={styles.greenDot} /><Text style={styles.eyebrowText}>목표가 있는 돈의 여정</Text></View>
     <Text style={styles.pageTitle}>작은 시작이{ '\n' }어떤 미래가 될까요?</Text>
@@ -193,12 +523,42 @@ function CalculatorScreen() {
     <UsageHelp feature="calculator" />
     <View style={styles.card}>
       <View style={styles.rowBetween}><Text style={styles.cardTitle}>나의 목표 설정</Text><Text style={styles.stepLabel}>01 / PLAN</Text></View>
-      <Text style={styles.bodyMuted}>목표를 골라도 금액은 자유롭게 바꿀 수 있어요.</Text>
+      <Text style={styles.bodyMuted}>예시 금액으로 시작하고, 필요한 칸만 채우면 목표 금액이 계산돼요.</Text>
       <View style={styles.chips}>
-        {[['직접 설정', '50000000'], ['내 집 마련', '300000000'], ['자동차', '40000000'], ['여행', '10000000']].map(([label, amount]) =>
-          <Chip key={label!} label={label!} selected={preset === label} onPress={() => {
-            setPreset(label!); if (amount) change('target', amount);
-          }} />)}
+        {GOAL_TYPES.map(type => <Chip key={type.id} label={type.name} selected={goalState.goal === type.id}
+          onPress={() => dispatchGoal({ type: 'select', goal: type.id })} />)}
+      </View>
+      <View style={styles.goalDetails}>
+        <Text accessibilityRole="header" style={styles.goalDetailsTitle}>{goalTypeName(goalState.goal)} 정보</Text>
+        <Text style={styles.fieldHint}>{GOAL_SOURCE_NOTES[goalState.goal]}</Text>
+        <GoalDetails state={goalState} resolution={resolution} dispatch={dispatchGoal} onPeriod={months => change('months', String(months))} />
+      </View>
+      <View style={styles.field}>
+        <View style={styles.rowBetween}>
+          <Text style={styles.fieldLabel}>목표 금액</Text>
+          <Text style={[styles.goalBadge, GOAL_BADGE_COLORS[resolution.source]]}>{GOAL_SOURCE_LABELS[resolution.source]}</Text>
+        </View>
+        <View style={[styles.inputWrap, targetInvalid ? styles.inputError : null]}>
+          <TextInput value={targetText} onChangeText={text => dispatchGoal({ type: 'typeTarget', text: text.replace(/,/g, '') })}
+            accessibilityLabel={`목표 금액, 원, ${GOAL_SOURCE_LABELS[resolution.source]}`} accessibilityHint={targetNote}
+            placeholder={resolution.source === 'undecided' ? '미정' : undefined} placeholderTextColor="#8b9897"
+            keyboardType="decimal-pad" style={styles.input} selectTextOnFocus returnKeyType="done" maxLength={22} />
+          <Text style={styles.inputUnit}>원</Text>
+        </View>
+        {targetInvalid ? <Text accessibilityRole="alert" style={styles.errorText}>{targetNote}</Text> : <Text style={styles.fieldHint}>{targetNote}</Text>}
+        {resolution.source === 'details' && resolution.lines.length > 0
+          ? <Text style={styles.fieldHint}>= {formatGoalFormula(resolution.lines, formatCompactKRW)}</Text> : null}
+        {resolution.source === 'details' && resolution.zeroed.length > 0
+          ? <Text style={styles.fieldHint}>{resolution.zeroed.join(', ')}: 입력하지 않아 0원으로 계산했어요.</Text> : null}
+        {followable ? <GoalLink label="상세 입력으로 다시 계산" onPress={() => dispatchGoal({ type: 'followDetails' })} /> : null}
+        <View style={styles.chips}>
+          <Chip label="물가상승 반영(선택)" selected={goalState.inflation.on} onPress={() => dispatchGoal({ type: 'inflation', patch: { on: !goalState.inflation.on } })} />
+        </View>
+        {goalState.inflation.on ? <>
+          <Text style={styles.fieldHint}>목표 금액을 오늘 가격으로 보고, 목표 기간 동안 매년 이 비율로 오른다고 가정해 비교해요. 예측이 아닌 나의 가정이에요.</Text>
+          <GoalInput label="연 물가상승률" unit="%" value={goalState.inflation.rate} error={comparison.error} hint={describeInflation(comparison, formatCompactKRW)}
+            onChange={rate => dispatchGoal({ type: 'inflation', patch: { rate } })} />
+        </> : null}
       </View>
       {fields.map(field => <View key={field.key} style={styles.field}>
         <Text style={styles.fieldLabel} nativeID={`label-${field.key}`}>{field.label}</Text>
@@ -211,10 +571,11 @@ function CalculatorScreen() {
           <Text style={styles.inputUnit}>{field.unit}</Text>
         </View>
         {errors[field.key] ? <Text accessibilityRole="alert" style={styles.errorText}>{errors[field.key]}</Text>
-          : field.key === 'months' ? <Text style={styles.fieldHint}>{formatDurationMonths(months)} · 1~600개월, 1개월 단위</Text>
+          : field.key === 'months' ? <Text style={styles.fieldHint}>{formatDurationMonths(months)} · {formatYearMonth(periodEndMonth(months, new Date()))}까지 · 1~600개월, 1개월 단위</Text>
             : field.unit === '원' && form[field.key] !== '' && Number.isFinite(Number(form[field.key]))
               ? <Text style={styles.fieldHint}>{formatCompactKRW(Number(form[field.key]))}</Text> : null}
       </View>)}
+      <TargetMonthInput months={months} onMonths={value => change('months', String(value))} />
       <View style={styles.inlineNotice}><Text style={styles.noticeSymbol}>i</Text><Text style={styles.noticeText}>입력을 바꾸면 결과가 바로 달라집니다. 수익률은 확정 전망이 아닌 나의 가정입니다.</Text></View>
     </View>
 
@@ -226,6 +587,13 @@ function CalculatorScreen() {
         <View style={styles.resultDivider} />
         <View style={styles.rowBetween}><Text style={styles.resultSecondary}>총 납입 원금</Text><Text style={styles.resultValue}>{formatKRW(projection.totalPrincipal)}</Text></View>
         <View style={styles.rowBetween}><Text style={styles.resultSecondary}>예상 수익</Text><Text style={styles.resultValue}>{projection.totalProfit >= 0 ? '+' : ''}{formatKRW(projection.totalProfit)}</Text></View>
+        <Text style={styles.goalResult}>{describeGoalResult(goalState.goal, goalState.drafts, resolution, formatCompactKRW, comparison.inflation?.amount)}</Text>
+        {resolution.source === 'undecided' && <View style={styles.achievement}>
+          <Text style={styles.achievementTitle}>목표 금액이 아직 정해지지 않았어요</Text>
+          <Text style={styles.achievementBody}>{resolution.missing.length
+            ? `목표 상세의 빈 칸(${resolution.missing.join(', ')})을 채우면 달성률을 보여 드려요.`
+            : '그래서 달성률은 계산하지 않았어요. 금액이 정해지면 직접 입력하거나 항목 합산을 골라 주세요.'}</Text>
+        </View>}
         {input.target > 0 && <View style={styles.achievement}>
           <Text style={styles.achievementTitle}>{projection.achieved ? '목표에 닿을 수 있는 가정이에요' : '목표까지 조금 더 모아볼까요?'}</Text>
           <Text style={styles.achievementBody}>{projection.achieved
@@ -238,7 +606,7 @@ function CalculatorScreen() {
     <View style={styles.assumptions}>
       <Text style={styles.assumptionsTitle}>계산을 읽기 전에</Text>
       <Text style={styles.assumptionsText}>연 유효수익률을 월 수익률로 변환해 매월 복리로 계산합니다. 월말에 납입하고, 계산 중에는 반올림하지 않으며 표시할 때 원 단위로 반올림합니다.</Text>
-      <Text style={styles.assumptionsText}>세금·수수료·물가상승률은 반영하지 않습니다. 실제 수익은 달라질 수 있고 원금 손실이 발생할 수 있습니다.</Text>
+      <Text style={styles.assumptionsText}>세금·수수료는 반영하지 않습니다. 물가상승은 켠 경우 목표 금액에만 가정으로 반영합니다. 실제 수익은 달라질 수 있고 원금 손실이 발생할 수 있습니다.</Text>
     </View>
   </ScrollView>;
 }
@@ -446,6 +814,11 @@ export default function App() {
   </SafeAreaView></PlexFontProvider>;
 }
 
+const GOAL_BADGE_COLORS: Record<GoalTargetResolution['source'], { backgroundColor: string; color: string }> = {
+  example: { backgroundColor: '#fcf0e0', color: '#8a5a2b' }, manual: { backgroundColor: '#eef2ee', color: '#45524a' },
+  details: { backgroundColor: '#e3f1e6', color: '#2f6b4b' }, undecided: { backgroundColor: '#f1f2f4', color: '#5d646b' },
+};
+
 const styles = StyleSheet.create({
   fontLoading: { alignItems: 'center', justifyContent: 'center' },
   app: { flex: 1, backgroundColor: '#f5f7f8', paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0 },
@@ -495,6 +868,17 @@ const styles = StyleSheet.create({
   inputError: { borderColor: '#b7554c', backgroundColor: '#fffafa' }, input: { flex: 1, fontSize: 18, fontWeight: '600', color: '#21382c', paddingVertical: 12, minWidth: 0 },
   inputUnit: { fontSize: 13, color: '#7d8b7e', marginLeft: 8 }, fieldHint: { fontSize: 11, color: '#748578', lineHeight: 19 },
   errorText: { fontSize: 12, color: '#ad413b', lineHeight: 19 },
+  goalDetails: { backgroundColor: '#f6f9f4', borderRadius: 14, borderWidth: 1, borderColor: '#e1e9e0', padding: 14, gap: 4, marginTop: 4 },
+  goalDetailsTitle: { fontSize: 14, fontWeight: '700', color: '#2f4a37' },
+  goalBadge: { fontSize: 11, fontWeight: '600', borderRadius: 999, paddingVertical: 2, paddingHorizontal: 8, overflow: 'hidden' },
+  goalItem: { borderTopWidth: 1, borderTopColor: '#e1e9e0', marginTop: 6, paddingTop: 2 },
+  goalLink: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center' },
+  goalLinkText: { color: '#2f6b4b', fontSize: 13, fontWeight: '600', textDecorationLine: 'underline' },
+  goalResult: { color: '#111111', fontSize: 12, fontWeight: '600', lineHeight: 19 },
+  inputMultiline: { minHeight: 64, textAlignVertical: 'top' },
+  goalAssist: { backgroundColor: '#fff', borderRadius: 12, borderWidth: 1, borderColor: '#cfe0d2', padding: 12, gap: 6, marginTop: 4 },
+  goalQuestion: { borderTopWidth: 1, borderTopColor: '#e1eadf', paddingTop: 8, marginTop: 4, gap: 4 },
+  goalNotice: { fontSize: 12, lineHeight: 19, color: '#6b4b1f', backgroundColor: '#fff7e8', borderRadius: 8, padding: 8 },
   inlineNotice: { flexDirection: 'row', gap: 9, backgroundColor: '#f4f7f2', borderRadius: 10, padding: 12, marginTop: 8 }, noticeSymbol: { fontSize: 14, color: '#5a7d5e' }, noticeText: { flex: 1, fontSize: 11, color: '#647963', lineHeight: 19 },
   resultCard: { backgroundColor: '#edf4e8', borderRadius: 22, padding: 23, gap: 13 }, resultLabel: { color: '#111111', fontSize: 13, fontWeight: '500' },
   resultPill: { fontSize: 8, fontWeight: '700', letterSpacing: 1.1, color: '#111111', borderWidth: 1, borderColor: '#557761', borderRadius: 5, padding: 5 },

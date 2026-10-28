@@ -161,6 +161,25 @@ button, .news-promo { transition: transform .17s; }
 .article-list h3 a:hover { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 4px; }
 .main-shell :is(button, a, summary, input):focus-visible { outline-color: #b5dfbe; }
 
+/* Goal details added on main use the same dark controls and layered surfaces. */
+:root[data-theme="dark"] :is(.goal-details, .goal-assist, .saved-goal-list li) { background: var(--surface-soft); background-image: var(--panel-gradient); border-color: var(--line); }
+:root[data-theme="dark"] :is(.goal-details-heading h3, .goal-assist-head h4, .saved-goals-head h3, .saved-goal-list strong, .goal-choice legend, .goal-check, .goal-assist-facts legend, .goal-question-text) { color: var(--text-primary); }
+:root[data-theme="dark"] .goal-text-input select { color: var(--text-primary); }
+:root[data-theme="dark"] .goal-details textarea { background: #172d2b; border-color: #4a6459; color: var(--text-primary); }
+:root[data-theme="dark"] .calculator-card :is(input, textarea)::placeholder { color: var(--supporting-text); opacity: 1; }
+:root[data-theme="dark"] :is(.goal-choice button, .goal-suggestions button, .goal-item-remove, .goal-assist-open, .goal-assist-apply, .goal-question-actions button, .goal-question-fields > button, .goal-assist-ai button, .saved-goal-actions button) { background: #1b322f; border-color: #496357; color: #c9dbcd; }
+:root[data-theme="dark"] :is(.goal-choice button, .goal-suggestions button, .goal-item-remove, .goal-assist-open, .goal-assist-apply, .goal-question-actions button, .goal-question-fields > button, .goal-assist-ai button, .saved-goal-actions button):hover { background: #2b463b; border-color: #759780; }
+:root[data-theme="dark"] .goal-choice button.chosen { background: #365340; border-color: #91b79a; color: #e2f2dc; }
+:root[data-theme="dark"] :is(.goal-link, .goal-more-toggle, .saved-goals-notice) { color: var(--accent); }
+:root[data-theme="dark"] .goal-assist-close { color: var(--supporting-text); }
+:root[data-theme="dark"] :is(.goal-formula, .goal-result .goal-result-label) { color: var(--supporting-text); }
+:root[data-theme="dark"] :is(.goal-question, .goal-assist-ai, .saved-goals) { border-color: var(--line); }
+:root[data-theme="dark"] .goal-check input { accent-color: var(--accent); }
+:root[data-theme="dark"] .goal-source-badge.example, :root[data-theme="dark"] .goal-assist-notice { background: #493f2d; color: #ecd4a5; }
+:root[data-theme="dark"] .goal-assist-notice { background-image: var(--notice-gradient); }
+:root[data-theme="dark"] :is(.goal-source-badge.manual, .goal-source-badge.undecided) { background: #31433a; color: #c9d7ce; }
+:root[data-theme="dark"] .goal-source-badge.details { background: #35503e; color: #d5e9d8; }
+
 /* Recessed output wells, raised working panels and one shared primary surface. */
 .surface-label { display: block; margin-bottom: 10px; color: #b6d1ba; font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .result-label { margin: 0 0 -4px; color: #bdd1c2; }

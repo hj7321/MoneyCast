@@ -151,7 +151,7 @@ test('calculator renders default assumption, final assets, principal and a label
   assert.ok(screen.getAllByText('40,000,000원').length >= 1);
   assert.ok(screen.getByText('목표보다 3,330,315원 부족합니다. 납입액이나 기간을 조정해 보세요.'));
   assert.match(screen.getByRole('img', { name: /5년 자산 추이/ }).getAttribute('aria-label')!, /목표 50,000,000원/);
-  assert.ok(screen.getByText(/세금·수수료·물가상승률 미반영/));
+  assert.ok(screen.getByText(/세금·수수료 미반영 · 물가상승은 목표 금액에만 선택 반영/));
   assert.ok(screen.getByText(/수익률은 사용자의 가정/));
   assert.equal(document.querySelector('.calculator-card .section-number'), null);
 });
@@ -274,6 +274,374 @@ test('month duration rejects missing, fractional and out-of-range values and rec
   fireEvent.change(period, { target: { value: '1' } });
   assert.equal(period.getAttribute('aria-invalid'), 'false');
   assert.ok(screen.getByRole('img', { name: /^1개월 자산 추이/ }));
+});
+
+const targetInput = () => screen.getByLabelText('목표 금액') as HTMLInputElement;
+const targetSource = () => document.getElementById('target-source')!.textContent;
+const chartLabel = () => screen.getByRole('img', { name: /자산 추이/ }).getAttribute('aria-label')!;
+
+test('each goal type starts from a labelled example and shows only the entries that set its amount', () => {
+  open();
+  assert.equal(targetSource(), '예시 금액');
+  assert.ok(screen.getByLabelText('목표 이름'));
+  assert.ok(screen.getByText('자유 목표 · 예시 금액 5,000만 원'));
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  assert.equal(screen.getByRole('button', { name: '내 집 마련' }).getAttribute('aria-pressed'), 'true');
+  assert.equal((screen.getByLabelText('예상 매입 가격') as HTMLInputElement).value, '300,000,000');
+  assert.equal(targetInput().value, '300,000,000');
+  assert.equal(targetSource(), '예시 금액');
+  assert.match(chartLabel(), /목표 300,000,000원/);
+  assert.equal(screen.queryByLabelText('대출 예정 금액'), null);
+  const more = screen.getByRole('button', { name: '더 자세히 입력(선택)' });
+  assert.equal(more.getAttribute('aria-expanded'), 'false');
+  assert.equal(document.getElementById('goal-more')!.hidden, true);
+  fireEvent.click(more);
+  assert.equal(document.getElementById('goal-more')!.hidden, false);
+  assert.ok(screen.getByLabelText('지역(시·도)'));
+  for (const [goal, label, value] of [['자동차', '예상 차량 가격', '40,000,000'], ['여행', '총 예산', '10,000,000']] as const) {
+    fireEvent.click(screen.getByRole('button', { name: goal }));
+    assert.equal((screen.getByLabelText(label) as HTMLInputElement).value, value);
+    assert.equal(targetInput().value, value);
+  }
+  assert.ok(screen.getByText(/여행 경비 정보를 제공하지 않아요/));
+});
+
+test('home equity subtracts the planned loan, adds costs and stays undecided until the loan is entered', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  fireEvent.click(screen.getByRole('button', { name: '자기자본' }));
+  assert.equal(targetInput().value, '');
+  assert.equal(targetInput().placeholder, '미정');
+  assert.equal(targetSource(), '미정');
+  assert.ok(screen.getByText('목표 금액이 아직 정해지지 않았어요.'));
+  assert.ok(screen.getByText('목표 상세의 빈 칸(대출 예정 금액)을 채우면 달성률을 보여 드려요.'));
+  assert.doesNotMatch(chartLabel(), /목표/);
+  fireEvent.change(screen.getByLabelText('대출 예정 금액'), { target: { value: '200000000' } });
+  assert.equal(targetInput().value, '100,000,000');
+  assert.equal(targetSource(), '상세 계산');
+  assert.ok(screen.getByText('= 매입 가격 3억 원 − 대출 예정 금액 2억 원'));
+  assert.match(chartLabel(), /목표 100,000,000원/);
+  fireEvent.click(screen.getByRole('button', { name: '더 자세히 입력(선택)' }));
+  fireEvent.click(screen.getByLabelText('부대비용 포함'));
+  fireEvent.change(screen.getByLabelText('부대비용'), { target: { value: '15000000' } });
+  assert.equal(targetInput().value, '115,000,000');
+  assert.ok(screen.getByText('= 매입 가격 3억 원 − 대출 예정 금액 2억 원 + 부대비용 1,500만 원'));
+  fireEvent.change(screen.getByLabelText('대출 예정 금액'), { target: { value: '400000000' } });
+  assert.equal(screen.getByLabelText('대출 예정 금액').getAttribute('aria-invalid'), 'true');
+  assert.ok(screen.getByText('대출 예정 금액이 매입 가격보다 클 수 없어요.'));
+  assert.equal(screen.queryByRole('img', { name: /자산 추이/ }), null);
+});
+
+test('a typed target amount wins until the details are used again', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  fireEvent.change(targetInput(), { target: { value: '123456789' } });
+  assert.equal(targetSource(), '직접 입력');
+  assert.match(chartLabel(), /목표 123,456,789원/);
+  fireEvent.blur(targetInput());
+  assert.equal(targetInput().value, '123,456,789');
+  fireEvent.change(screen.getByLabelText('예상 매입 가격'), { target: { value: '500000000' } });
+  assert.equal(targetInput().value, '123,456,789');
+  fireEvent.click(screen.getByRole('button', { name: '상세 입력으로 다시 계산' }));
+  assert.equal(targetInput().value, '500,000,000');
+  assert.equal(targetSource(), '상세 계산');
+  assert.equal(screen.queryByRole('button', { name: '상세 입력으로 다시 계산' }), null);
+});
+
+test('switching goal types keeps each type\'s entries instead of overwriting the target', () => {
+  open();
+  fireEvent.change(targetInput(), { target: { value: '70000000' } });
+  fireEvent.click(screen.getByRole('button', { name: '자동차' }));
+  assert.equal(targetInput().value, '40,000,000');
+  fireEvent.change(screen.getByLabelText('예상 차량 가격'), { target: { value: '35000000' } });
+  fireEvent.click(screen.getByRole('button', { name: '자유 목표' }));
+  assert.equal(targetInput().value, '70000000');
+  assert.equal(targetSource(), '직접 입력');
+  fireEvent.click(screen.getByRole('button', { name: '자동차' }));
+  assert.equal(targetInput().value, '35,000,000');
+  assert.equal((screen.getByLabelText('예상 차량 가격') as HTMLInputElement).value, '35000000');
+});
+
+test('a free goal takes a name, a sum of rows or no amount yet', async () => {
+  open();
+  fireEvent.change(screen.getByLabelText('목표 이름'), { target: { value: '결혼 자금' } });
+  assert.ok(screen.getByText('결혼 자금 · 예시 금액 5,000만 원'));
+  fireEvent.click(screen.getByRole('button', { name: '비상금' }));
+  assert.equal((screen.getByLabelText('목표 이름') as HTMLInputElement).value, '비상금');
+  assert.equal(targetInput().value, '50,000,000');
+  fireEvent.click(screen.getByRole('button', { name: '아직 모름' }));
+  assert.equal(targetSource(), '미정');
+  assert.ok(screen.getByText('그래서 달성률은 계산하지 않았어요. 지금 조건이면 5년 후 예상 자산은 46,669,685원이에요.'));
+  fireEvent.click(screen.getByRole('button', { name: '항목별로 나눠 보기' }));
+  // Compare ids: a failed DOM-node comparison makes assert render the whole jsdom tree.
+  await waitFor(() => assert.equal(document.activeElement?.id, 'goal-item-0-label'));
+  assert.equal(screen.getByRole('button', { name: '항목 합산' }).getAttribute('aria-pressed'), 'true');
+  fireEvent.change(screen.getByLabelText('항목 1 이름'), { target: { value: '예식' } });
+  fireEvent.change(screen.getByLabelText('항목 1 금액'), { target: { value: '20000000' } });
+  fireEvent.click(screen.getByRole('button', { name: '+ 항목 추가' }));
+  fireEvent.change(screen.getByLabelText('항목 2 금액'), { target: { value: '8000000' } });
+  assert.equal(targetInput().value, '28,000,000');
+  assert.ok(screen.getByText('= 예식 2,000만 원 + 항목 2 800만 원'));
+  fireEvent.click(screen.getByRole('button', { name: '항목 2 삭제' }));
+  assert.equal(targetInput().value, '20,000,000');
+  fireEvent.change(targetInput(), { target: { value: '30000000' } });
+  assert.equal(screen.getByRole('button', { name: '직접 입력' }).getAttribute('aria-pressed'), 'true');
+  assert.equal(targetSource(), '직접 입력');
+});
+
+test('travel items multiply by travelers, nights and days and name the trip in the result', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '여행' }));
+  fireEvent.change(screen.getByLabelText('여행지'), { target: { value: '오사카' } });
+  fireEvent.click(screen.getByRole('button', { name: '항목별 계산' }));
+  for (const [label, value] of [['인원', '2'], ['박 수', '3'], ['항공권(1인 왕복)', '600000'], ['숙박비(1박 전체)', '150000'], ['현지 경비(1인 1일)', '100000']] as const) {
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+  }
+  assert.equal((screen.getByLabelText('일 수') as HTMLInputElement).placeholder, '4');
+  assert.equal(targetInput().value, '2,450,000');
+  assert.ok(screen.getByText('= 항공권(1인 × 2명) 120만 원 + 숙박(3박) 45만 원 + 현지 경비(2명 × 4일) 80만 원'));
+  assert.ok(screen.getByText('기타 비용: 입력하지 않아 0원으로 계산했어요.'));
+  assert.ok(screen.getByText('여행(오사카, 2명, 3박 4일) · 상세 계산 245만 원'));
+});
+
+test('new calculation returns the goal planner to the free-goal example', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  fireEvent.click(screen.getByRole('button', { name: '자기자본' }));
+  fireEvent.click(screen.getByRole('button', { name: '새로 계산하기' }));
+  assert.equal(screen.getByRole('button', { name: '자유 목표' }).getAttribute('aria-pressed'), 'true');
+  assert.equal(targetInput().value, '50,000,000');
+  assert.equal(targetSource(), '예시 금액');
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  assert.equal(screen.getByRole('button', { name: '집값 전체' }).getAttribute('aria-pressed'), 'true');
+});
+
+const describe = (value: string) => {
+  fireEvent.change(screen.getByLabelText('설명(선택)'), { target: { value } });
+  fireEvent.click(screen.getByRole('button', { name: '설명에서 정보 찾기' }));
+  return screen.getByRole('region', { name: '설명에서 찾은 정보' });
+};
+const aiOn = { enabled: true, providers: [{ id: 'cloudflare', label: 'Cloudflare Workers AI', model: '@cf/test' }], promptVersion: 'goal-clarify-v1', maxLength: 200 };
+
+test('a free goal description is read on this device and applied only after it is ticked', () => {
+  open();
+  const card = describe('2년 안에 결혼, 예식 2천만 원이랑 신혼여행 500만 원');
+  assert.match(card.textContent!, /이 기기에서 규칙으로 찾았어요/);
+  assert.match(card.textContent!, /분류: 결혼/);
+  assert.equal(targetInput().value, '50,000,000');
+  assert.equal((within(card).getByLabelText('목표 이름: 결혼 자금') as HTMLInputElement).checked, true);
+  assert.ok(within(card).getByLabelText('항목: 예식 2,000만 원 · 신혼여행 500만 원'));
+  assert.ok(within(card).getByLabelText('목표 기간: 2년 (“2년”)'));
+  fireEvent.click(within(card).getByRole('button', { name: '선택한 정보 적용' }));
+  assert.equal((screen.getByLabelText('목표 이름') as HTMLInputElement).value, '결혼 자금');
+  assert.equal(targetInput().value, '25,000,000');
+  assert.equal((screen.getByLabelText('목표 기간') as HTMLInputElement).value, '24');
+  assert.ok(screen.getByRole('img', { name: /^2년 자산 추이/ }));
+  assert.equal(screen.getByRole('button', { name: '항목 합산' }).getAttribute('aria-pressed'), 'true');
+});
+
+test('fixed questions ask only for what the description lacks and can be answered or skipped', () => {
+  open();
+  const card = describe('비상금 모으기');
+  assert.ok(within(card).getByText('설명에서 금액이나 기간을 찾지 못했어요.'));
+  assert.ok(within(card).getByText('한 달 생활비와 몇 개월치를 모을지 알려 주세요.'));
+  assert.ok(within(card).getByText('언제까지 모을까요?'));
+  fireEvent.change(within(card).getByLabelText('한 달 생활비'), { target: { value: '2500000' } });
+  fireEvent.change(within(card).getByLabelText('몇 개월치'), { target: { value: '6' } });
+  fireEvent.click(within(card).getAllByRole('button', { name: '적용' })[0]!);
+  assert.equal(targetInput().value, '15,000,000');
+  assert.ok(screen.getByText('= 한 달 생활비 250만 원 × 6개월 1,500만 원'));
+  fireEvent.change(within(card).getByLabelText('모을 기간'), { target: { value: '18' } });
+  fireEvent.click(within(card).getByRole('button', { name: '적용' }));
+  assert.equal((screen.getByLabelText('목표 기간') as HTMLInputElement).value, '18');
+  assert.equal(within(card).queryByText('언제까지 모을까요?'), null);
+  const again = describe('목돈 모으기');
+  fireEvent.click(within(again).getAllByRole('button', { name: '건너뛰기' })[0]!);
+  assert.equal(within(again).queryByText('모으려는 금액이 정해져 있나요?'), null);
+});
+
+test('a description that matches another goal type offers to move there with its figures filled in', () => {
+  open();
+  const card = describe('오사카 여행 2명 3박 4일');
+  assert.ok(within(card).getByText('인원 2명, 3박, 4일을 채워 둘게요.'));
+  fireEvent.click(within(card).getByRole('button', { name: '‘여행’ 목표로 바꾸기' }));
+  assert.equal(screen.getByRole('button', { name: '여행' }).getAttribute('aria-pressed'), 'true');
+  assert.equal((screen.getByLabelText('인원') as HTMLInputElement).value, '2');
+  assert.equal((screen.getByLabelText('박 수') as HTMLInputElement).value, '3');
+  assert.equal((screen.getByLabelText('일 수') as HTMLInputElement).value, '4');
+  assert.equal(screen.queryByRole('region', { name: '설명에서 찾은 정보' }), null);
+});
+
+test('the AI reading is offered only when rules fall short, sends the description alone and is checked before use', async () => {
+  const posts: string[] = [];
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if ((init?.method ?? 'GET') === 'GET') return response(aiOn);
+    posts.push(String(init!.body));
+    return response({ status: 'ok', promptVersion: 'goal-clarify-v1', provider: aiOn.providers[0], category: 'wedding', title: '결혼 준비',
+      facts: { months: { value: 18, text: '1년 반' } } });
+  }) as typeof fetch;
+  open();
+  const text = '결혼 준비 예산은 3천 정도, 1년 반 뒤';
+  const card = describe(text);
+  const ask = await within(card).findByRole('button', { name: 'AI로 다시 정리하기' });
+  assert.match(card.textContent!, /설명 문장만 MoneyCast 서버를 거쳐 Cloudflare Workers AI로 보내요/);
+  fireEvent.click(ask);
+  await waitFor(() => assert.match(card.textContent!, /AI\(Cloudflare Workers AI\)가 정리했어요/));
+  assert.ok(within(card).getByLabelText('목표 이름: 결혼 준비'));
+  assert.deepEqual(posts.map(body => JSON.parse(body)), [{ text }]);
+  assert.equal(within(card).queryByRole('button', { name: 'AI로 다시 정리하기' }), null);
+});
+
+test('an unchecked AI answer or personal data falls back to the questions and never changes the goal', async () => {
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => (init?.method ?? 'GET') === 'GET'
+    ? response(aiOn)
+    : response({ status: 'ok', promptVersion: 'goal-clarify-v1', provider: aiOn.providers[0], category: 'wedding',
+      facts: { amount: { value: 50_000_000, text: '5천만 원' } } })) as typeof fetch;
+  open();
+  const card = describe('결혼 준비');
+  fireEvent.click(await within(card).findByRole('button', { name: 'AI로 다시 정리하기' }));
+  assert.ok(await within(card).findByText('AI 답을 확인하지 못했어요. 아래 질문에 직접 답해 주세요.'));
+  assert.equal(targetInput().value, '50,000,000');
+  assert.ok(within(card).getByText('모으려는 금액이 정해져 있나요?'));
+  assert.equal(within(card).queryByRole('button', { name: 'AI로 다시 정리하기' }), null);
+  const personal = describe('결혼 준비, 연락처 010-1234-5678');
+  assert.ok(within(personal).getByText(/주민등록번호·카드·계좌번호처럼 보이는 내용이 있어 AI로 보내지 않아요/));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(within(personal).queryByRole('button', { name: 'AI로 다시 정리하기' }), null);
+});
+
+const endMonth = (months: number) => {
+  const now = new Date();
+  const index = now.getFullYear() * 12 + now.getMonth() + months;
+  return { year: Math.floor(index / 12), month: index % 12 + 1 };
+};
+const monthValue = ({ year, month }: { year: number; month: number }) => `${year}-${String(month).padStart(2, '0')}`;
+
+test('a target month sets the saving period, and the period shows the month it ends', () => {
+  open();
+  const period = screen.getByLabelText('목표 기간') as HTMLInputElement;
+  const month = screen.getByLabelText('목표 시점') as HTMLInputElement;
+  assert.equal(month.value, monthValue(endMonth(60)));
+  assert.ok(screen.getByText(`${endMonth(60).year}년 ${endMonth(60).month}월까지 모아요. 날짜를 고르면 목표 기간이 바뀌어요.`));
+  fireEvent.change(month, { target: { value: monthValue(endMonth(18)) } });
+  assert.equal(period.value, '18');
+  assert.ok(screen.getByRole('img', { name: /^1년 6개월 자산 추이/ }));
+  fireEvent.change(period, { target: { value: '24' } });
+  assert.equal(month.value, monthValue(endMonth(24)));
+  fireEvent.change(month, { target: { value: monthValue(endMonth(0)) } });
+  assert.equal(month.getAttribute('aria-invalid'), 'true');
+  assert.ok(screen.getByText('목표 시점은 다음 달 이후로 정해 주세요.'));
+  assert.equal(period.value, '24');
+  fireEvent.change(month, { target: { value: monthValue(endMonth(1)) } });
+  assert.equal(period.value, '1');
+  assert.equal(month.getAttribute('aria-invalid'), 'false');
+});
+
+test('an assumed price rise raises only the amount compared and reads as an assumption', () => {
+  open();
+  fireEvent.click(screen.getByLabelText('물가상승 반영(선택)'));
+  assert.ok(screen.getByText('연 물가상승률을 입력하면 목표 금액에 반영해요.'));
+  assert.match(chartLabel(), /목표 50,000,000원/);
+  fireEvent.change(screen.getByLabelText('연 물가상승률'), { target: { value: '2' } });
+  assert.equal(targetInput().value, '50,000,000');
+  assert.ok(screen.getByText('오늘 5,000만 원이 연 2%씩 오르면 5년 뒤 5,520.4만 원이에요. 이 금액과 비교해요.'));
+  assert.match(chartLabel(), /목표 55,204,040원/);
+  assert.ok(screen.getByText('자유 목표 · 예시 금액 5,000만 원 → 물가 반영 5,520.4만 원'));
+  assert.ok(screen.getByText('목표 5,520.4만 원(물가 반영)'));
+  fireEvent.change(screen.getByLabelText('연 물가상승률'), { target: { value: '25' } });
+  assert.equal(screen.getByLabelText('연 물가상승률').getAttribute('aria-invalid'), 'true');
+  assert.ok(screen.getByText('물가상승률은 0~20% 사이로 입력해 주세요.'));
+  assert.equal(screen.queryByRole('img', { name: /자산 추이/ }), null);
+  assert.equal(targetInput().getAttribute('aria-invalid'), 'false', 'the target itself is fine');
+  fireEvent.click(screen.getByLabelText('물가상승 반영(선택)'));
+  assert.match(chartLabel(), /목표 50,000,000원/);
+  assert.ok(screen.getByText('자유 목표 · 예시 금액 5,000만 원'));
+});
+
+test('a home district labels the goal without changing its amount', () => {
+  open();
+  fireEvent.click(screen.getByRole('button', { name: '내 집 마련' }));
+  fireEvent.click(screen.getByRole('button', { name: '더 자세히 입력(선택)' }));
+  fireEvent.change(screen.getByLabelText('지역(시·도)'), { target: { value: '서울' } });
+  fireEvent.change(screen.getByLabelText('시·군·구'), { target: { value: '마포구' } });
+  assert.ok(screen.getByText('내 집 마련(서울 마포구) · 집값 전체 기준 · 예시 금액 3억 원'));
+  assert.equal(targetInput().value, '300,000,000');
+});
+
+const savedRegion = () => screen.getByRole('region', { name: /^저장한 목표/ });
+
+test('a goal is kept in this browser only when saved, without its description, and loads back with the calculator fields', () => {
+  open();
+  assert.equal(window.localStorage.getItem('moneycast.goals.v1'), null);
+  fireEvent.change(screen.getByLabelText('목표 이름'), { target: { value: '결혼 자금' } });
+  fireEvent.change(screen.getByLabelText('설명(선택)'), { target: { value: '예식 2천만 원' } });
+  fireEvent.change(screen.getByLabelText('목표 기간'), { target: { value: '24' } });
+  assert.equal(window.localStorage.getItem('moneycast.goals.v1'), null, 'typing alone stores nothing');
+  fireEvent.click(screen.getByRole('button', { name: '현재 목표 저장' }));
+  assert.doesNotMatch(window.localStorage.getItem('moneycast.goals.v1')!, /예식/);
+  assert.ok(within(savedRegion()).getByText('결혼 자금 · 예시 금액 5,000만 원'));
+  assert.ok(within(savedRegion()).getByText(/^기간 2년 · 매월 50만 원 · .+ 저장$/));
+  // Remounting, as a reload does, starts the inputs over and reads the list back.
+  cleanup();
+  open();
+  assert.equal((screen.getByLabelText('목표 기간') as HTMLInputElement).value, '60');
+  assert.equal((screen.getByLabelText('목표 이름') as HTMLInputElement).value, '');
+  fireEvent.click(within(savedRegion()).getByRole('button', { name: '결혼 자금 · 예시 금액 5,000만 원 불러오기' }));
+  assert.equal((screen.getByLabelText('목표 이름') as HTMLInputElement).value, '결혼 자금');
+  assert.equal((screen.getByLabelText('설명(선택)') as HTMLTextAreaElement).value, '');
+  assert.equal((screen.getByLabelText('목표 기간') as HTMLInputElement).value, '24');
+  assert.ok(screen.getByText('저장한 목표를 불러왔어요.'));
+  fireEvent.click(within(savedRegion()).getByRole('button', { name: '결혼 자금 · 예시 금액 5,000만 원 삭제' }));
+  assert.equal(within(savedRegion()).queryByRole('list'), null);
+  assert.equal(window.localStorage.getItem('moneycast.goals.v1'), null);
+});
+
+test('saving stops at five goals, ignores unreadable storage and is not offered when storage is blocked', () => {
+  window.localStorage.setItem('moneycast.goals.v1', JSON.stringify({ version: 1, goals: [{ id: 'x', goal: 'boat' }] }));
+  open();
+  assert.equal(within(savedRegion()).queryByRole('list'), null);
+  for (let index = 0; index < 5; index += 1) fireEvent.click(screen.getByRole('button', { name: '현재 목표 저장' }));
+  assert.equal(within(savedRegion()).getAllByRole('listitem').length, 5);
+  assert.equal((screen.getByRole('button', { name: '현재 목표 저장' }) as HTMLButtonElement).disabled, true);
+  assert.ok(screen.getByText('최대 5개까지 저장할 수 있어요. 하나를 지운 뒤 저장해 주세요.'));
+  cleanup();
+  const original = Object.getOwnPropertyDescriptor(dom.window, 'localStorage')!;
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    get() { throw new dom.window.DOMException('Storage blocked for test', 'SecurityError'); },
+  });
+  try {
+    open();
+    assert.equal((screen.getByRole('button', { name: '현재 목표 저장' }) as HTMLButtonElement).disabled, true);
+    assert.ok(screen.getByText('이 브라우저에서는 목표를 저장할 수 없어요.'));
+    assert.ok(screen.getByRole('img', { name: /자산 추이/ }));
+  } finally {
+    cleanup();
+    Object.defineProperty(window, 'localStorage', original);
+  }
+});
+
+test('the CSV export starts with the goal and its assumptions, then the monthly rows', async () => {
+  const blobs: Blob[] = [];
+  const { createObjectURL, revokeObjectURL } = URL;
+  const click = dom.window.HTMLAnchorElement.prototype.click;
+  URL.createObjectURL = (blob: Blob) => { blobs.push(blob); return 'blob:test'; };
+  URL.revokeObjectURL = () => undefined;
+  dom.window.HTMLAnchorElement.prototype.click = () => undefined;
+  try {
+    open();
+    fireEvent.change(screen.getByLabelText('목표 이름'), { target: { value: '=결혼 자금' } });
+    fireEvent.click(screen.getByRole('button', { name: '계산 결과 CSV 저장' }));
+    const lines = (await blobs[0]!.text()).replace(/^﻿/, '').split('\r\n');
+    assert.deepEqual(lines.slice(0, 4), ['항목,값', "목표,'=결혼 자금", '목표 금액 출처,예시 금액', '목표 금액(원),50000000']);
+    assert.ok(lines.includes('목표 기간(개월),60'));
+    assert.ok(lines.includes('예상 목표 달성률(%),93.3'));
+    assert.ok(lines.includes('개월,납입 원금(원),예상 자산(원),예상 수익(원)'));
+    assert.equal(lines.at(-1), '60,40000000,46669685,6669685');
+  } finally {
+    Object.assign(URL, { createObjectURL, revokeObjectURL });
+    dom.window.HTMLAnchorElement.prototype.click = click;
+  }
 });
 
 test('malformed news data shows an error instead of crashing the news screen', async () => {
@@ -908,7 +1276,8 @@ test('reopening news and remounting the app reuse a valid six-hour company analy
   fireEvent.click(within(screen.getByRole('navigation', { name: '주 메뉴' })).getByRole('button', { name: '뉴스 인사이트' }));
   await screen.findByText(fixture.summary);
   assert.equal(calls, 1);
-  assert.ok(window.localStorage.length > 0);
+  assert.ok(Array.from({ length: window.localStorage.length }, (_, index) => window.localStorage.key(index))
+    .some(key => key?.startsWith('moneycast.news.v1.')));
   view.unmount();
   open('news');
   await screen.findByText(fixture.summary);

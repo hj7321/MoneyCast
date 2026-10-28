@@ -7,6 +7,7 @@ import './styles.css';
 import './readability.css';
 import './navigation.css';
 import './feature-intro.css';
+import './goal-details.css';
 import './theme.css';
 import './theme-light.css';
 applyTheme(getTheme());
