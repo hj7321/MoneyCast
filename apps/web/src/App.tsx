@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { calculateProjection, calculateScenarios, validateCalculatorInput, DEFAULT_CALCULATOR_INPUT, formatKRW, formatCompactKRW, formatDurationMonths, type CalculatorInput, type Projection, type ProjectionScenario } from '@moneycast/core';
 import { Brand, GoalIcon, Icon, type IconName } from './icons';
 import { GrowthChart } from './GrowthChart';
@@ -37,6 +37,18 @@ function exportCSV(projection: Projection) {
 export default function App() {
   const [page, setPage] = useState<Page>(getPage);
   const [sidebarOpen, setSidebarOpen] = useState(getSidebarOpen);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia?.('(max-width: 760px)').matches ?? false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+  const focusSidebarOnOpen = useRef(false);
+  const visibleSidebarOpen = isMobile ? mobileSidebarOpen : sidebarOpen;
+  const mobileDrawerOpen = isMobile && mobileSidebarOpen;
+  const closeSidebar = () => {
+    if (isMobile) setMobileSidebarOpen(false);
+    else setSidebarOpen(false);
+    sidebarToggleRef.current?.focus({ preventScroll: true });
+  };
   const [raw, setRaw] = useState(defaults);
   const [goal, setGoal] = useState('free');
   const [showScenarios, setShowScenarios] = useState(false);
@@ -54,7 +66,69 @@ export default function App() {
     try { window.sessionStorage.setItem(SIDEBAR_SESSION_KEY, sidebarOpen ? 'open' : 'closed'); }
     catch { /* The toggle still works if browser storage is unavailable. */ }
   }, [sidebarOpen]);
-  const navigate = (next: Page) => { setPage(next); window.location.hash = next; window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  useEffect(() => {
+    const media = window.matchMedia?.('(max-width: 760px)');
+    if (!media) return;
+    const onChange = () => {
+      if (sidebarRef.current?.contains(document.activeElement)) sidebarToggleRef.current?.focus({ preventScroll: true });
+      setIsMobile(media.matches);
+      setMobileSidebarOpen(false);
+    };
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
+  useEffect(() => {
+    if (!visibleSidebarOpen || !focusSidebarOnOpen.current) return;
+    focusSidebarOnOpen.current = false;
+    const destination = sidebarRef.current?.querySelector<HTMLElement>('[aria-current="page"]')
+      ?? sidebarRef.current?.querySelector<HTMLElement>('nav button');
+    destination?.focus({ preventScroll: true });
+  }, [visibleSidebarOpen]);
+  useEffect(() => {
+    if (!mobileDrawerOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [mobileDrawerOpen]);
+  useEffect(() => {
+    if (!visibleSidebarOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const sidebar = sidebarRef.current;
+      const toggle = sidebarToggleRef.current;
+      if (!sidebar || !toggle) return;
+      if (event.key === 'Escape' && (isMobile || sidebar.contains(document.activeElement) || document.activeElement === toggle)) {
+        event.preventDefault();
+        closeSidebar();
+      }
+      if (event.key !== 'Tab' || !mobileDrawerOpen) return;
+      const controls = [...Array.from(sidebar.querySelectorAll<HTMLElement>('a[href], button:not([disabled])')), toggle].filter(element => {
+        for (let parent: HTMLElement | null = element; parent; parent = parent.parentElement) {
+          if (parent.hidden || window.getComputedStyle(parent).display === 'none') return false;
+        }
+        return true;
+      });
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement as HTMLElement))) {
+        event.preventDefault();
+        last?.focus({ preventScroll: true });
+      } else if (!event.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement as HTMLElement))) {
+        event.preventDefault();
+        first?.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [visibleSidebarOpen, mobileDrawerOpen, isMobile]);
+  const toggleSidebar = () => {
+    if (visibleSidebarOpen) closeSidebar();
+    else {
+      focusSidebarOnOpen.current = true;
+      if (isMobile) setMobileSidebarOpen(true);
+      else setSidebarOpen(true);
+    }
+  };
+  const navigate = (next: Page) => { if (mobileDrawerOpen) closeSidebar(); setPage(next); window.location.hash = next; window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const values = useMemo(() => Object.fromEntries(fieldKeys.map(k => [k, raw[k].trim() === '' ? NaN : Number(raw[k].replace(/,/g, ''))])) as Record<Field, number>, [raw]);
   const input = useMemo<CalculatorInput>(() => ({ initial: values.initial, monthly: values.monthly, annualRate: values.annualRate, years: values.months / 12, target: values.target }), [values]);
   const errors = useMemo(() => {
@@ -78,21 +152,22 @@ export default function App() {
   </div>;
   const isIntro = page === 'calculator-intro' || page === 'news-intro';
   const usageLabel = page === 'news' ? '인사이트 사용법' : '계산기 사용법';
-  return <div className={`app-shell ${sidebarOpen ? 'sidebar-expanded' : 'sidebar-collapsed'}`}>
-    <a className="skip-link" href="#main" onClick={event => { event.preventDefault(); document.getElementById('main')?.focus(); }}>본문으로 바로가기</a>
-    <aside id="moneycast-sidebar" className="sidebar" hidden={!sidebarOpen}><a className="brand-link" href="#calculator" aria-label="MoneyCast 홈" onClick={() => navigate('calculator')}><Brand/></a><div className="workspace-label">나의 금융 내비게이터</div>
+  return <div className={`app-shell ${visibleSidebarOpen ? 'sidebar-expanded' : 'sidebar-collapsed'}`}>
+    <a className="skip-link" href="#main" inert={mobileDrawerOpen} onClick={event => { event.preventDefault(); document.getElementById('main')?.focus(); }}>본문으로 바로가기</a>
+    <div className={`sidebar-backdrop ${mobileDrawerOpen ? 'is-visible' : ''}`} aria-hidden="true" onClick={closeSidebar}/>
+    <div className="sidebar-rail"><aside ref={sidebarRef} id="moneycast-sidebar" className="sidebar" aria-label="MoneyCast 사이드바" aria-hidden={!visibleSidebarOpen} inert={!visibleSidebarOpen}><a className="brand-link" href="#calculator" aria-label="MoneyCast 홈" onClick={() => navigate('calculator')}><Brand/></a><div className="workspace-label">나의 금융 내비게이터</div>
       <nav aria-label="주 메뉴">{nav.map(item => {
         const intro = `${item.id}-intro` as Page;
         return <div key={item.id} className="nav-feature-group"><button className={`nav-item ${page === item.id || page === intro ? 'active' : ''}`} onClick={() => navigate(item.id)} aria-current={page === item.id ? 'page' : undefined}><Icon name={item.icon}/><span>{item.label}</span>{page === item.id && <span className="nav-active-dot"/>}</button><button className={`nav-intro-link ${page === intro ? 'active' : ''}`} onClick={() => navigate(intro)} aria-label={pageLabels[intro]} aria-current={page === intro ? 'page' : undefined}><Icon name="info" size={14}/>{item.id === 'calculator' ? '계산기 사용법' : '인사이트 사용법'}<Icon name="chevron" size={12}/></button></div>;
       })}</nav>
       <div className="sidebar-journey"><div className="journey-bars" aria-hidden="true"><span/><span/><span/><span/><svg viewBox="0 0 140 80"><path d="m8 65 38-18 33-5 50-33m-21 0h21v21" fill="none" stroke="#b6e8bf" strokeWidth="2"/></svg></div><span className="eyebrow">YOUR NEXT CHAPTER</span><h3>오늘의 계획이<br/>내일의 가능성으로.</h3><p>나만의 속도로,<br/>목표에 한 걸음 더 가까이.</p><button onClick={() => navigate('calculator')}>목표 그려보기 <Icon name="arrow" size={16}/></button></div>
       <div className="sidebar-bottom"><button className={`nav-item ${page === 'guide' ? 'active' : ''}`} onClick={() => navigate('guide')}><Icon name="info"/><span>계산 및 데이터 안내</span></button><div className="sidebar-footer"><span className="tiny-brand">MC</span><div><strong>나의 MoneyCast</strong><span>로그인 없이 가볍게 시작</span></div></div></div>
-    </aside>
-    <div className="main-shell"><header className="topbar"><div className="topbar-start"><button className="sidebar-toggle icon-button" onClick={() => setSidebarOpen(open => !open)} aria-label={sidebarOpen ? '사이드바 닫기' : '사이드바 열기'} title={sidebarOpen ? '사이드바 닫기' : '사이드바 열기'} aria-expanded={sidebarOpen} aria-controls="moneycast-sidebar"><Icon name={sidebarOpen ? 'close' : 'menu'} size={21}/></button><a className="mobile-brand" href="#calculator" aria-label="MoneyCast 홈" onClick={() => navigate('calculator')}><Brand/></a><div className="breadcrumb"><span>나의 워크스페이스</span><Icon name="chevron" size={12}/><strong>{pageLabels[page]}</strong></div></div><div className="topbar-right"><span className="local-status"><i/>내 기기에서 계산</span><button className="avatar" aria-label="계산 및 데이터 안내 열기" onClick={() => navigate('guide')}>M</button></div></header>
-      <main id="main" tabIndex={-1}>
+    </aside></div>
+    <div className="main-shell"><header className="topbar"><div className="topbar-start"><button ref={sidebarToggleRef} className="sidebar-toggle icon-button" onClick={toggleSidebar} aria-label={visibleSidebarOpen ? '사이드바 닫기' : '사이드바 열기'} title={visibleSidebarOpen ? '사이드바 닫기' : '사이드바 열기'} aria-expanded={visibleSidebarOpen} aria-controls="moneycast-sidebar"><Icon name={visibleSidebarOpen ? 'close' : 'menu'} size={21}/></button><a className="mobile-brand" inert={mobileDrawerOpen} href="#calculator" aria-label="MoneyCast 홈" onClick={() => navigate('calculator')}><Brand/></a><div className="breadcrumb" inert={mobileDrawerOpen}><span>나의 워크스페이스</span><Icon name="chevron" size={12}/><strong>{pageLabels[page]}</strong></div></div><div className="topbar-right" inert={mobileDrawerOpen}><span className="local-status"><i/>내 기기에서 계산</span><button className="avatar" aria-label="계산 및 데이터 안내 열기" onClick={() => navigate('guide')}>M</button></div></header>
+      <main id="main" tabIndex={-1} inert={mobileDrawerOpen}>
         <div className="page-heading"><div><div className="page-kicker">{isIntro ? 'GET TO KNOW MONEYCAST' : 'MAKE ROOM FOR YOUR FUTURE'}</div><h1>{page === 'calculator-intro' ? <>목표 자금 계산기, <span>이렇게 활용하세요.</span></> : page === 'news-intro' ? <>뉴스 인사이트, <span>근거부터 살펴보세요.</span></> : page === 'news' ? <>뉴스 너머의 <span>근거를 읽다.</span></> : page === 'guide' ? <>숫자는 투명하게, <span>판단은 신중하게.</span></> : <>나의 자산, <span>어디까지 자랄까요?</span></>}</h1><p>{page === 'calculator-intro' ? '지금의 저축과 투자가 목표에 얼마나 가까워지는지 알아보세요.' : page === 'news-intro' ? '출처가 있는 소식과 그 소식만으로 알 수 없는 것을 함께 확인하세요.' : page === 'news' ? '회사의 소식을 살펴보고, 다음 주를 바라보는 다양한 근거를 확인하세요.' : page === 'guide' ? 'MoneyCast의 계산 기준과 데이터 사용 방식을 확인하세요.' : '막연했던 목표를 구체적인 숫자로. 오늘부터 나만의 미래를 그려보세요.'}</p></div><div className="page-heading-actions">{(page === 'calculator' || page === 'news') && <button className="outline-button feature-help-button" aria-label={usageLabel} onClick={() => navigate(`${page}-intro` as Page)}><Icon name="info" size={16}/>{usageLabel}</button>}{page === 'calculator' && <button className="outline-button" onClick={reset}><Icon name="refresh" size={15}/>새로 계산하기</button>}</div></div>
         {isIntro ? <FeatureIntro feature={page === 'calculator-intro' ? 'calculator' : 'news'} onStart={() => navigate(page === 'calculator-intro' ? 'calculator' : 'news')} onGuide={() => navigate('guide')}/> : page === 'news' ? <NewsPanel/> : page === 'guide' ? <Guide/> : <>
-        <div className="calculator-layout"><section className="card calculator-card" aria-labelledby="calculator-title"><span className="surface-label">내 조건 입력</span><div className="section-heading"><div><span className="eyebrow">MY FINANCIAL GOAL</span><h2 id="calculator-title">어떤 미래를 준비하나요?</h2></div><span className="section-number">01</span></div>
+        <div className="calculator-layout"><section className="card calculator-card" aria-labelledby="calculator-title"><span className="surface-label">내 조건 입력</span><div className="section-heading"><div><span className="eyebrow">MY FINANCIAL GOAL</span><h2 id="calculator-title">어떤 미래를 준비하나요?</h2></div></div>
           <fieldset className="goal-picker"><legend>목표 유형 <span>예시 금액이 적용됩니다</span></legend><div>{goals.map(g => <button key={g.id} className={goal === g.id ? 'chosen' : ''} onClick={() => { setGoal(g.id); update('target', String(g.amount)); }} aria-pressed={goal === g.id}><span className="goal-type-icon" aria-hidden="true">{g.icon === 'home' || g.icon === 'car' || g.icon === 'plane' ? <GoalIcon name={g.icon}/> : <Icon name={g.icon} size={18}/>}</span><span className="goal-type-label">{g.name}</span></button>)}</div></fieldset>
           <div className="calculator-fields">{field('initial', '현재 시드머니', '원')}{field('monthly', '매월 저축·투자 금액', '원')}{field('annualRate', '연간 예상 수익률', '%', '보장된 수익률이 아닌, 나의 가정이에요.')}
           <div className="period-field">{field('months', '목표 기간', '개월', `${durationLabel} · 1~600개월, 1개월 단위 입력`)}<input className="period-slider" aria-label="목표 기간 슬라이더" aria-valuetext={durationLabel} type="range" min={1} max={600} step={1} value={Number.isFinite(values.months) ? Math.min(600, Math.max(1, Math.round(values.months))) : 60} onChange={e => update('months', e.target.value)}/><div className="range-labels"><span>1개월</span><span>25년</span><span>50년</span></div></div>{field('target', '목표 금액', '원', input.target === 0 ? '0원은 목표 없이 자산 추이만 계산합니다.' : undefined)}</div>
@@ -111,7 +186,7 @@ export default function App() {
         <footer className="page-footer"><span><strong>MoneyCast.</strong> 내일을 그리는 오늘의 계획</span><span>참고용 시뮬레이션 · 투자 권유 아님</span></footer>
       </main>
     </div>
-    <nav className="mobile-nav" aria-label="모바일 주 메뉴">{[...nav, { id:'guide' as Page, label:'이용 안내', icon:'info' as IconName }].map(n => <button key={n.id} onClick={() => navigate(n.id)} className={page === n.id || page === `${n.id}-intro` ? 'active' : ''} aria-current={page === n.id ? 'page' : undefined}><Icon name={n.icon} size={20}/><span>{n.label}</span></button>)}</nav>
+    <nav className="mobile-nav" aria-label="모바일 주 메뉴" inert={mobileDrawerOpen}>{[...nav, { id:'guide' as Page, label:'이용 안내', icon:'info' as IconName }].map(n => <button key={n.id} onClick={() => navigate(n.id)} className={page === n.id || page === `${n.id}-intro` ? 'active' : ''} aria-current={page === n.id ? 'page' : undefined}><Icon name={n.icon} size={20}/><span>{n.label}</span></button>)}</nav>
   </div>;
 }
 function Stat({icon, label, value, note, featured = false}: {icon:IconName;label:string;value:string;note:string;featured?:boolean}) { return <section className={`stat-card ${featured ? 'featured' : ''}`}><div className="stat-label"><span>{label}</span><Icon name={icon} size={17}/></div><strong className="stat-value">{value}</strong><span className="stat-note">{note}</span>{featured && <svg className="stat-decoration" aria-hidden="true" viewBox="0 0 100 65"><path d="m0 60 24-15 20 6 28-24 28-22" fill="none" stroke="#a7cdb1" strokeWidth="1.5"/><path d="m0 60 24-15 20 6 28-24 28-22v60H0Z" fill="#d5e9d8" opacity=".3"/></svg>}</section>; }
