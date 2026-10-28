@@ -29,6 +29,7 @@ import {
   type CalculatorInput,
   type Company,
   type NewsAnalysis,
+  type NewsArticle,
 } from '@moneycast/core';
 import { CompanyAvatar } from './CompanyAvatar';
 import { useFonts } from 'expo-font';
@@ -285,6 +286,7 @@ function NewsScreen({ active }: { active: boolean }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
+  const [showUnrelated, setShowUnrelated] = useState(false);
   const retryDelayed = useNewsRetryDelay(analysis?.retryAt);
   const requestId = useRef(0);
   const results = useMemo(() => searchCompanies(query), [query]);
@@ -293,7 +295,7 @@ function NewsScreen({ active }: { active: boolean }) {
     const current = ++requestId.current;
     if (!active) { setLoading(false); return () => { ++requestId.current; }; }
     const cached = mobileNewsCache.peek(company.id);
-    setAnalysis(cached); setError('');
+    setAnalysis(cached); setError(''); setShowUnrelated(false);
     if (!API_URL || cached) { setLoading(false); return () => { ++requestId.current; }; }
     setLoading(true);
     void (async () => {
@@ -312,8 +314,42 @@ function NewsScreen({ active }: { active: boolean }) {
     return () => { ++requestId.current; };
   }, [company.id, retry, active]);
   const sentimentLabels = { positive: '긍정', negative: '부정', neutral: '중립', unclassified: '미분류' };
-  const unavailable = analysis && ['not_configured', 'error', 'rate_limited'].includes(analysis.status);
-  const marketaux = /marketaux/i.test(`${analysis?.provider ?? ''} ${analysis?.message ?? ''}`);
+  // Agreed AI labels keep their direction; one model's view is provisional and never aggregated.
+  const articleLabel = (article: NewsArticle) => {
+    if (article.aiRelevance === 'unrelated') return '관련성 낮음';
+    if (article.aiConsensus === 'confirmed') return `${sentimentLabels[article.sentiment]} · AI 합의`;
+    if (article.aiConsensus === 'withheld') return '판단 유보';
+    const only = article.aiConsensus === 'provisional' ? article.aiJudgements?.[0] : undefined;
+    if (article.aiConsensus === 'provisional') return only?.relevant && only.sentiment !== 'uncertain' ? `${sentimentLabels[only.sentiment]} · 잠정` : '관련성 확인 대기';
+    return sentimentLabels[article.sentiment];
+  };
+  const aiLabels = { ok: '정상', idle: '새 판단 없음', not_configured: '미설정', rate_limited: '한도 도달', error: '응답 없음', timeout: '시간 초과' } as const;
+  // A failed refresh shows the last successful result of this app session, labelled as old.
+  const failed = !!error || analysis?.status === 'error' || analysis?.status === 'rate_limited';
+  const fallback = failed ? mobileNewsCache.peekLastGood(company.id) : null;
+  const shown = fallback ?? analysis;
+  const stale = !!fallback || shown?.servedFrom === 'stale';
+  const staleReason = fallback ? error || analysis?.message : shown?.message;
+  const unavailable = shown && ['not_configured', 'error', 'rate_limited'].includes(shown.status);
+  const marketaux = /marketaux/i.test(`${shown?.provider ?? ''} ${shown?.message ?? ''}`);
+  // Articles both models judged unrelated are folded away and never counted.
+  const related = shown?.articles.filter(article => article.aiRelevance !== 'unrelated') ?? [];
+  const unrelated = shown?.articles.filter(article => article.aiRelevance === 'unrelated') ?? [];
+  const articleCard = (article: NewsArticle) => <Pressable key={article.id} accessibilityRole="link" accessibilityLabel={`${article.title}, 원문 열기`}
+                onPress={() => void openArticle(article.url)} style={styles.article}>
+                <View style={styles.rowBetween}><Text style={styles.articleSource}>{article.source}</Text><Text style={styles.sentiment}>{articleLabel(article)}</Text></View>
+                <Text style={styles.articleTitle}>{article.title} ↗</Text>
+                <Text style={[styles.tiny, styles.blackText]}>핵심 요약{article.summary ? ` · AI 요약(${article.summary.basis === 'title_only' ? '제목만 기준, 본문 미확인' : '제목·설명 기준'})` : article.description ? ' · 매체 설명(원문)' : ''}</Text>
+                <Text numberOfLines={3} style={styles.bodyMuted}>{article.summary?.text ?? article.description ?? '요약 정보 없음 — 원문에서 확인하세요.'}</Text>
+                {article.rationaleLines ? <>
+                  <Text style={[styles.tiny, styles.blackText]}>분류 근거</Text>
+                  {article.rationaleLines.slice(0, 5).map((line, index) => <Text key={index} style={styles.bodyMuted}>{index + 1}. {line}</Text>)}
+                </> : <Text style={styles.bodyMuted}>{article.rationale}</Text>}
+                <Text style={[styles.tiny, styles.blackText]}>{article.timeKind === 'seen' ? `${article.sourceProvider ?? '수집기'} 확인` : '게시'}: {formatNewsTime(article.publishedAt)}{article.language ? ` · 원문 언어: ${newsLanguageLabel(article.language)}` : ''}</Text>
+                {!article.rationaleLines && article.classificationMethod === 'provider' ? <Text style={[styles.tiny, styles.blackText]}>{shown?.provider || '뉴스 제공자'} 제공자 분류{article.sentimentScore !== undefined ? ` · 기사 감성 점수 ${String(article.sentimentScore)} (−1~1)` : ''} · 주가 상승 확률이 아닙니다.</Text> : null}
+                {!article.rationaleLines && article.classificationMethod === 'unavailable' ? <Text style={[styles.tiny, styles.blackText]}>제공자 감성 점수가 없어 분류하지 않았습니다.</Text> : null}
+                {!article.rationaleLines && article.providerEntity ? <Text style={[styles.tiny, styles.blackText]}>제공자 기업 식별: {article.providerEntity.name} · {article.providerEntity.symbol} · {article.providerEntity.exchange || '거래소 정보 미제공'} · {article.providerEntity.country.toUpperCase()}</Text> : null}
+              </Pressable>;
   return <ScrollView contentContainerStyle={[styles.content, width > 700 && styles.tabletContent]} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
     <View style={styles.eyebrow}><View style={styles.greenDot} /><Text style={styles.eyebrowText}>뉴스의 맥락을 읽다</Text></View>
     <Text style={styles.pageTitle}>기업의 소식,{ '\n' }차분하게 살펴보기</Text>
@@ -336,44 +372,49 @@ function NewsScreen({ active }: { active: boolean }) {
           <Text style={styles.emptyDescription}>뉴스용 백엔드 주소가 아직 없습니다. 앱의 EXPO_PUBLIC_API_URL을 설정하고 다시 실행하면 서버의 연동 상태를 확인할 수 있습니다.</Text>
           <Text style={styles.fieldHint}>계산기는 별도 연결 없이 사용할 수 있습니다.</Text>
         </View>
-          : error ? <View style={styles.emptyState} accessibilityRole="alert"><Text style={styles.emptyIcon}>!</Text><Text style={styles.emptyTitle}>연결을 확인해 주세요</Text><Text style={styles.emptyDescription}>{error}</Text>
+          : error && !fallback ? <View style={styles.emptyState} accessibilityRole="alert"><Text style={styles.emptyIcon}>!</Text><Text style={styles.emptyTitle}>연결을 확인해 주세요</Text><Text style={styles.emptyDescription}>{error}</Text>
             <Pressable accessibilityRole="button" onPress={() => setRetry(value => value + 1)} style={styles.primaryButton}><Text style={styles.primaryButtonText}>다시 시도</Text></Pressable>
           </View>
-            : analysis ? <>
+            : shown ? <>
+              {stale ? <View style={styles.staleBanner} accessibilityRole="summary"><Text style={styles.staleTitle}>이전 결과</Text>
+                <Text style={styles.bodyMuted}>새 기사를 불러오지 못해 {formatNewsTime(shown.asOf)} 기준 결과를 보여드립니다.{staleReason ? ` ${staleReason}` : ''}</Text></View> : null}
               <View style={[styles.analysisStatus, unavailable && styles.analysisUnavailable]}>
-                <Text style={styles.analysisStatusTitle}>{analysis.status === 'not_configured' ? '뉴스 제공자 연동 대기' : analysis.status === 'error' ? '뉴스 요청 실패' : analysis.status === 'rate_limited' ? '호출 제한 · 잠시 후 재시도' : analysis.status === 'insufficient' ? '근거 부족 · 판단 유보' : '뉴스 기반 참고 정보'}</Text>
-                <Text style={styles.analysisSummary}>{analysis.summary}</Text>
-                {analysis.message ? <Text style={styles.bodyMuted}>{analysis.message}</Text> : null}
-                {analysis.retryAt ? <Text style={styles.bodyMuted}>다시 요청 가능한 시각: {formatNewsTime(analysis.retryAt)}</Text> : null}
+                <Text style={styles.analysisStatusTitle}>{shown.status === 'not_configured' ? '뉴스 제공자 연동 대기' : shown.status === 'error' ? '뉴스 요청 실패' : shown.status === 'rate_limited' ? '호출 제한 · 잠시 후 재시도' : shown.status === 'insufficient' ? '근거 부족 · 판단 유보' : '뉴스 기반 참고 정보'}</Text>
+                <Text style={styles.analysisSummary}>{shown.summary}</Text>
+                {shown.message && !stale ? <Text style={styles.bodyMuted}>{shown.message}</Text> : null}
+                {shown.retryAt ? <Text style={styles.bodyMuted}>다시 요청 가능한 시각: {formatNewsTime(shown.retryAt)}</Text> : null}
               </View>
-              {analysis.status === 'not_configured' && <View style={styles.metadata}>
+              {shown.status === 'not_configured' && <View style={styles.metadata}>
                 <Text style={styles.bodyMuted}>프로젝트 루트 .env에 NEWS_PROVIDER=marketaux와 서버 전용 MARKETAUX_API_TOKEN을 설정하고 API 서버를 재시작하세요. 키는 앱이나 브라우저에 입력하지 않습니다. 기존 게이트웨이 설정은 서버 README를 확인하세요.</Text>
                 <Pressable accessibilityRole="link" onPress={() => void openArticle('https://www.marketaux.com/')} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Marketaux 계정 안내 열기 ↗</Text></Pressable>
               </View>}
-              {marketaux && <Text style={[styles.bodyMuted, styles.secondaryText]}>Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 원문 언어를 제한하지 않아 해외 기사가 포함될 수 있으며, 기사 부족·상충 시 판단을 유보합니다.</Text>}
-              <View style={styles.metadata}><Text style={styles.tiny}>데이터 기준: {formatNewsTime(analysis.asOf)}</Text>
-                {analysis.newsWindow ? <Text style={styles.tiny}>뉴스 수집 기간: {formatNewsTime(analysis.newsWindow.start)} ~ {formatNewsTime(analysis.newsWindow.end)}</Text> : null}
-                <Text style={styles.tiny}>다음 주 참고 기간: {analysis.period.start} ~ {analysis.period.end}</Text>
-                {analysis.cachedUntil ? <Text style={styles.tiny}>서버 캐시 만료: {formatNewsTime(analysis.cachedUntil)} · 그전에는 저장된 결과를 다시 보여줄 수 있습니다.</Text> : null}
-                <Text style={styles.tiny}>근거 수준: {({ none: '없음', low: '낮음', moderate: '보통' })[analysis.evidence]} · 뉴스 {analysis.articles.length}건</Text>
+              {marketaux && <Text style={[styles.bodyMuted, styles.secondaryText]}>Marketaux 무료 연동은 요청당 최대 3개 기사를 확인합니다. 최근 7일의 영어·한국어 기사 중 이 회사와 가장 강하게 연결된 기사를 고르며, 기사 부족·상충 시 판단을 유보합니다.</Text>}
+              <View style={styles.metadata}><Text style={styles.tiny}>데이터 기준: {formatNewsTime(shown.asOf)}</Text>
+                {shown.newsWindow ? <Text style={styles.tiny}>뉴스 수집 기간: {formatNewsTime(shown.newsWindow.start)} ~ {formatNewsTime(shown.newsWindow.end)}</Text> : null}
+                <Text style={styles.tiny}>다음 주 참고 기간: {shown.period.start} ~ {shown.period.end}</Text>
+                {shown.cachedUntil ? <Text style={styles.tiny}>서버 캐시 만료: {formatNewsTime(shown.cachedUntil)} · 그전에는 저장된 결과를 다시 보여줄 수 있습니다.</Text> : null}
+                <Text style={styles.tiny}>근거 수준: {({ none: '없음', low: '낮음', moderate: '보통' })[shown.evidence]} · 뉴스 {related.length}건{unrelated.length ? ` · 관련성 낮음 ${unrelated.length}건` : ''}</Text>
                 <Text style={styles.tiny}>근거 수준은 최근 7일의 기사 수와 상충 여부를 기준으로 하며, 예측 정확도가 아닙니다.</Text>
-                <Text style={styles.tiny}>제공자: {analysis.provider ?? '미설정'} · 분석 버전 {analysis.analysisVersion}</Text>
+                <Text style={styles.tiny}>제공자: {shown.provider ?? '미설정'} · 분석 버전 {shown.analysisVersion}</Text>
+                {shown.sources ? <Text style={styles.tiny}>출처 상태: {shown.sources.map(source => `${source.label} ${({ ok: `정상 ${source.articleCount}건`, empty: '기사 없음', skipped: '예약 수집 때만 조회', not_configured: '미설정', rate_limited: '호출 제한', error: '실패' })[source.status]}`).join(' · ')}</Text> : null}
+                {shown.ai ? <Text style={styles.tiny}>AI 판단: {shown.ai.providers.map(model => `${model.label} ${aiLabels[model.status]}${model.status === 'ok' ? ` ${model.judgedCount}건` : ''}`).join(' · ')}{shown.ai.unrelatedCount > 0 ? ` · 관련성 낮은 기사 ${shown.ai.unrelatedCount}건은 목록 아래에 접어 둠` : ''}</Text> : null}
+                {shown.articles.some(article => article.sourceProvider === 'GDELT') ? <Text style={styles.tiny}>일부 기사 목록은 GDELT Project(gdeltproject.org) 검색 결과이며, GDELT 시각은 기사를 처음 확인한 시각입니다.</Text> : null}
+                {shown.articles.some(article => article.summary || article.aiJudgements) ? <Text style={styles.tiny}>일부 요약·분류는 AI(Gemini·Cloudflare Workers AI)가 기사 제목과 매체 설명만 보고 생성했으며 틀릴 수 있습니다.</Text> : null}
               </View>
-              {analysis.articles.length === 0 && <Text style={styles.noResults}>표시할 실제 뉴스가 없습니다. 설정되지 않은 데이터나 예시 기사는 표시하지 않습니다.</Text>}
-              {analysis.articles.some(article => article.sentiment === 'unclassified') && <Text style={styles.bodyMuted}>미분류 기사는 긍정·부정 요인 집계에서 제외합니다.</Text>}
-              {analysis.articles.map(article => <Pressable key={article.id} accessibilityRole="link" accessibilityLabel={`${article.title}, 원문 열기`}
-                onPress={() => void openArticle(article.url)} style={styles.article}>
-                <View style={styles.rowBetween}><Text style={styles.articleSource}>{article.source}</Text><Text style={styles.sentiment}>{sentimentLabels[article.sentiment]}</Text></View>
-                <Text style={styles.articleTitle}>{article.title} ↗</Text>
-                <Text style={styles.bodyMuted}>{article.rationale}</Text>
-                <Text style={[styles.tiny, styles.blackText]}>게시: {formatNewsTime(article.publishedAt)}{article.language ? ` · 원문 언어: ${newsLanguageLabel(article.language)}` : ''}</Text>
-                {article.classificationMethod === 'provider' ? <Text style={[styles.tiny, styles.blackText]}>{analysis.provider || '뉴스 제공자'} 제공자 분류{article.sentimentScore !== undefined ? ` · 기사 감성 점수 ${String(article.sentimentScore)} (−1~1)` : ''} · 주가 상승 확률이 아닙니다.</Text> : null}
-                {article.classificationMethod === 'unavailable' ? <Text style={[styles.tiny, styles.blackText]}>제공자 감성 점수가 없어 분류하지 않았습니다.</Text> : null}
-                {article.providerEntity ? <Text style={[styles.tiny, styles.blackText]}>제공자 기업 식별: {article.providerEntity.name} · {article.providerEntity.symbol} · {article.providerEntity.exchange || '거래소 정보 미제공'} · {article.providerEntity.country.toUpperCase()}</Text> : null}
-              </Pressable>)}
-              {[['긍정 요인', analysis.positiveFactors], ['부정 요인', analysis.negativeFactors], ['전망이 빗나갈 수 있는 이유', analysis.risks]].map(([title, factors]) =>
+              {related.length === 0 && <Text style={styles.noResults}>{unrelated.length ? '이 회사와 관련성이 높은 기사가 없습니다.' : '표시할 실제 뉴스가 없습니다. 설정되지 않은 데이터나 예시 기사는 표시하지 않습니다.'}</Text>}
+              {related.some(article => article.sentiment === 'unclassified') && <Text style={styles.bodyMuted}>{shown.ai ? '미분류·잠정·판단 유보 기사는 긍정·부정 요인 집계에서 제외합니다.' : '미분류 기사는 긍정·부정 요인 집계에서 제외합니다.'}</Text>}
+              {related.map(articleCard)}
+              {unrelated.length > 0 && <>
+                <Text style={styles.bodyMuted}>두 AI가 모두 이 회사 기사가 아니라고 판단한 기사 {unrelated.length}건은 요인 집계에서 뺐습니다.</Text>
+                <Pressable accessibilityRole="button" accessibilityState={{ expanded: showUnrelated }} onPress={() => setShowUnrelated(value => !value)} style={styles.secondaryButton}>
+                  <Text style={styles.secondaryButtonText}>{showUnrelated ? '관련성 낮은 기사 접기' : `관련성 낮은 기사 ${unrelated.length}건 보기`}</Text>
+                </Pressable>
+                {showUnrelated ? unrelated.map(articleCard) : null}
+              </>}
+              {[['긍정 요인', shown.positiveFactors], ['부정 요인', shown.negativeFactors], ['전망이 빗나갈 수 있는 이유', shown.risks]].map(([title, factors]) =>
                 (factors as string[]).length > 0 && <View key={title as string} style={styles.factorSection}><Text style={styles.factorTitle}>{title as string}</Text>
                   {(factors as string[]).map((factor, index) => <Text key={index} style={styles.bodyMuted}>• {factor}</Text>)}</View>)}
+              {shown.factorSummary ? <Text style={styles.tiny}>{[...shown.factorSummary.chips, shown.factorSummary.note].join(' · ')}</Text> : null}
               <Pressable accessibilityRole="button" accessibilityState={{ disabled: loading || retryDelayed }} disabled={loading || retryDelayed} onPress={() => setRetry(value => value + 1)} style={[styles.secondaryButton, (loading || retryDelayed) && styles.pressed]}><Text style={styles.secondaryButtonText}>연동 상태 새로고침</Text></Pressable>
             </> : null}
     </View>
@@ -445,6 +486,8 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 18, fontWeight: '700', color: '#21352e' }, stepLabel: { fontSize: 10, letterSpacing: 1.1, color: '#788b81', fontWeight: '700' },
   bodyMuted: { fontSize: 12, color: '#111111', lineHeight: 21 }, tiny: { fontSize: 10, color: '#68717a', lineHeight: 18 },
   blackText: { color: '#111111' }, secondaryText: { color: '#68717a' },
+  staleBanner: { backgroundColor: '#fff8e6', borderColor: '#ecd9a8', borderWidth: 1, borderRadius: 10, padding: 12, gap: 4 },
+  staleTitle: { fontSize: 13, fontWeight: '700', color: '#7a5a12' },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginVertical: 5 }, chip: { paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, backgroundColor: '#f4f6f4', minHeight: 42, justifyContent: 'center', borderWidth: 1, borderColor: '#edf0ec' },
   chipSelected: { backgroundColor: '#eaf5ee', borderColor: '#afd3bf' }, chipText: { fontSize: 12, color: '#69796e', fontWeight: '600' }, chipTextSelected: { color: '#246244' },
   field: { marginTop: 7, gap: 7 }, fieldLabel: { fontSize: 13, fontWeight: '600', color: '#43584c' },

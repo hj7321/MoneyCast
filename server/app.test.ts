@@ -44,7 +44,7 @@ test('Marketaux metadata flows through the HTTP API with no token exposure and c
         exchange: null, exchange_long: null, sentiment_score: score }],
     })) }), { headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
-  const provider = createNewsProvider({ NEWS_PROVIDER: 'marketaux', MARKETAUX_API_TOKEN: token }, upstream);
+  const provider = createNewsProvider({ NEWS_PROVIDER: 'marketaux', NEWS_SOURCES: 'marketaux', MARKETAUX_API_TOKEN: token }, upstream);
   const app = createApp(createNewsService(provider, () => now), { staticDirectory: null });
   app.listen(0, '127.0.0.1');
   await once(app, 'listening');
@@ -71,7 +71,7 @@ test('Marketaux HTTP authentication and quota failures return safe empty states'
   const now = new Date('2026-10-27T00:00:00.000Z');
   for (const [upstreamStatus, expected] of [[401, 'error'], [403, 'error'], [402, 'rate_limited'], [429, 'rate_limited']] as const) {
     const token = 'only-a-fixture-secret-never-real';
-    const provider = createNewsProvider({ NEWS_PROVIDER: 'marketaux', MARKETAUX_API_TOKEN: token },
+    const provider = createNewsProvider({ NEWS_PROVIDER: 'marketaux', NEWS_SOURCES: 'marketaux', MARKETAUX_API_TOKEN: token },
       (async () => new Response(`private error with ${token}`, { status: upstreamStatus, headers: { 'retry-after': '600' } })) as typeof fetch);
     const app = createApp(createNewsService(provider, () => now), { staticDirectory: null });
     app.listen(0, '127.0.0.1');
@@ -161,4 +161,90 @@ test('serverless entry handles public and rewritten API URLs without a listening
   }
   const method = await fetch(`${base}/api/index?__moneycast_route=health`, { method: 'POST' });
   assert.equal(method.status, 405);
+});
+
+test('on demand only Marketaux is asked; the scheduled refresh adds GDELT and later reads serve it', async t => {
+  const now = new Date('2026-10-27T00:00:00.000Z');
+  const token = 'only-a-fixture-token-never-real';
+  const hosts: string[] = [];
+  const upstream = (async (input: Parameters<typeof fetch>[0]) => {
+    const url = new URL(String(input));
+    hosts.push(url.host);
+    if (url.host === 'api.marketaux.com') return new Response('quota', { status: 402 });
+    return new Response(JSON.stringify({ articles: [{ url: 'https://news.example/apple-1', title: 'Apple 테스트 기사', seendate: '20261026T010000Z',
+      domain: 'news.example', language: 'English' }] }), { headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const service = createNewsService(createNewsProvider({ MARKETAUX_API_TOKEN: token }, upstream), () => now);
+  const app = createApp(service, { staticDirectory: null, clock: () => now.getTime() });
+  app.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+  t.after(() => { app.closeAllConnections(); app.close(); });
+  const endpoint = `http://127.0.0.1:${(app.address() as AddressInfo).port}/api/news?companyId=nasdaq%3AAAPL`;
+  // GDELT is slow and throttles, so a reader's request never waits for it.
+  const first: unknown = await (await fetch(endpoint)).json();
+  assert.ok(isNewsAnalysis(first, 'nasdaq:AAPL'));
+  assert.deepEqual(hosts, ['api.marketaux.com']);
+  assert.equal(first.status, 'rate_limited');
+  assert.deepEqual(first.sources?.map(source => [source.id, source.status]), [['marketaux', 'rate_limited'], ['gdelt', 'skipped']]);
+  await service.refresh(companies.find(company => company.id === 'nasdaq:AAPL')!);
+  assert.deepEqual(hosts, ['api.marketaux.com', 'api.gdeltproject.org']);
+  const response = await fetch(endpoint);
+  const result: unknown = await response.json();
+  assert.ok(isNewsAnalysis(result, 'nasdaq:AAPL'));
+  assert.equal(result.status, 'insufficient');
+  assert.equal(result.provider, 'GDELT');
+  assert.deepEqual(result.articles.map(article => [article.sourceProvider, article.sentiment]), [['GDELT', 'unclassified']]);
+  assert.deepEqual(result.sources?.map(source => [source.id, source.status]), [['marketaux', 'rate_limited'], ['gdelt', 'ok']]);
+  assert.equal(result.cachedUntil, '2026-10-27T00:30:00.000Z');
+  assert.equal(response.headers.get('vercel-cdn-cache-control'), 'public, s-maxage=1800');
+  assert.ok(!JSON.stringify([first, result]).includes(token));
+});
+
+test('stale fallbacks are never cached by the CDN', async () => {
+  const now = Date.parse('2026-10-28T00:00:00.000Z');
+  const analysis = await createNewsService({ name: 'Test', cacheTtlMs: 21600000,
+    getArticles: async () => ({ provider: 'Test', articles: [] }),
+  }, () => new Date(now)).getAnalysis(companies[0]!);
+  assert.equal(newsCdnCacheControl({ ...analysis, servedFrom: 'stale' }, now), 'no-store');
+});
+
+test('scheduled collection needs the cron secret, refreshes every company and is never cached', async t => {
+  const calls: string[] = [];
+  const service = createNewsService({ name: 'Test', cacheTtlMs: 21600000, async getArticles(company) {
+    calls.push(company.id);
+    return { provider: 'Test', articles: [] };
+  } });
+  const secret = 'fixture-cron-secret-never-real';
+  const servers = [
+    createApp(service, { staticDirectory: null, env: {} }),
+    createApp(service, { staticDirectory: null, env: { CRON_SECRET: secret } }),
+    createServer(createApiHandler(service, { CRON_SECRET: secret })),
+  ];
+  const bases: string[] = [];
+  for (const server of servers) {
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    bases.push(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+  }
+  const [unconfigured, configured, serverless] = bases as [string, string, string];
+  const disabled = await fetch(`${unconfigured}/api/cron/collect`, { headers: { authorization: `Bearer ${secret}` } });
+  assert.equal(disabled.status, 503);
+  for (const authorization of [undefined, 'Bearer wrong', `Bearer ${secret.replace(/.$/, 'x')}`, secret, `bearer ${secret}`]) {
+    const response = await fetch(`${configured}/api/cron/collect`, authorization ? { headers: { authorization } } : {});
+    assert.equal(response.status, 401, authorization ?? 'missing');
+    assert.ok(!JSON.stringify(await response.json()).includes(secret));
+  }
+  assert.deepEqual(calls, []);
+  const ran = await fetch(`${configured}/api/cron/collect`, { headers: { authorization: `Bearer ${secret}` } });
+  assert.equal(ran.status, 200);
+  assert.equal(ran.headers.get('cache-control'), 'no-store');
+  assert.equal(ran.headers.get('vercel-cdn-cache-control'), 'no-store');
+  assert.deepEqual(await ran.json(), { refreshed: companies.map(item => item.id), failed: [], skipped: [] });
+  assert.deepEqual(calls, companies.map(item => item.id));
+  const rewritten = await fetch(`${serverless}/api/index?__moneycast_route=cron/collect`, { headers: { authorization: `Bearer ${secret}` } });
+  assert.equal(rewritten.status, 200);
+  assert.equal(calls.length, companies.length * 2);
+  const post = await fetch(`${configured}/api/cron/collect`, { method: 'POST', headers: { authorization: `Bearer ${secret}` } });
+  assert.equal(post.status, 405);
 });

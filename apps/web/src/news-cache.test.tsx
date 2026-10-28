@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { companies, createNewsCache, NEWS_CACHE_TTL_MS, type NewsAnalysis, type NewsCacheStorage } from '@moneycast/core';
+import { companies, createNewsCache, NEWS_CACHE_ANALYSIS_VERSION, NEWS_CACHE_TTL_MS, NEWS_LAST_GOOD_MAX_AGE_MS, type NewsAnalysis, type NewsCacheStorage } from '@moneycast/core';
 
 const company = companies[0]!;
 const beginning = Date.parse('2026-10-28T00:00:00.000Z');
@@ -9,7 +9,7 @@ function fixture(instant = beginning): NewsAnalysis {
     company, status: 'insufficient', articles: [], asOf: new Date(instant).toISOString(),
     period: { start: '2026-11-02', end: '2026-11-06' }, evidence: 'none',
     summary: '테스트 전용: 기사가 없어 판단을 유보합니다.', positiveFactors: [], negativeFactors: [], risks: [],
-    provider: 'Marketaux', analysisVersion: 'news-evidence-v2',
+    provider: 'Marketaux', analysisVersion: NEWS_CACHE_ANALYSIS_VERSION,
     cachedUntil: new Date(instant + NEWS_CACHE_TTL_MS).toISOString(),
   };
 }
@@ -155,4 +155,29 @@ test('unknown companies and malformed responses cannot become cached records', a
   await assert.rejects(cache.getAnalysis(company.id), /응답 형식/);
   await assert.rejects(cache.getAnalysis(company.id), /응답 형식/);
   assert.equal(requests, 2);
+});
+
+test('the last successful result outlives its freshness for display only, never stale copies or old versions', async () => {
+  const { store, entries } = storage();
+  let instant = beginning;
+  let next: unknown = fixture();
+  const cache = createNewsCache({ storage: () => store, clock: () => instant, load: async () => next });
+  await cache.getAnalysis(company.id);
+  instant += NEWS_CACHE_TTL_MS + 1;
+  assert.equal(cache.peek(company.id), null);
+  assert.equal(cache.peekLastGood(company.id)?.asOf, fixture().asOf);
+  // A reloaded page finds it in storage; a server-side stale copy does not replace it.
+  next = { ...fixture(instant), servedFrom: 'stale', cachedUntil: new Date(instant + 5000).toISOString() };
+  const reloaded = createNewsCache({ storage: () => store, clock: () => instant, load: async () => next });
+  await reloaded.getAnalysis(company.id);
+  assert.equal(reloaded.peekLastGood(company.id)?.asOf, fixture().asOf);
+  next = { ...fixture(instant), status: 'error' };
+  await reloaded.getAnalysis(company.id);
+  assert.equal(reloaded.peekLastGood(company.id)?.asOf, fixture().asOf);
+  instant = beginning + NEWS_LAST_GOOD_MAX_AGE_MS + 1;
+  assert.equal(createNewsCache({ storage: () => store, clock: () => instant, load: async () => next }).peekLastGood(company.id), null);
+  assert.equal([...entries.keys()].some(key => key.includes('.last.')), false);
+  const memoryOnly = createNewsCache({ clock: () => beginning, load: async () => fixture() });
+  await memoryOnly.getAnalysis(company.id);
+  assert.equal(memoryOnly.peekLastGood(company.id)?.status, 'insufficient');
 });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { companies, isNewsAnalysis, NEWS_CACHE_TTL_MS, type NewsArticle } from '@moneycast/core';
-import { createNewsService, nextAnalysisWeek } from './service.js';
+import { createNewsService, nextAnalysisWeek, ON_DEMAND_SOURCE_MS, SCHEDULED_SOURCE_MS, STALE_RESULT_LIMIT_MS } from './service.js';
 import { ProviderError, type NewsProvider } from './provider.js';
 
 const company = companies[0]!;
@@ -39,9 +39,14 @@ test('sufficient fresh news yields a qualified summary and traceable source/time
   assert.equal(result.evidence, 'moderate');
   assert.match(result.summary, /불확실/);
   assert.equal(result.asOf, now.toISOString());
-  assert.equal(result.analysisVersion, 'news-evidence-v2');
+  assert.equal(result.analysisVersion, 'news-evidence-v3');
   assert.equal(result.provider, 'Test');
-  assert.equal(result.positiveFactors.length, 3);
+  // Three same-source articles on one topic become one sentence citing all three (ties by ID).
+  assert.equal(result.positiveFactors.length, 1);
+  assert.deepEqual(result.factorSummary?.positive.lines[0]?.articleIds, ['1', '2', '3']);
+  assert.match(result.positiveFactors[0]!, /3건이 긍정으로 분류됐지만 모두 같은 출처\(Test\)/);
+  assert.ok(result.factorSummary?.positive.chips.includes('단일 출처'));
+  assert.equal(result.factorSummary?.negative.state, 'none');
   assert.ok(result.risks.length >= 3);
 });
 
@@ -76,14 +81,15 @@ test('unclassified articles remain visible but do not satisfy the classified evi
   assert.equal(result.status, 'insufficient');
   assert.equal(result.evidence, 'low');
   assert.equal(result.articles.length, 3);
-  assert.equal(result.positiveFactors.length, 2);
+  assert.deepEqual(result.factorSummary?.positive.lines.map(line => line.articleIds), [['1', '2']]);
+  assert.ok(result.factorSummary?.chips.includes('감성 점수 없는 기사 1건은 방향 집계 제외'));
   assert.match(result.summary, /분류 미확인/);
   assert.match(result.summary, /분류된 기사 2건/);
   assert.ok(result.risks.some(risk => /분류 미확인 기사 1건.*포함하지/.test(risk)));
   assert.equal(isNewsAnalysis(result, company.id), true);
   const sufficient = await serviceWith([article('1'), article('2'), article('3', 'neutral'), article('4', 'unclassified')]).getAnalysis(company);
   assert.equal(sufficient.status, 'ready');
-  assert.equal(sufficient.positiveFactors.length, 2);
+  assert.deepEqual(sufficient.factorSummary?.positive.lines[0]?.articleIds, ['1', '2']);
 });
 
 test('evidence uses the exact reported news window rather than counting future or older articles', async () => {
@@ -94,7 +100,7 @@ test('evidence uses the exact reported news window rather than counting future o
     article('future', 'negative', '2026-10-27T00:00:00.001Z'),
   ]).getAnalysis(company);
   assert.equal(result.status, 'insufficient');
-  assert.equal(result.positiveFactors.length, 2);
+  assert.deepEqual(result.factorSummary?.positive.lines[0]?.articleIds, ['end', 'start']);
   assert.equal(result.negativeFactors.length, 0);
   assert.match(result.summary, /3건 미만/);
 });
@@ -245,4 +251,75 @@ test('a six-hour provider TTL does not trap missing keys or rate limits for six 
   } }, () => now).getAnalysis(company);
   assert.equal(limited.retryAt, '2026-10-27T00:15:00.000Z');
   assert.equal(limited.cachedUntil, limited.retryAt);
+});
+
+test('partial results keep per-source states and refresh sooner than complete results', async () => {
+  const sources = [
+    { id: 'marketaux', label: 'Marketaux', status: 'rate_limited' as const, articleCount: 0, retryAt: '2026-10-27T00:15:00.000Z' },
+    { id: 'gdelt', label: 'GDELT', status: 'ok' as const, articleCount: 1 },
+  ];
+  const partial = await createNewsService({ name: 'Marketaux · GDELT', cacheTtlMs: NEWS_CACHE_TTL_MS,
+    getArticles: async () => ({ provider: 'GDELT', articles: [article('g1', 'unclassified')], sources }),
+  }, () => now).getAnalysis(company);
+  assert.deepEqual(partial.sources, sources);
+  assert.equal(partial.cachedUntil, '2026-10-27T00:30:00.000Z');
+  assert.equal(isNewsAnalysis(partial, company.id), true);
+  const unconfigured = await createNewsService({ name: 'Marketaux · GDELT', cacheTtlMs: NEWS_CACHE_TTL_MS,
+    getArticles: async () => ({ provider: 'GDELT', articles: [], sources: [{ ...sources[0]!, status: 'not_configured' as const }, sources[1]!] }),
+  }, () => now).getAnalysis(company);
+  assert.equal(unconfigured.cachedUntil, '2026-10-27T06:00:00.000Z');
+});
+
+test('when every source fails the last successful result is shown as stale and retried on the failure schedule', async () => {
+  let instant = now;
+  let mode: 'ok' | 'error' | 'rate_limited' | 'not_configured' = 'ok';
+  const service = createNewsService({ name: 'Test', cacheTtlMs: 60000, getArticles: async () => {
+    if (mode === 'ok') return { provider: 'Test', articles: [article('1'), article('2')] };
+    const failure = new ProviderError(mode, undefined, mode === 'rate_limited' ? 600000 : undefined);
+    failure.sources = [{ id: 'test', label: 'Test', status: mode, articleCount: 0 }];
+    throw failure;
+  } }, () => instant);
+  const good = await service.getAnalysis(company);
+  mode = 'error';
+  instant = new Date(now.getTime() + 61000);
+  const stale = await service.getAnalysis(company);
+  assert.equal(stale.servedFrom, 'stale');
+  assert.equal(stale.status, good.status);
+  assert.equal(stale.asOf, good.asOf);
+  assert.deepEqual(stale.articles, good.articles);
+  assert.equal(stale.refreshAttemptedAt, instant.toISOString());
+  assert.equal(stale.cachedUntil, new Date(instant.getTime() + 5000).toISOString());
+  assert.deepEqual(stale.sources?.map(source => source.status), ['error']);
+  assert.ok(stale.message);
+  assert.equal(isNewsAnalysis(stale, company.id), true);
+  mode = 'rate_limited';
+  instant = new Date(instant.getTime() + 5000);
+  const limited = await service.getAnalysis(company);
+  assert.equal(limited.servedFrom, 'stale');
+  assert.equal(limited.retryAt, new Date(instant.getTime() + 600000).toISOString());
+  mode = 'not_configured';
+  instant = new Date(instant.getTime() + 600000);
+  assert.equal((await service.getAnalysis(company)).status, 'not_configured');
+  mode = 'error';
+  instant = new Date(now.getTime() + STALE_RESULT_LIMIT_MS + 1);
+  const expired = await service.getAnalysis(company);
+  assert.equal(expired.status, 'error');
+  assert.equal(expired.servedFrom, undefined);
+});
+
+test('sources get ten seconds on demand and thirty-five seconds during scheduled collection', async () => {
+  const deadlines: Array<number | undefined> = [];
+  const modes: Array<boolean | undefined> = [];
+  const provider = { name: 'Test', cacheTtlMs: 60_000, async getArticles(_company: unknown, _now: Date, options?: { deadline?: number; scheduled?: boolean }) {
+    deadlines.push(options?.deadline);
+    modes.push(options?.scheduled);
+    return { provider: 'Test', articles: [] };
+  } };
+  const at = new Date('2026-10-27T00:00:00Z');
+  const service = createNewsService(provider, () => at);
+  await service.getAnalysis(companies[0]!);
+  await service.refresh(companies[0]!);
+  assert.deepEqual(deadlines, [at.getTime() + ON_DEMAND_SOURCE_MS, at.getTime() + SCHEDULED_SOURCE_MS]);
+  assert.deepEqual(modes, [false, true]);
+  assert.deepEqual([ON_DEMAND_SOURCE_MS, SCHEDULED_SOURCE_MS], [10_000, 35_000]);
 });
