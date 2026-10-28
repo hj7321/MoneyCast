@@ -1,5 +1,5 @@
 import { boundedJson } from './provider.js';
-import { buildPrompt, judgementSchema, LlmError, parseModelJson, type LlmJudge } from './llm.js';
+import { judgeWith, LlmError, parseModelJson, type LlmClient, type LlmJudge } from './llm.js';
 
 const API = 'https://generativelanguage.googleapis.com';
 /** Free-tier model with minimal thinking by default; GEMINI_MODEL overrides it. */
@@ -73,11 +73,11 @@ function candidateText(payload: unknown): string {
  * Gemini API with a server-side key in a header; never in a URL or a response.
  * Failures log only status codes and enum names, never bodies or the key.
  */
-export function createGeminiJudge(
+export function createGeminiClient(
   env: NodeJS.ProcessEnv = process.env,
   fetcher: typeof fetch = globalThis.fetch,
   clock: () => number = Date.now,
-): LlmJudge {
+): LlmClient {
   const key = env.GEMINI_API_KEY?.trim();
   const model = env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
   const configured = !!key && MODEL.test(model);
@@ -88,19 +88,18 @@ export function createGeminiJudge(
       if (!configured) return { code: 'not_configured' };
       return blockedUntil > clock() ? { code: 'rate_limited', retryAt: blockedUntil } : null;
     },
-    async judge(request, signal) {
+    async generate(prompt, signal) {
       if (!configured || !key) throw new LlmError('not_configured');
       if (blockedUntil > clock()) throw new LlmError('rate_limited', blockedUntil - clock());
-      const { system, user } = buildPrompt(request);
       let response: Response;
       try {
         response = await fetcher(new URL(`/v1beta/models/${model}:generateContent`, API), {
           method: 'POST', redirect: 'error', signal,
           headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify({
-            systemInstruction: { parts: [{ text: system }] },
-            contents: [{ role: 'user', parts: [{ text: user }] }],
-            generationConfig: { responseMimeType: 'application/json', responseSchema: toGeminiSchema(judgementSchema(request)), maxOutputTokens: 8192 },
+            systemInstruction: { parts: [{ text: prompt.system }] },
+            contents: [{ role: 'user', parts: [{ text: prompt.user }] }],
+            generationConfig: { responseMimeType: 'application/json', responseSchema: toGeminiSchema(prompt.schema), maxOutputTokens: prompt.maxOutputTokens ?? 8192 },
           }),
         });
       } catch {
@@ -141,4 +140,12 @@ export function createGeminiJudge(
       }
     },
   };
+}
+
+export function createGeminiJudge(
+  env: NodeJS.ProcessEnv = process.env,
+  fetcher: typeof fetch = globalThis.fetch,
+  clock: () => number = Date.now,
+): LlmJudge {
+  return judgeWith(createGeminiClient(env, fetcher, clock));
 }

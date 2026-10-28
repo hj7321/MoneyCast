@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createRequestHandler } from '../server/app.js';
 
 const ROUTE_PARAMETER = '__moneycast_route';
-const ROUTES = new Set(['health', 'companies', 'news', 'cron/collect']);
+const ROUTES = new Set(['health', 'companies', 'news', 'cron/collect', 'goals/clarify']);
 
 /** Shared by the Vercel Node runtime and HTTP integration tests; never listens. */
 export function createApiHandler(service?: Parameters<typeof createRequestHandler>[0], env?: NodeJS.ProcessEnv) {

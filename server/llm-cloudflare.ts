@@ -1,5 +1,5 @@
 import { boundedJson } from './provider.js';
-import { buildPrompt, judgementSchema, LlmError, parseModelJson, type LlmJudge } from './llm.js';
+import { judgeWith, LlmError, parseModelJson, type LlmClient, type LlmJudge } from './llm.js';
 
 const API = 'https://api.cloudflare.com';
 /** Low Neuron cost and a different model family from Gemini; CLOUDFLARE_AI_MODEL overrides it. */
@@ -50,11 +50,11 @@ function resultText(payload: unknown): string {
  * Workers AI REST API on the Free plan: over the allocation it fails instead of
  * billing. Failures log only status and error code numbers, never bodies or the token.
  */
-export function createCloudflareJudge(
+export function createCloudflareClient(
   env: NodeJS.ProcessEnv = process.env,
   fetcher: typeof fetch = globalThis.fetch,
   clock: () => number = Date.now,
-): LlmJudge {
+): LlmClient {
   const account = env.CLOUDFLARE_ACCOUNT_ID?.trim();
   const token = env.CLOUDFLARE_API_TOKEN?.trim();
   const model = env.CLOUDFLARE_AI_MODEL?.trim() || DEFAULT_CLOUDFLARE_MODEL;
@@ -66,10 +66,9 @@ export function createCloudflareJudge(
       if (!configured) return { code: 'not_configured' };
       return blockedUntil > clock() ? { code: 'rate_limited', retryAt: blockedUntil } : null;
     },
-    async judge(request, signal) {
+    async generate(prompt, signal) {
       if (!configured || !account || !token) throw new LlmError('not_configured');
       if (blockedUntil > clock()) throw new LlmError('rate_limited', blockedUntil - clock());
-      const { system, user } = buildPrompt(request);
       let response: Response;
       try {
         response = await fetcher(new URL(`/client/v4/accounts/${account}/ai/run/${model}`, API), {
@@ -77,12 +76,12 @@ export function createCloudflareJudge(
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify({
             messages: [
-              { role: 'system', content: system },
+              { role: 'system', content: prompt.system },
               // Qwen3 reasons before answering unless told not to; the answer is short structured data.
-              { role: 'user', content: /^@cf\/qwen\/qwen3/i.test(model) ? `${user}\n/no_think` : user },
+              { role: 'user', content: /^@cf\/qwen\/qwen3/i.test(model) ? `${prompt.user}\n/no_think` : prompt.user },
             ],
-            max_tokens: 4096, temperature: 0,
-            ...(JSON_MODE.has(model) ? { response_format: { type: 'json_schema', json_schema: judgementSchema(request) } } : {}),
+            max_tokens: prompt.maxOutputTokens ?? 4096, temperature: 0,
+            ...(JSON_MODE.has(model) ? { response_format: { type: 'json_schema', json_schema: prompt.schema } } : {}),
           }),
         });
       } catch {
@@ -122,4 +121,12 @@ export function createCloudflareJudge(
       }
     },
   };
+}
+
+export function createCloudflareJudge(
+  env: NodeJS.ProcessEnv = process.env,
+  fetcher: typeof fetch = globalThis.fetch,
+  clock: () => number = Date.now,
+): LlmJudge {
+  return judgeWith(createCloudflareClient(env, fetcher, clock));
 }

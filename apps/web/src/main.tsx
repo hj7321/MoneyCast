@@ -7,4 +7,5 @@ import './readability.css';
 import './navigation.css';
 import './feature-intro.css';
 import './theme.css';
+import './goal-details.css';
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);

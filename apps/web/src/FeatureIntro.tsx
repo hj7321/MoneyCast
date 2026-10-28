@@ -49,7 +49,7 @@ export function FeatureIntro({ feature, onStart, onGuide }: FeatureIntroProps) {
     <div className="fi-transparency"><span className="fi-transparency-icon"><Icon name={calculator ? 'info' : 'shield'} size={24}/></span><div>
       <h3>{calculator ? '계산의 가정도, 처음부터 투명하게.' : '근거가 없을 때는, 없다고 말합니다.'}</h3>
       <p>{calculator
-        ? '월말 납입과 월 복리를 적용하며, 세금·수수료·물가상승률은 반영하지 않습니다. 수익률은 사용자가 입력한 가정이고, 실제 수익을 보장하지 않아요.'
+        ? '월말 납입과 월 복리를 적용하며, 세금·수수료는 반영하지 않습니다. 물가상승은 켠 경우 목표 금액에만 가정으로 반영해요. 수익률은 사용자가 입력한 가정이고, 실제 수익을 보장하지 않아요.'
         : '제공자가 연결되기 전에는 실제 기사나 분석 결과를 만들지 않습니다. 연결 후에도 오래되거나 상충하는 뉴스는 판단 유보로 표시하며, 매수·매도를 지시하지 않아요.'}</p>
     </div></div>
     <div className="fi-guide-row"><p>{calculator ? '숫자가 만들어지는 방식을 알고 싶다면' : '뉴스 출처와 근거 수준을 더 알고 싶다면'}</p><button onClick={onGuide}>계산 및 데이터 안내<Icon name="arrow" size={18}/></button></div>
