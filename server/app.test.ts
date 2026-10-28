@@ -199,3 +199,44 @@ test('stale fallbacks are never cached by the CDN', async () => {
   }, () => new Date(now)).getAnalysis(companies[0]!);
   assert.equal(newsCdnCacheControl({ ...analysis, servedFrom: 'stale' }, now), 'no-store');
 });
+
+test('scheduled collection needs the cron secret, refreshes every company and is never cached', async t => {
+  const calls: string[] = [];
+  const service = createNewsService({ name: 'Test', cacheTtlMs: 21600000, async getArticles(company) {
+    calls.push(company.id);
+    return { provider: 'Test', articles: [] };
+  } });
+  const secret = 'fixture-cron-secret-never-real';
+  const servers = [
+    createApp(service, { staticDirectory: null, env: {} }),
+    createApp(service, { staticDirectory: null, env: { CRON_SECRET: secret } }),
+    createServer(createApiHandler(service, { CRON_SECRET: secret })),
+  ];
+  const bases: string[] = [];
+  for (const server of servers) {
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    bases.push(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+  }
+  const [unconfigured, configured, serverless] = bases as [string, string, string];
+  const disabled = await fetch(`${unconfigured}/api/cron/collect`, { headers: { authorization: `Bearer ${secret}` } });
+  assert.equal(disabled.status, 503);
+  for (const authorization of [undefined, 'Bearer wrong', `Bearer ${secret.replace(/.$/, 'x')}`, secret, `bearer ${secret}`]) {
+    const response = await fetch(`${configured}/api/cron/collect`, authorization ? { headers: { authorization } } : {});
+    assert.equal(response.status, 401, authorization ?? 'missing');
+    assert.ok(!JSON.stringify(await response.json()).includes(secret));
+  }
+  assert.deepEqual(calls, []);
+  const ran = await fetch(`${configured}/api/cron/collect`, { headers: { authorization: `Bearer ${secret}` } });
+  assert.equal(ran.status, 200);
+  assert.equal(ran.headers.get('cache-control'), 'no-store');
+  assert.equal(ran.headers.get('vercel-cdn-cache-control'), 'no-store');
+  assert.deepEqual(await ran.json(), { refreshed: companies.map(item => item.id), failed: [], skipped: [] });
+  assert.deepEqual(calls, companies.map(item => item.id));
+  const rewritten = await fetch(`${serverless}/api/index?__moneycast_route=cron/collect`, { headers: { authorization: `Bearer ${secret}` } });
+  assert.equal(rewritten.status, 200);
+  assert.equal(calls.length, companies.length * 2);
+  const post = await fetch(`${configured}/api/cron/collect`, { method: 'POST', headers: { authorization: `Bearer ${secret}` } });
+  assert.equal(post.status, 405);
+});

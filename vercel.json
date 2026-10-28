@@ -6,8 +6,11 @@
   "outputDirectory": "apps/web/dist",
   "regions": ["icn1"],
   "functions": {
-    "api/index.ts": { "maxDuration": 25 }
+    "api/index.ts": { "maxDuration": 120 }
   },
+  "crons": [
+    { "path": "/api/cron/collect", "schedule": "0 21 * * *" }
+  ],
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/index?__moneycast_route=:path*" }
   ]

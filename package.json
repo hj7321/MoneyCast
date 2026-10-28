@@ -19,7 +19,7 @@
     "start": "tsx server/index.ts",
     "mobile:export": "npm run export --workspace @moneycast/mobile"
   },
-  "dependencies": { "dotenv": "^16.6.1", "react": "19.1.0", "react-dom": "19.1.0" },
+  "dependencies": { "@vercel/blob": "^2.8.2", "dotenv": "^16.6.1", "react": "19.1.0", "react-dom": "19.1.0" },
   "devDependencies": {
     "@testing-library/react": "^16.3.0",
     "@types/node": "^22.15.30",

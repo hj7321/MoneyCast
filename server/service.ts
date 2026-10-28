@@ -1,5 +1,7 @@
-import { NEWS_CACHE_ANALYSIS_VERSION, type Company, type NewsAnalysis } from '../packages/core/src/index.js';
+import { NEWS_CACHE_ANALYSIS_VERSION, type Company, type NewsAnalysis, type NewsArticle } from '../packages/core/src/index.js';
+import { mergeArticles } from './aggregate.js';
 import { ProviderError, type NewsProvider } from './provider.js';
+import { createSnapshot, SNAPSHOT_POOL_LIMIT, type CompanySnapshot, type SnapshotStore } from './snapshot-store.js';
 import { synthesizeFactors } from './synthesis.js';
 
 /** One version string for server results and client caches. */
@@ -26,8 +28,26 @@ const RISKS = [
 export const PARTIAL_RESULT_TTL_MS = 30 * 60_000;
 /** A successful result older than this is no longer offered when every source fails. */
 export const STALE_RESULT_LIMIT_MS = 7 * 86_400_000;
+/** An unchanged snapshot is rewritten at most this often; Blob writes are a monthly allotment. */
+export const SNAPSHOT_REWRITE_MS = 6 * 3_600_000;
 
-export function createNewsService(provider: NewsProvider, clock: () => Date = () => new Date()) {
+function snapshotDigest(analysis: NewsAnalysis, pool: NewsArticle[]): string {
+  return JSON.stringify([analysis.status, analysis.sources?.map(source => [source.id, source.status]) ?? [],
+    pool.map(article => [article.id, article.sentiment, article.classificationMethod ?? null])]);
+}
+
+function isFresh(analysis: NewsAnalysis, now: number): boolean {
+  return (analysis.status === 'ready' || analysis.status === 'insufficient') && analysis.servedFrom !== 'stale' &&
+    !!analysis.cachedUntil && Date.parse(analysis.cachedUntil) > now && Date.parse(analysis.asOf) <= now + 60_000;
+}
+
+export interface NewsServiceOptions {
+  /** Persistent snapshots: pre-collected results, a weekly article pool and a stale fallback. */
+  store?: SnapshotStore | null;
+}
+
+export function createNewsService(provider: NewsProvider, clock: () => Date = () => new Date(), options: NewsServiceOptions = {}) {
+  const store = options.store ?? null;
   const cache = new Map<string, { expiresAt: number; value: NewsAnalysis }>();
   const lastGood = new Map<string, NewsAnalysis>();
   const pending = new Map<string, Promise<NewsAnalysis>>();
@@ -35,7 +55,17 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
   const cacheTtlMs = typeof configuredTtl === 'number' && Number.isFinite(configuredTtl) && configuredTtl > 0
     ? configuredTtl : 60000;
 
-  async function analyze(company: Company): Promise<NewsAnalysis> {
+  async function readSnapshot(companyId: string): Promise<CompanySnapshot | null> {
+    if (!store) return null;
+    try {
+      return await store.read(companyId);
+    } catch {
+      console.warn('News snapshot read failed');
+      return null;
+    }
+  }
+
+  async function analyze(company: Company, snapshot: CompanySnapshot | null): Promise<{ analysis: NewsAnalysis; pool: NewsArticle[] }> {
     const now = clock();
     const base: NewsAnalysis = {
       company, status: 'insufficient', articles: [], asOf: now.toISOString(), period: nextAnalysisWeek(now),
@@ -45,11 +75,13 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
     };
     try {
       const result = await provider.getArticles(company, now);
-      const articles = result.articles;
-      const fresh = articles.filter(article => {
+      const inWindow = (article: NewsArticle) => {
         const publishedAt = Date.parse(article.publishedAt);
         return publishedAt >= now.getTime() - 7 * 86400000 && publishedAt <= now.getTime();
-      });
+      };
+      // Articles from earlier refreshes stay for the rest of their week; current copies win.
+      const articles = snapshot ? mergeArticles([result.articles, snapshot.pool.filter(inWindow)], SNAPSHOT_POOL_LIMIT) : result.articles;
+      const fresh = articles.filter(inWindow);
       const classified = fresh.filter(article => article.sentiment !== 'unclassified');
       const unclassifiedCount = fresh.length - classified.length;
       const positive = classified.filter(article => article.sentiment === 'positive');
@@ -65,7 +97,7 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       else if (positive.length === 0 && negative.length === 0) summary = '분류를 확인한 최근 기사가 모두 중립으로 분류되어 다음 주 방향 판단을 유보합니다.';
       else if (sufficient) summary = `${positive.length > 0 ? '긍정' : '부정'}적으로 분류된 뉴스 요인이 있습니다. 다음 주 주가 방향은 불확실하며, 이 요약은 상승·하락 예측이 아닙니다.`;
       const factors = synthesizeFactors(fresh, now);
-      return {
+      return { pool: fresh.slice(0, SNAPSHOT_POOL_LIMIT), analysis: {
         ...base, provider: result.provider, articles, status: sufficient ? 'ready' : 'insufficient',
         evidence: sufficient ? 'moderate' : fresh.length > 0 ? 'low' : 'none', summary,
         positiveFactors: factors.positiveFactors, negativeFactors: factors.negativeFactors,
@@ -75,14 +107,14 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
           ...base.risks, ...(result.notes ?? []),
           ...(unclassifiedCount > 0 ? [`분류 미확인 기사 ${unclassifiedCount}건은 긍정·부정·중립 집계에 포함하지 않았습니다.`] : []),
         ])],
-      };
+      } };
     } catch (error) {
       const code = error instanceof ProviderError ? error.code : 'error';
       const reason = error instanceof ProviderError ? error.reason : undefined;
       const requestedBackoff = error instanceof ProviderError ? error.retryAfterMs : undefined;
       const backoffMs = typeof requestedBackoff === 'number' && Number.isFinite(requestedBackoff) && requestedBackoff > 0
         ? requestedBackoff : 60000;
-      return {
+      return { pool: [], analysis: {
         ...base, status: code,
         ...(error instanceof ProviderError && error.sources ? { sources: error.sources } : {}),
         ...(code === 'rate_limited' ? { retryAt: new Date(clock().getTime() + backoffMs).toISOString() } : {}),
@@ -97,8 +129,52 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
                 : reason === 'identity_unverified'
                   ? '선택한 회사의 종목·거래소를 뉴스 제공자에서 정확히 확인하지 못했습니다. 다른 회사를 선택하거나 제공자의 기업 식별 정보를 확인해 주세요.'
                   : '뉴스를 불러오지 못했습니다. 제공자 설정과 응답 형식을 확인한 뒤 다시 시도해 주세요.',
-      };
+      } };
     }
+  }
+
+  function remember(company: Company, value: NewsAnalysis) {
+    if (!lastGood.has(company.id) && lastGood.size >= 100) lastGood.delete(lastGood.keys().next().value!);
+    lastGood.set(company.id, value);
+  }
+
+  /** Runs a provider refresh, caches it, saves the snapshot and falls back to the last good result. */
+  async function complete(company: Company, snapshot: CompanySnapshot | null, forceWrite: boolean): Promise<NewsAnalysis> {
+    const { analysis: value, pool } = await analyze(company, snapshot);
+    if (cache.size >= 100 && !cache.has(company.id)) cache.delete(cache.keys().next().value!);
+    const completedAt = clock().getTime();
+    const succeeded = value.status === 'ready' || value.status === 'insufficient';
+    const partial = succeeded && value.sources?.some(source => source.status === 'rate_limited' || source.status === 'error');
+    const lifetime = succeeded ? partial ? Math.min(cacheTtlMs, PARTIAL_RESULT_TTL_MS) : cacheTtlMs
+      : value.status === 'rate_limited' ? 60000 : 5000;
+    const expiresAt = Math.max(completedAt + lifetime,
+      value.status === 'rate_limited' && value.retryAt ? Date.parse(value.retryAt) : 0);
+    let cached: NewsAnalysis = {
+      ...value, cachedUntil: new Date(expiresAt).toISOString(),
+      ...(value.status === 'rate_limited' ? { retryAt: new Date(expiresAt).toISOString() } : {}),
+    };
+    if (succeeded) {
+      remember(company, cached);
+      const changed = !snapshot || snapshotDigest(cached, pool) !== snapshotDigest(snapshot.analysis, snapshot.pool) ||
+        completedAt - Date.parse(snapshot.updatedAt) >= SNAPSHOT_REWRITE_MS;
+      if (store && (forceWrite || changed)) {
+        try { await store.write(createSnapshot(cached, pool, new Date(completedAt))); } catch { console.warn('News snapshot write failed'); }
+      }
+    } else if (value.status === 'error' || value.status === 'rate_limited') {
+      // Every source failed: show the newest successful result, labelled, and retry on the failure's schedule.
+      const candidates = [lastGood.get(company.id), snapshot?.analysis].filter((item): item is NewsAnalysis => !!item);
+      const previous = candidates.sort((a, b) => Date.parse(b.asOf) - Date.parse(a.asOf))[0];
+      if (previous && completedAt - Date.parse(previous.asOf) <= STALE_RESULT_LIMIT_MS) {
+        cached = {
+          ...previous, servedFrom: 'stale', refreshAttemptedAt: value.asOf, cachedUntil: cached.cachedUntil,
+          ...(cached.retryAt ? { retryAt: cached.retryAt } : {}),
+          ...(value.sources ? { sources: value.sources } : {}),
+          ...(value.message ? { message: value.message } : {}),
+        };
+      }
+    }
+    cache.set(company.id, { expiresAt, value: cached });
+    return cached;
   }
 
   return {
@@ -108,38 +184,22 @@ export function createNewsService(provider: NewsProvider, clock: () => Date = ()
       if (existing && existing.expiresAt > now) return existing.value;
       const inflight = pending.get(company.id);
       if (inflight) return inflight;
-      const request = analyze(company).then(value => {
-        if (cache.size >= 100) cache.delete(cache.keys().next().value!);
-        const completedAt = clock().getTime();
-        const succeeded = value.status === 'ready' || value.status === 'insufficient';
-        const partial = succeeded && value.sources?.some(source => source.status === 'rate_limited' || source.status === 'error');
-        const lifetime = succeeded ? partial ? Math.min(cacheTtlMs, PARTIAL_RESULT_TTL_MS) : cacheTtlMs
-          : value.status === 'rate_limited' ? 60000 : 5000;
-        const expiresAt = Math.max(completedAt + lifetime,
-          value.status === 'rate_limited' && value.retryAt ? Date.parse(value.retryAt) : 0);
-        let cached: NewsAnalysis = {
-          ...value, cachedUntil: new Date(expiresAt).toISOString(),
-          ...(value.status === 'rate_limited' ? { retryAt: new Date(expiresAt).toISOString() } : {}),
-        };
-        const previous = lastGood.get(company.id);
-        if (succeeded) {
-          if (lastGood.size >= 100 && !previous) lastGood.delete(lastGood.keys().next().value!);
-          lastGood.set(company.id, cached);
-        } else if ((value.status === 'error' || value.status === 'rate_limited') && previous &&
-            completedAt - Date.parse(previous.asOf) <= STALE_RESULT_LIMIT_MS) {
-          // Every source failed: show the last successful result, labelled, and retry on the failure's schedule.
-          cached = {
-            ...previous, servedFrom: 'stale', refreshAttemptedAt: value.asOf, cachedUntil: cached.cachedUntil,
-            ...(cached.retryAt ? { retryAt: cached.retryAt } : {}),
-            ...(value.sources ? { sources: value.sources } : {}),
-            ...(value.message ? { message: value.message } : {}),
-          };
+      const request = (async () => {
+        const snapshot = await readSnapshot(company.id);
+        if (snapshot && isFresh(snapshot.analysis, clock().getTime())) {
+          // A collected result is still fresh: serve it without calling any provider.
+          cache.set(company.id, { expiresAt: Date.parse(snapshot.analysis.cachedUntil!), value: snapshot.analysis });
+          remember(company, snapshot.analysis);
+          return snapshot.analysis;
         }
-        cache.set(company.id, { expiresAt, value: cached });
-        return cached;
-      }).finally(() => pending.delete(company.id));
+        return complete(company, snapshot, false);
+      })().finally(() => pending.delete(company.id));
       pending.set(company.id, request);
       return request;
+    },
+    /** Scheduled collection: always queries providers and always saves a successful snapshot. */
+    async refresh(company: Company): Promise<NewsAnalysis> {
+      return complete(company, await readSnapshot(company.id), true);
     },
   };
 }
