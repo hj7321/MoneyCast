@@ -37,19 +37,42 @@ function retryDelayMs(payload: unknown): number | undefined {
   return undefined;
 }
 
+/** Google's fixed enum names (status, finish and block reasons) are safe to log; messages are not. */
+function enumName(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Z][A-Z_]{0,39}$/.test(value) ? value : undefined;
+}
+
+function errorStatus(payload: unknown): string | undefined {
+  return isRecord(payload) && isRecord(payload.error) ? enumName(payload.error.status) : undefined;
+}
+
 function candidateText(payload: unknown): string {
   const candidate = isRecord(payload) && Array.isArray(payload.candidates) ? payload.candidates[0] : undefined;
+  if (!isRecord(candidate)) {
+    const blocked = isRecord(payload) && isRecord(payload.promptFeedback) ? enumName(payload.promptFeedback.blockReason) : undefined;
+    console.warn(`Gemini returned no answer${blocked ? ` (blocked: ${blocked})` : ''}`);
+    throw new LlmError('error');
+  }
   // Any stop other than a natural one (length, safety, recitation) can leave the JSON incomplete.
-  if (!isRecord(candidate) || (candidate.finishReason !== undefined && candidate.finishReason !== 'STOP') ||
-      !isRecord(candidate.content) || !Array.isArray(candidate.content.parts)) throw new LlmError('error');
-  const text = candidate.content.parts
+  if (candidate.finishReason !== undefined && candidate.finishReason !== 'STOP') {
+    console.warn(`Gemini answer incomplete: ${enumName(candidate.finishReason) ?? 'unknown finish reason'}`);
+    throw new LlmError('error');
+  }
+  const parts = isRecord(candidate.content) && Array.isArray(candidate.content.parts) ? candidate.content.parts : [];
+  const text = parts
     .filter((part): part is { text: string } => isRecord(part) && typeof part.text === 'string' && part.thought !== true)
     .map(part => part.text).join('');
-  if (!text) throw new LlmError('error');
+  if (!text) {
+    console.warn('Gemini answer had no text');
+    throw new LlmError('error');
+  }
   return text;
 }
 
-/** Gemini API with a server-side key in a header; never in a URL or a response. */
+/**
+ * Gemini API with a server-side key in a header; never in a URL or a response.
+ * Failures log only status codes and enum names, never bodies or the key.
+ */
 export function createGeminiJudge(
   env: NodeJS.ProcessEnv = process.env,
   fetcher: typeof fetch = globalThis.fetch,
@@ -81,21 +104,37 @@ export function createGeminiJudge(
           }),
         });
       } catch {
+        console.warn(`Gemini request failed: ${signal.aborted ? 'timeout' : 'network error'}`);
         throw new LlmError(signal.aborted ? 'timeout' : 'error');
       }
       try {
         if (response.status === 429) {
           const delay = Math.min(3_600_000, Math.max(60_000, retryDelayMs(await boundedJson(response).catch(() => null)) ?? DEFAULT_COOLDOWN_MS));
           blockedUntil = Math.max(blockedUntil, clock() + delay);
+          console.warn(`Gemini request failed: HTTP 429, paused for ${Math.round(delay / 1000)}s`);
           throw new LlmError('rate_limited', delay);
         }
-        if (!response.ok) throw new LlmError('error');
+        if (!response.ok) {
+          const status = errorStatus(await boundedJson(response).catch(() => null));
+          console.warn(`Gemini request failed: HTTP ${response.status}${status ? ` ${status}` : ''}`);
+          throw new LlmError('error');
+        }
         const payload = await boundedJson(response);
         // A malformed upstream answer must never carry the key any further.
-        if (JSON.stringify(payload).includes(key)) throw new LlmError('error');
-        return parseModelJson(candidateText(payload));
+        if (JSON.stringify(payload).includes(key)) {
+          console.warn('Gemini response discarded: it echoed request credentials');
+          throw new LlmError('error');
+        }
+        const text = candidateText(payload);
+        try {
+          return parseModelJson(text);
+        } catch (error) {
+          console.warn('Gemini answer was not valid JSON');
+          throw error;
+        }
       } catch (error) {
         if (error instanceof LlmError) throw error;
+        console.warn(`Gemini response could not be read${signal.aborted ? ' before the deadline' : ''}`);
         throw new LlmError(signal.aborted ? 'timeout' : 'error');
       } finally {
         await response.body?.cancel().catch(() => undefined);

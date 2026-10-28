@@ -155,19 +155,30 @@ export interface ValidJudgement {
   summary?: string;
 }
 
-function validateItem(entry: Record<string, unknown>, input: JudgeItem, request: JudgeRequest, allowedNumbers: ReadonlySet<string>): ValidJudgement | null {
-  if (typeof entry.relevant !== 'boolean' || typeof entry.sentiment !== 'string' || !SENTIMENTS.includes(entry.sentiment as AiSentiment)) return null;
+/** Why an answer was discarded or trimmed; counted for diagnostics, never stored with content. */
+export type ValidationNote = 'missing' | 'duplicate' | 'shape' | 'evidence_too_long' | 'evidence_not_in_text' | 'no_evidence' |
+  'reason_numbers' | 'reason_advice' | 'summary_numbers' | 'summary_advice';
+
+function validateItem(entry: Record<string, unknown>, input: JudgeItem, request: JudgeRequest, allowedNumbers: ReadonlySet<string>,
+  note: (reason: ValidationNote) => void): ValidJudgement | null {
+  if (typeof entry.relevant !== 'boolean' || typeof entry.sentiment !== 'string' || !SENTIMENTS.includes(entry.sentiment as AiSentiment)) {
+    note('shape');
+    return null;
+  }
   const sentiment = entry.sentiment as AiSentiment;
   const source = `${input.title}\n${input.description ?? ''}`;
+  const unknownNumbers = (text: string) => numbersIn(text).some(value => !allowedNumbers.has(value));
   const evidence = typeof entry.evidence === 'string' ? plainText(entry.evidence, 1000) : undefined;
   // Evidence must be the article's own words; an invented quote discards the whole judgement.
-  if (evidence && ([...evidence].length > MAX_EVIDENCE || normalize(evidence).length < 2 ||
-      !normalize(source).includes(normalize(evidence)))) return null;
-  if (entry.relevant && (sentiment === 'positive' || sentiment === 'negative') && !evidence) return null;
+  if (evidence && [...evidence].length > MAX_EVIDENCE) { note('evidence_too_long'); return null; }
+  if (evidence && (normalize(evidence).length < 2 || !normalize(source).includes(normalize(evidence)))) { note('evidence_not_in_text'); return null; }
+  if (entry.relevant && (sentiment === 'positive' || sentiment === 'negative') && !evidence) { note('no_evidence'); return null; }
   const reason = typeof entry.reason === 'string' ? plainText(entry.reason, MAX_REASON) : undefined;
-  if (reason && (numbersIn(reason).some(value => !allowedNumbers.has(value)) || guarded(reason, source))) return null;
+  if (reason && unknownNumbers(reason)) { note('reason_numbers'); return null; }
+  if (reason && guarded(reason, source)) { note('reason_advice'); return null; }
   let summary = input.summarize && typeof entry.summary === 'string' ? plainText(entry.summary, MAX_SUMMARY) : undefined;
-  if (summary && (numbersIn(summary).some(value => !allowedNumbers.has(value)) || guarded(summary, source))) summary = undefined;
+  if (summary && unknownNumbers(summary)) { note('summary_numbers'); summary = undefined; }
+  else if (summary && guarded(summary, source)) { note('summary_advice'); summary = undefined; }
   const topic = request.topics && isNewsTopicKey(entry.topic) ? entry.topic : undefined;
   return {
     relevant: entry.relevant, sentiment,
@@ -175,19 +186,24 @@ function validateItem(entry: Record<string, unknown>, input: JudgeItem, request:
   };
 }
 
-/** Keeps only well-formed answers for requested ids; a malformed envelope fails the whole call. */
-export function validateJudgements(raw: unknown, request: JudgeRequest): Map<string, ValidJudgement> {
+/**
+ * Keeps only well-formed answers for requested ids; a malformed envelope fails
+ * the whole call. `notes` counts why answers were discarded or trimmed.
+ */
+export function validateJudgements(raw: unknown, request: JudgeRequest, notes?: Map<ValidationNote, number>): Map<string, ValidJudgement> {
   if (!isRecord(raw) || !Array.isArray(raw.items) || raw.items.length > request.items.length * 2) throw new LlmError('error');
   const companyText = [request.company.name, request.company.symbol, ...(COMPANY_NEWS_IDENTITY[request.company.id]?.entityNames ?? [])].join(' ');
   const counts = new Map<string, number>();
   for (const entry of raw.items) if (isRecord(entry) && typeof entry.id === 'string') counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1);
+  const note = (reason: ValidationNote) => { notes?.set(reason, (notes.get(reason) ?? 0) + 1); };
   const valid = new Map<string, ValidJudgement>();
   for (const input of request.items) {
     const entry = raw.items.find(item => isRecord(item) && item.id === input.key);
+    if (!isRecord(entry)) { note('missing'); continue; }
     // An id answered twice is ambiguous, so neither answer is used.
-    if (!isRecord(entry) || counts.get(input.key) !== 1) continue;
+    if (counts.get(input.key) !== 1) { note('duplicate'); continue; }
     const allowed = new Set(numbersIn(`${input.title} ${input.description ?? ''} ${companyText}`));
-    const judged = validateItem(entry, input, request, allowed);
+    const judged = validateItem(entry, input, request, allowed, note);
     if (judged) valid.set(input.key, judged);
   }
   return valid;
@@ -378,7 +394,11 @@ export function createAiClassifier(
           const raw = await judge.judge(request, signal);
           // An answer that arrives after the deadline is discarded like a missing one.
           if (signal.aborted) throw new LlmError('timeout');
-          valid = validateJudgements(raw, request);
+          const notes = new Map<ValidationNote, number>();
+          valid = validateJudgements(raw, request, notes);
+          if (notes.size) {
+            console.warn(`${judge.label} answers discarded or trimmed: ${[...notes].map(([reason, count]) => `${reason} ${count}`).join(', ')} (of ${selected.length})`);
+          }
         } catch (error) {
           const code = signal.aborted ? 'timeout' : error instanceof LlmError ? error.code : 'error';
           const retryAt = code === 'rate_limited' ? judge.unavailable()?.retryAt : undefined;

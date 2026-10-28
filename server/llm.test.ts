@@ -1,9 +1,9 @@
-import test from 'node:test';
+import test, { after as afterAll, before as beforeAll } from 'node:test';
 import assert from 'node:assert/strict';
 import { companies, isNewsAnalysis, isNewsArticle, type AiJudgement, type NewsArticle } from '@moneycast/core';
 import {
   buildPrompt, createAiClassifier, decideConsensus, LLM_PROMPT_VERSION, LlmError, MAX_LLM_ITEMS, parseModelJson, validateJudgements,
-  type JudgeItem, type JudgeRequest, type LlmJudge,
+  type JudgeItem, type JudgeRequest, type LlmJudge, type ValidationNote,
 } from './llm.js';
 import { createCloudflareJudge, DEFAULT_CLOUDFLARE_MODEL } from './llm-cloudflare.js';
 import { createGeminiJudge, DEFAULT_GEMINI_MODEL } from './llm-gemini.js';
@@ -15,6 +15,11 @@ import { FACTOR_NOTE_WITH_AI } from './synthesis.js';
 const company = companies.find(item => item.id === 'krx:005930')!;
 const now = new Date('2026-10-27T00:00:00Z');
 const always = () => true;
+// Model failures log diagnostics; they are collected so tests can check they never carry secrets.
+const warnings: string[] = [];
+const originalWarn = console.warn;
+beforeAll(() => { console.warn = (...parts: unknown[]) => { warnings.push(parts.map(String).join(' ')); }; });
+afterAll(() => { console.warn = originalWarn; });
 
 function unscored(id: string, title: string, extra: Partial<NewsArticle> = {}): NewsArticle {
   return {
@@ -227,6 +232,7 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
     { key: 'a8', title: '삼성전자 미국 공장 착공', description: '텍사스 테일러 공장 착공식이 열렸다.', source: 'a', summarize: true },
   ] };
   const long = '가'.repeat(400);
+  const notes = new Map<ValidationNote, number>();
   const valid = validateJudgements({ items: [
     { id: 'a1', relevant: true, sentiment: 'positive', evidence: '신제품 대박', reason: '', summary: '' },
     { id: 'a2', relevant: true, sentiment: 'negative', evidence: '', reason: '연기는 불리합니다.', summary: '' },
@@ -238,8 +244,9 @@ test('validation keeps only grounded answers: real quotes, known numbers, no adv
     { id: 'a7', relevant: true, sentiment: 'neutral', evidence: '', reason: '', summary: '' },
     { id: 'a8', relevant: true, sentiment: 'neutral', evidence: '', reason: '', summary: long, topic: 'not-a-topic' },
     { id: 'zz', relevant: true, sentiment: 'positive', evidence: '신제품', reason: '', summary: '' },
-  ] }, request);
+  ] }, request, notes);
   assert.deepEqual([...valid.keys()], ['a4', 'a5', 'a6', 'a8']);
+  assert.deepEqual(Object.fromEntries(notes), { evidence_not_in_text: 1, no_evidence: 1, reason_numbers: 1, summary_advice: 2, duplicate: 1 });
   assert.equal(valid.get('a4')!.summary, undefined);
   assert.equal(valid.get('a5')!.summary, '증권사가 투자의견을 매수로 올렸다는 기사입니다.');
   assert.equal(valid.get('a6')!.summary, undefined);
@@ -283,11 +290,17 @@ test('Gemini adapter sends the key only in a header, asks for schema JSON and co
 
   reply = () => jsonResponse({ candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"items":[' }] } }] });
   await assert.rejects(judge.judge(sampleRequest, new AbortController().signal), (error: LlmError) => error.code === 'error');
+  assert.equal(warnings.at(-1), 'Gemini answer incomplete: MAX_TOKENS');
   reply = () => jsonResponse({ echoed: key, candidates: [] });
   await assert.rejects(judge.judge(sampleRequest, new AbortController().signal), (error: LlmError) => error.code === 'error');
+  assert.equal(warnings.at(-1), 'Gemini response discarded: it echoed request credentials');
+  reply = () => jsonResponse({ error: { code: 400, status: 'INVALID_ARGUMENT', message: `Invalid schema sent with ${key}` } }, 400);
+  await assert.rejects(judge.judge(sampleRequest, new AbortController().signal), (error: LlmError) => error.code === 'error');
+  assert.equal(warnings.at(-1), 'Gemini request failed: HTTP 400 INVALID_ARGUMENT');
   reply = () => jsonResponse({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', details: [
     { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '120s' }] } }, 429);
   await assert.rejects(judge.judge(sampleRequest, new AbortController().signal), (error: LlmError) => error.code === 'rate_limited');
+  assert.equal(warnings.at(-1), 'Gemini request failed: HTTP 429, paused for 120s');
   assert.deepEqual(judge.unavailable(), { code: 'rate_limited', retryAt: now.getTime() + 120_000 });
   const before = calls.length;
   await assert.rejects(judge.judge(sampleRequest, new AbortController().signal), (error: LlmError) => error.code === 'rate_limited');
@@ -296,6 +309,7 @@ test('Gemini adapter sends the key only in a header, asks for schema JSON and co
   assert.equal(judge.unavailable(), null);
   assert.deepEqual(createGeminiJudge({}).unavailable(), { code: 'not_configured' });
   assert.deepEqual(createGeminiJudge({ GEMINI_API_KEY: key, GEMINI_MODEL: '../models/x' }).unavailable(), { code: 'not_configured' });
+  assert.ok(warnings.length > 0 && warnings.every(line => !line.includes(key)));
 });
 
 test('Cloudflare adapter calls the account endpoint, reads every response shape and waits for the daily reset', async () => {
@@ -322,8 +336,9 @@ test('Cloudflare adapter calls the account endpoint, reads every response shape 
   assert.deepEqual(await judge.judge(sampleRequest, new AbortController().signal), { items: [{ id: 'a1' }] });
   reply = () => jsonResponse({ success: true, result: { choices: [{ message: { content: '<think>…</think>{"items":[{"id":"a1"}]}' } }] } });
   assert.deepEqual(await judge.judge(sampleRequest, new AbortController().signal), { items: [{ id: 'a1' }] });
-  reply = () => jsonResponse({ success: false, errors: [{ code: 5004, message: 'invalid' }] });
+  reply = () => jsonResponse({ success: false, errors: [{ code: 5004, message: 'invalid input' }] });
   await assert.rejects(judge.judge(sampleRequest, new AbortController().signal), (error: LlmError) => error.code === 'error');
+  assert.equal(warnings.at(-1), 'Cloudflare answer rejected: request not successful (code 5004)');
 
   const llama = createCloudflareJudge({ CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token,
     CLOUDFLARE_AI_MODEL: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' }, fetcher, () => now.getTime());
@@ -336,9 +351,12 @@ test('Cloudflare adapter calls the account endpoint, reads every response shape 
   reply = () => jsonResponse({ success: false, errors: [{ code: 3040, message: 'Capacity temporarily exceeded' }] }, 429);
   await assert.rejects(llama.judge(sampleRequest, new AbortController().signal), (error: LlmError) => error.code === 'rate_limited');
   assert.equal(llama.unavailable()?.retryAt, now.getTime() + 60_000);
+  assert.equal(warnings.at(-1), 'Cloudflare request failed: HTTP 429 (code 3040), paused until 2026-10-27T00:01:00.000Z');
   reply = () => jsonResponse({ success: false, errors: [{ code: 3036, message: 'daily free allocation used' }] }, 429);
   await assert.rejects(judge.judge(sampleRequest, new AbortController().signal), (error: LlmError) => error.code === 'rate_limited');
   assert.equal(judge.unavailable()?.retryAt, Date.parse('2026-10-28T00:00:00Z'));
+  assert.equal(warnings.at(-1), 'Cloudflare request failed: HTTP 429 (code 3036), paused until 2026-10-28T00:00:00.000Z');
+  assert.ok(warnings.every(line => !line.includes(token) && !line.includes(account)));
   assert.deepEqual(createCloudflareJudge({ CLOUDFLARE_ACCOUNT_ID: 'not-an-account', CLOUDFLARE_API_TOKEN: token }).unavailable(), { code: 'not_configured' });
   assert.deepEqual(createCloudflareJudge({ CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token, CLOUDFLARE_AI_MODEL: '@cf/../accounts' }).unavailable(), { code: 'not_configured' });
 });

@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { companies, isNewsAnalysis } from '@moneycast/core';
+import { companies, isNewsAnalysis, type AiJudgement, type AiProviderId, type NewsAnalysis } from '@moneycast/core';
 
 const messages = {
   not_configured: '연결 미완료: 서버에 뉴스 제공자 설정이 필요합니다.',
@@ -15,6 +15,48 @@ function providerLabel(value: string | null): string {
   return /^[\p{L}\p{N} ._()·\-]{1,100}$/u.test(value) ? value : '연결됨 (표시명 생략)';
 }
 
+/** Model ids such as `@cf/qwen/qwen3-30b-a3b-fp8`; anything else is withheld. */
+function modelLabel(value: string): string {
+  return /^@?[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+){0,2}$/.test(value) && value.length <= 80 ? value : '모델명 생략';
+}
+
+const VERDICTS = { positive: '긍정', negative: '부정', neutral: '중립', uncertain: '판단 불가' } as const;
+const CONSENSUS = { confirmed: '합의', provisional: '잠정', withheld: '유보', pending: '대기' } as const;
+
+/** Article text is external: no control or direction-override characters reach the terminal. */
+function terminalText(value: string, max: number): string {
+  const clean = value.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
+  const chars = [...clean];
+  return chars.length <= max ? clean : `${chars.slice(0, max - 1).join('')}…`;
+}
+
+const verdict = (judgement: AiJudgement | undefined) =>
+  !judgement ? '없음' : judgement.relevant ? VERDICTS[judgement.sentiment] : '관련 없음';
+
+/** One numbered line per AI-judged article, for comparing the two models with a person's own reading. */
+function printAiSample(analysis: NewsAnalysis): void {
+  if (!analysis.ai) {
+    console.log('AI 판단 표본: 서버에 AI 키가 없어 표본이 없습니다.');
+    return;
+  }
+  const sampled = analysis.articles.filter(article => article.aiConsensus);
+  console.log(`AI 판단 표본 ${sampled.length}건 · 번호마다 직접 읽은 판단(긍정·부정·중립·판단 불가·관련 없음)을 적어 주세요.`);
+  sampled.forEach((article, index) => {
+    const by = (id: AiProviderId) => article.aiJudgements?.find(item => item.provider === id);
+    const evidence = article.aiJudgements?.find(item => item.evidence)?.evidence;
+    console.log(`${index + 1}. [${CONSENSUS[article.aiConsensus!]}] Gemini ${verdict(by('gemini'))} · Cloudflare ${verdict(by('cloudflare'))}` +
+      `${evidence ? ` | 근거 「${terminalText(evidence, 40)}」` : ''} | ${terminalText(article.title, 70)}`);
+  });
+  // Articles both models called unrelated are hidden from the list but are still agreements.
+  const pairs = sampled.filter(article => article.aiJudgements?.length === 2);
+  const same = pairs.filter(article => verdict(article.aiJudgements![0]) === verdict(article.aiJudgements![1])).length;
+  const hidden = analysis.ai.hiddenCount;
+  const total = pairs.length + hidden;
+  const count = (consensus: keyof typeof CONSENSUS) => sampled.filter(article => article.aiConsensus === consensus).length;
+  console.log(`두 모델 모두 답한 ${total}건 중 같은 판단 ${same + hidden}건${total ? `(${Math.round((same + hidden) / total * 100)}%)` : ''}` +
+    ` · 관련 없음 합의로 숨김 ${hidden}건 · 잠정 ${count('provisional')}건 · 대기 ${count('pending')}건`);
+}
+
 async function readJson(endpoint: string): Promise<unknown> {
   const response = await fetch(endpoint, {
     signal: AbortSignal.timeout(20000), redirect: 'error', headers: { Accept: 'application/json' },
@@ -26,9 +68,12 @@ async function readJson(endpoint: string): Promise<unknown> {
 }
 
 async function main(): Promise<void> {
-  const company = companies.find(item => item.id === (process.argv[2] ?? 'krx:005930'));
-  if (!company || process.argv.length > 3) {
-    console.error('회사 ID를 확인하세요. 예: npm run news:check -- nasdaq:AAPL');
+  const args = process.argv.slice(2);
+  const ids = args.filter(arg => !arg.startsWith('--'));
+  const flags = args.filter(arg => arg.startsWith('--'));
+  const company = companies.find(item => item.id === (ids[0] ?? 'krx:005930'));
+  if (!company || ids.length > 1 || flags.some(flag => flag !== '--ai')) {
+    console.error('회사 ID를 확인하세요. 예: npm run news:check -- nasdaq:AAPL (AI 판단 표본은 끝에 --ai)');
     process.exitCode = 1;
     return;
   }
@@ -81,13 +126,14 @@ async function main(): Promise<void> {
     console.log(`출처 ${providerLabel(source.label)}: ${source.status} · 기사 ${source.articleCount}건${source.retryAt ? ` · 재시도 ${source.retryAt}` : ''}`);
   }
   for (const model of analysis.ai?.providers ?? []) {
-    console.log(`AI ${providerLabel(model.label)} (${providerLabel(model.model.replace(/[@/]/g, ' '))}): ${model.status} · 판단 ${model.judgedCount}건${model.retryAt ? ` · 재시도 ${model.retryAt}` : ''}`);
+    console.log(`AI ${providerLabel(model.label)} (${modelLabel(model.model)}): ${model.status} · 판단 ${model.judgedCount}건${model.retryAt ? ` · 재시도 ${model.retryAt}` : ''}`);
   }
   if (analysis.ai) {
     const count = (consensus: string) => analysis.articles.filter(article => article.aiConsensus === consensus).length;
     console.log(`AI 합의 ${count('confirmed')}건 · 잠정 ${count('provisional')}건 · 유보 ${count('withheld')}건 · 대기 ${count('pending')}건 · 관련 없음으로 숨김 ${analysis.ai.hiddenCount}건`);
     console.log(`AI 요약: ${analysis.articles.filter(article => article.summary).length}건 · 프롬프트 ${providerLabel(analysis.ai.promptVersion)}`);
   }
+  if (flags.includes('--ai')) printAiSample(analysis);
   const mirrored = analysis.articles.reduce((sum, article) => sum + (article.alsoReportedBy?.length ?? 0), 0);
   if (mirrored) console.log(`중복 제거로 합친 다른 출처: ${mirrored}건`);
   if (analysis.servedFrom === 'stale') console.log(`새로 고침 실패: ${analysis.refreshAttemptedAt ?? '시각 미상'} 시도, 이전 결과를 표시합니다.`);

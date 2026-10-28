@@ -29,18 +29,27 @@ function nextUtcMidnight(now: number): number {
   return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1);
 }
 
+const codeList = (codes: number[]) => codes.length ? ` (code ${codes.join(', ')})` : '';
+
 /** Older models answer in `result.response`; newer ones use the chat-completion shape. */
 function resultText(payload: unknown): string {
-  if (!isRecord(payload) || payload.success !== true || !isRecord(payload.result)) throw new LlmError('error');
+  if (!isRecord(payload) || payload.success !== true || !isRecord(payload.result)) {
+    console.warn(`Cloudflare answer rejected: request not successful${codeList(errorCodes(payload))}`);
+    throw new LlmError('error');
+  }
   const result = payload.result;
   if (typeof result.response === 'string') return result.response;
   if (isRecord(result.response)) return JSON.stringify(result.response);
   const choice = Array.isArray(result.choices) ? result.choices[0] : undefined;
   if (isRecord(choice) && isRecord(choice.message) && typeof choice.message.content === 'string') return choice.message.content;
+  console.warn('Cloudflare answer had no text');
   throw new LlmError('error');
 }
 
-/** Workers AI REST API on the Free plan: over the allocation it fails instead of billing. */
+/**
+ * Workers AI REST API on the Free plan: over the allocation it fails instead of
+ * billing. Failures log only status and error code numbers, never bodies or the token.
+ */
 export function createCloudflareJudge(
   env: NodeJS.ProcessEnv = process.env,
   fetcher: typeof fetch = globalThis.fetch,
@@ -77,6 +86,7 @@ export function createCloudflareJudge(
           }),
         });
       } catch {
+        console.warn(`Cloudflare request failed: ${signal.aborted ? 'timeout' : 'network error'}`);
         throw new LlmError(signal.aborted ? 'timeout' : 'error');
       }
       try {
@@ -84,14 +94,28 @@ export function createCloudflareJudge(
           const codes = errorCodes(await boundedJson(response).catch(() => null));
           const until = codes.includes(DAILY_ALLOCATION_USED) ? nextUtcMidnight(clock()) : clock() + 60_000;
           blockedUntil = Math.max(blockedUntil, until);
+          console.warn(`Cloudflare request failed: HTTP 429${codeList(codes)}, paused until ${new Date(until).toISOString()}`);
           throw new LlmError('rate_limited', until - clock());
         }
-        if (!response.ok) throw new LlmError('error');
+        if (!response.ok) {
+          console.warn(`Cloudflare request failed: HTTP ${response.status}${codeList(errorCodes(await boundedJson(response).catch(() => null)))}`);
+          throw new LlmError('error');
+        }
         const payload = await boundedJson(response);
-        if (JSON.stringify(payload).includes(token)) throw new LlmError('error');
-        return parseModelJson(resultText(payload));
+        if (JSON.stringify(payload).includes(token)) {
+          console.warn('Cloudflare response discarded: it echoed request credentials');
+          throw new LlmError('error');
+        }
+        const text = resultText(payload);
+        try {
+          return parseModelJson(text);
+        } catch (error) {
+          console.warn('Cloudflare answer was not valid JSON');
+          throw error;
+        }
       } catch (error) {
         if (error instanceof LlmError) throw error;
+        console.warn(`Cloudflare response could not be read${signal.aborted ? ' before the deadline' : ''}`);
         throw new LlmError(signal.aborted ? 'timeout' : 'error');
       } finally {
         await response.body?.cancel().catch(() => undefined);
