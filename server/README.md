@@ -166,7 +166,9 @@ Gemini 키나 Cloudflare 키가 있으면 모든 기사를 두 모델이 따로 
 - 응답 상태는 `ok`, `not_configured`, `rate_limited`(`retryAt`), `timeout`, `error`, `invalid_input`입니다. 모델 호출 1회는 최대 8초, 전체는 10초이며, 첫 모델이 실패하고 4초 이상 남으면 다음 모델을 시도합니다.
 - 한도: 주소당 10분에 5회(초과 시 HTTP 429), 인스턴스당 UTC 하루 `GOAL_AI_DAILY_LIMIT`회(기본 100) 모델 호출입니다. 둘 다 인스턴스 메모리 기준이라 서버리스 환경에서는 최선 노력 수준이며, 무료 한도는 뉴스 AI와 함께 씁니다. 목표 정리 1회의 Cloudflare Neuron 사용량은 아직 측정하지 않았습니다.
 - 요청 본문과 설명은 저장하거나 로그에 남기지 않습니다. 버린 답은 `Cloudflare goal answer discarded: not_in_text 1`처럼 사유별 건수만 남깁니다.
-- JSON이 아니면 415, 2KB를 넘으면 413, 형식이 틀리면 400, 그 밖의 메서드는 405입니다. Vercel Node 런타임에서 POST 본문을 그대로 읽는지는 Preview 배포에서 확인해야 합니다.
+- JSON이 아니면 415, 2KB를 넘으면 413, 형식이 틀리면 400, 그 밖의 메서드는 405입니다.
+- Vercel Node 런타임(`@vercel/node` 28.0.0에서 확인)은 함수를 부르기 전에 요청 본문을 모두 읽고, `data`·`end` 리스너와 `read()`에만 다시 넘겨 줍니다. 그래서 본문은 `for await`가 아니라 `data`·`end` 이벤트로 읽습니다(`for await`로 읽으면 이미 닫힌 스트림이라 빈 본문이 되어 모든 요청이 400이 됩니다). 이 동작을 흉내 낸 테스트가 `server/goal-clarify.test.ts`에 있습니다.
+- 실제 Preview 확인: Preview는 Vercel 로그인으로 보호되므로, 로그인한 브라우저에서 Preview 주소를 열고 개발자 도구 콘솔에서 `await (await fetch('/api/goals/clarify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: '' }) })).json()`를 실행합니다. `status: 'invalid_input'`이면 본문을 읽은 것이고, `요청 형식이 올바르지 않습니다.`(400)이면 읽지 못한 것입니다. 빈 설명은 모델을 부르기 전에 거절되므로 AI 설정과 관계없이 한도를 쓰지 않습니다. 명령줄에서는 Vercel 프로젝트 설정의 자동화용 보호 우회 토큰을 `x-vercel-protection-bypass` 헤더로 보내 같은 요청을 할 수 있습니다.
 - 평가: `npm run goal:check`가 예시 설명 19건을 같은 프롬프트와 검증으로 모델마다 한 번씩 보내 분류·값 일치와 버린 사유를 집계합니다([루트 README](../README.md) 참고). 아직 실제 키로 실행한 기록은 없습니다.
 
 ## 로컬 연결 확인 명령

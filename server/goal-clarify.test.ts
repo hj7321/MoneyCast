@@ -205,3 +205,50 @@ test('the serverless entry point routes goal clarification and keeps it off with
   const result = await (await fetch(`${base}/api/goals/clarify`, { method: 'POST', body: JSON.stringify({ text: description }), headers: { 'content-type': 'application/json' } })).json();
   assert.equal(result.status, 'not_configured');
 });
+
+test('a body the Vercel Node runtime already read is still parsed, and a long body without a length is refused', async t => {
+  const { createServer, request } = await import('node:http');
+  const { PassThrough } = await import('node:stream');
+  const handler = createApiHandler(createNewsService({ getArticles: async () => { throw new ProviderError('not_configured'); } }), {});
+  // As @vercel/node's helpers do: read the whole stream first, then replay it only to 'data'/'end' listeners and read().
+  const vercel = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const replay = new PassThrough();
+    const on = replay.on.bind(replay);
+    const originalOn = req.on.bind(req);
+    req.read = replay.read.bind(replay);
+    req.on = req.addListener = ((name: string, listener: (...args: unknown[]) => void) =>
+      name === 'data' || name === 'end' ? on(name, listener) : originalOn(name, listener)) as typeof req.on;
+    replay.end(Buffer.concat(chunks));
+    await handler(req, res);
+  });
+  const plain = createServer(handler);
+  for (const server of [vercel, plain]) {
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(() => { server.closeAllConnections(); server.close(); });
+  }
+  const url = (server: typeof plain) => `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/goals/clarify`;
+  const post = async (server: typeof plain, body: string) => {
+    const response = await fetch(url(server), { method: 'POST', body, headers: { 'content-type': 'application/json' } });
+    return { status: response.status, body: await response.json() as { status?: string } };
+  };
+  // Written in parts with no Content-Length, so only the running count can stop it.
+  const chunked = (server: typeof plain) => new Promise<number>((resolve, reject) => {
+    const outgoing = request(url(server), { method: 'POST', headers: { 'content-type': 'application/json' } }, response => {
+      response.resume();
+      resolve(response.statusCode!);
+    });
+    outgoing.on('error', reject);
+    outgoing.write('{"text":"');
+    for (let index = 0; index < 3; index += 1) outgoing.write('x'.repeat(1_000));
+    outgoing.end('"}');
+  });
+  for (const server of [vercel, plain]) {
+    assert.deepEqual(await post(server, JSON.stringify({ text: description })), { status: 200, body: { promptVersion: 'goal-clarify-v1', status: 'not_configured' } });
+    assert.equal((await post(server, JSON.stringify({ text: '' }))).body.status, 'invalid_input');
+    assert.equal((await post(server, '{"text":')).status, 400);
+    assert.equal(await chunked(server), 413);
+  }
+});
