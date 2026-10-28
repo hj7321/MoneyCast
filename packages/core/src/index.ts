@@ -1,3 +1,4 @@
+import { particle } from './korean.js';
 import { isNewsTopicKey, type NewsTopicKey } from './news-topics.js';
 
 /** Shared calculation rules used unchanged by the web, native app and API. */
@@ -83,9 +84,9 @@ export function validateCalculatorInput(value: unknown): Record<string, string> 
 
   for (const [field, label] of Object.entries(amountLabels)) {
     const amount = input[field];
-    if (!isFiniteNumber(amount)) errors[field] = `${label}을 숫자로 입력해 주세요.`;
-    else if (amount < 0) errors[field] = `${label}은 0원 이상이어야 합니다.`;
-    else if (amount > 1_000_000_000_000) errors[field] = `${label}은 1조 원 이하로 입력해 주세요.`;
+    if (!isFiniteNumber(amount)) errors[field] = `${label}${particle(label, '을', '를')} 숫자로 입력해 주세요.`;
+    else if (amount < 0) errors[field] = `${label}${particle(label, '은', '는')} 0원 이상이어야 합니다.`;
+    else if (amount > 1_000_000_000_000) errors[field] = `${label}${particle(label, '은', '는')} 1조 원 이하로 입력해 주세요.`;
   }
 
   if (!isFiniteNumber(input.annualRate)) {
