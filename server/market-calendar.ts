@@ -1,14 +1,30 @@
 // Regular-session calendar for the exchanges history insights measure against.
 // Pure: every function takes its clock as an argument and reads no I/O.
 //
-// The holiday, early-close and late-open tables were entered from the
-// exchanges' published schedules and statutory holiday rules as recalled at
-// authoring time, not checked against an official notice in this change. They
-// MUST be re-verified against KRX and Nasdaq notices before release and
-// extended every year end (plan B-10); CALENDAR_VERIFIED stays false until
-// then. Dates outside a declared coverage range yield 'calendar_unverified',
-// never a weekday-only guess, because a missed early close would let an
-// already-settled close pass for a post-article price.
+// Verified on 2026-11-11 (plan step 3) against official sources and observed data:
+// - KRX: the 휴장일 pages (open.krx.co.kr and global.krx.co.kr, 2023-2026 tabs) and
+//   the KRX notices for each temporary holiday, year-end closure, opening day and
+//   CSAT day. 2023-2025 matched date for date; 2026 lacked 2026-07-17 (제헌절, a
+//   public holiday again from 2026, closure announced by KRX on 2026-05-20), now
+//   added. The changed-hours times come from those KRX notices as quoted by
+//   several outlets (the notice bodies are attachments that were not opened).
+// - Nasdaq: the Nasdaq Trader calendars, trading-calendar PDFs and Equity Trader
+//   Alerts, cross-checked with the NYSE holiday and early-close calendars. All
+//   closures and 13:00 ET early closes for 2023-2027 matched; 2025-01-09 (day of
+//   mourning) rests on the alerts, which outrank Nasdaq's stale 2025 PDF.
+// - Observed daily rows (live check of 2026-11-11): the four KRX stocks and KODEX
+//   200 have a row on every session from 2023-01-02 to 2026-11-10 and none on a
+//   holiday; their only gap was 2026-07-17, the closure above. The six US series
+//   match the Nasdaq sessions exactly from 2024-11-11 to 2026-11-09.
+// Still provisional: KRX 2027 (KRX's list is pre-filled and not final, so KRX
+// coverage stays to 2026-12-31); Nasdaq 2027, taken from the NYSE schedule as
+// Nasdaq has not published its own; any unscheduled closure or changed hours
+// announced after 2026-11-11, which must be added by hand; and Nasdaq's 23/5
+// trading hours from 2026-12-06, not modelled because only the regular session
+// counts here. Extend the tables every year end (plan B-10). Dates outside a
+// declared coverage range yield 'calendar_unverified', never a weekday-only
+// guess, because a missed early close would let an already-settled close pass
+// for a post-article price.
 
 export type Exchange = 'KRX' | 'NASDAQ';
 export type CalendarBasis = 'exchange_calendar' | 'weekdays_only';
@@ -17,8 +33,13 @@ export type SessionPhase = 'before_open' | 'in_session' | 'after_close';
 export const CALENDAR_UNVERIFIED = 'calendar_unverified' as const;
 export type CalendarUnverified = typeof CALENDAR_UNVERIFIED;
 
-/** False until every table below is checked against the exchanges' official notices. */
-export const CALENDAR_VERIFIED = false;
+/**
+ * True: every table below was checked on 2026-11-11 against the exchanges'
+ * official schedules and the observed trading dates, within the stated coverage
+ * and with the provisional parts named in the header (KRX 2027 is outside
+ * coverage; Nasdaq 2027 rests on the NYSE schedule).
+ */
+export const CALENDAR_VERIFIED = true;
 
 /** Article stamps can precede actual publication slightly (plan B-2). */
 export const ARTICLE_DELAY_MS = 5 * 60_000;
@@ -31,21 +52,25 @@ export interface Session {
   closeMs: number;
 }
 
+/** Exchange-local wall times, HH:MM. */
+export interface SessionHours {
+  open: string;
+  close: string;
+}
+
 interface ExchangeCalendar {
   timeZone: string;
+  /** Regular hours. */
   open: string;
   close: string;
   /** Inclusive exchange-local dates the tables below are complete for. */
   coverage: { from: string; to: string };
   holidays: ReadonlySet<string>;
-  earlyCloses: ReadonlyMap<string, string>;
-  lateOpens: ReadonlyMap<string, string>;
+  /** Sessions whose hours differ from the regular ones, with that day's full open and close. */
+  changedHours: ReadonlyMap<string, SessionHours>;
 }
 
-// KRX: full-day closures only. KRX has no early closes. Late opens (first
-// trading day 10:00, the CSAT day 10:00-16:30) are left out on purpose: a
-// missing late open or late close only defers entry, while a wrong one would
-// place entry before the article (plan "개장 지연일").
+// KRX: full-day closures. KRX had no early closes in 2023-2026.
 const KRX_HOLIDAYS = [
   // 2023
   '2023-01-23', '2023-01-24', '2023-03-01', '2023-05-01', '2023-05-05', '2023-05-29', '2023-06-06',
@@ -60,7 +85,16 @@ const KRX_HOLIDAYS = [
   '2025-10-09', '2025-12-25', '2025-12-31',
   // 2026
   '2026-01-01', '2026-02-16', '2026-02-17', '2026-02-18', '2026-03-02', '2026-05-01', '2026-05-05', '2026-05-25',
-  '2026-06-03', '2026-08-17', '2026-09-24', '2026-09-25', '2026-10-05', '2026-10-09', '2026-12-25', '2026-12-31',
+  '2026-06-03', '2026-07-17', '2026-08-17', '2026-09-24', '2026-09-25', '2026-10-05', '2026-10-09', '2026-12-25', '2026-12-31',
+];
+
+// KRX changed hours: the first trading day of each year opens an hour late
+// (10:00-15:30) and the CSAT (수능) day runs an hour late (10:00-16:30).
+const KRX_CHANGED_HOURS: ReadonlyArray<[string, SessionHours]> = [
+  ['2023-01-02', { open: '10:00', close: '15:30' }], ['2023-11-16', { open: '10:00', close: '16:30' }],
+  ['2024-01-02', { open: '10:00', close: '15:30' }], ['2024-11-14', { open: '10:00', close: '16:30' }],
+  ['2025-01-02', { open: '10:00', close: '15:30' }], ['2025-11-13', { open: '10:00', close: '16:30' }],
+  ['2026-01-02', { open: '10:00', close: '15:30' }], ['2026-11-19', { open: '10:00', close: '16:30' }],
 ];
 
 // Nasdaq follows the NYSE holiday schedule; early closes are 13:00 ET.
@@ -94,15 +128,13 @@ export const EXCHANGE_CALENDARS: Readonly<Record<Exchange, ExchangeCalendar>> = 
     timeZone: 'Asia/Seoul', open: '09:00', close: '15:30',
     coverage: { from: '2023-01-01', to: '2026-12-31' },
     holidays: new Set(KRX_HOLIDAYS),
-    earlyCloses: new Map(),
-    lateOpens: new Map(),
+    changedHours: new Map(KRX_CHANGED_HOURS),
   },
   NASDAQ: {
     timeZone: 'America/New_York', open: '09:30', close: '16:00',
     coverage: { from: '2023-01-01', to: '2027-12-31' },
     holidays: new Set(NASDAQ_HOLIDAYS),
-    earlyCloses: new Map(NASDAQ_EARLY_CLOSES.map(date => [date, '13:00'])),
-    lateOpens: new Map(),
+    changedHours: new Map(NASDAQ_EARLY_CLOSES.map(date => [date, { open: '09:30', close: '13:00' }])),
   },
 };
 
@@ -166,6 +198,13 @@ function weekday(date: string): number {
   return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
 }
 
+/** True when the date's hours close before the regular close (a half day); a later close is not early. */
+export function closesEarly(exchange: Exchange, date: string): boolean {
+  const calendar = EXCHANGE_CALENDARS[exchange];
+  const hours = calendar.changedHours.get(date);
+  return hours !== undefined && hours.close < calendar.close;
+}
+
 export function inCoverage(exchange: Exchange, date: string): boolean {
   const { from, to } = EXCHANGE_CALENDARS[exchange].coverage;
   return date >= from && date <= to;
@@ -185,8 +224,7 @@ export function sessionOn(exchange: Exchange, date: string, basis: CalendarBasis
     return { date, openMs: zonedTimeToUtc(date, calendar.open, calendar.timeZone), closeMs: zonedTimeToUtc(date, calendar.close, calendar.timeZone) };
   }
   if (calendar.holidays.has(date)) return null;
-  const open = calendar.lateOpens.get(date) ?? calendar.open;
-  const close = calendar.earlyCloses.get(date) ?? calendar.close;
+  const { open, close } = calendar.changedHours.get(date) ?? calendar;
   return { date, openMs: zonedTimeToUtc(date, open, calendar.timeZone), closeMs: zonedTimeToUtc(date, close, calendar.timeZone) };
 }
 

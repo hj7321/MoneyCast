@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ARTICLE_DELAY_MS, CALENDAR_UNVERIFIED, CALENDAR_VERIFIED, EXCHANGE_CALENDARS, addDays, classifyArticleTime, dayTargetWindow,
+  ARTICLE_DELAY_MS, CALENDAR_UNVERIFIED, CALENDAR_VERIFIED, EXCHANGE_CALENDARS, addDays, classifyArticleTime, closesEarly, dayTargetWindow,
   inOvernightWindow, lastClosedSession, localDate, overnightWindow, sessionOn, sessionsAfter, sessionsBefore, sessionsFrom,
   targetSession, weekSessions, weekTargetWindow, weeklyAsOfAtOrBefore, weeklyAsOfsBetween, weeklyWindows, zonedTimeToUtc,
   type ArticleTiming, type Exchange, type OvernightWindow, type Session, type TargetSession,
@@ -31,19 +31,87 @@ const dates = (sessions: Session[] | typeof CALENDAR_UNVERIFIED) => {
   return (sessions as Session[]).map(item => item.date);
 };
 
-test('the tables stay flagged unverified until checked against official notices', () => {
-  assert.equal(CALENDAR_VERIFIED, false);
+test('the tables are flagged verified (checked 2026-11-11 against official schedules and observed dates)', () => {
+  assert.equal(CALENDAR_VERIFIED, true);
 });
 
-test('holiday and early-close tables are weekdays inside their declared coverage and never overlap', () => {
+test('holiday and changed-hours tables are weekdays inside their declared coverage and never overlap', () => {
   for (const [exchange, calendar] of Object.entries(EXCHANGE_CALENDARS)) {
-    for (const date of [...calendar.holidays, ...calendar.earlyCloses.keys(), ...calendar.lateOpens.keys()]) {
+    for (const date of [...calendar.holidays, ...calendar.changedHours.keys()]) {
       const day = new Date(`${date}T00:00:00Z`).getUTCDay();
       assert.ok(day !== 0 && day !== 6, `${exchange} ${date} is a weekend`);
       assert.ok(date >= calendar.coverage.from && date <= calendar.coverage.to, `${exchange} ${date} is outside coverage`);
     }
-    for (const date of calendar.earlyCloses.keys()) assert.ok(!calendar.holidays.has(date), `${exchange} ${date} is both`);
+    for (const [date, hours] of calendar.changedHours) {
+      assert.ok(!calendar.holidays.has(date), `${exchange} ${date} is both`);
+      assert.ok(/^\d{2}:\d{2}$/.test(hours.open) && /^\d{2}:\d{2}$/.test(hours.close) && hours.open < hours.close, `${exchange} ${date} hours`);
+      assert.ok(hours.open !== calendar.open || hours.close !== calendar.close, `${exchange} ${date} repeats the regular hours`);
+    }
   }
+});
+
+test('2026-07-17 (제헌절) is a KRX closure, so that week has four sessions', () => {
+  assert.equal(sessionOn('KRX', '2026-07-17'), null);
+  assert.ok(session('NASDAQ', '2026-07-17'));
+  assert.deepEqual(dates(sessionsAfter('KRX', '2026-07-16', 1)), ['2026-07-20']);
+  assert.deepEqual(dates(weekSessions('KRX', at('2026-07-12T23:50:00Z'))), ['2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16', '2026-07-20']);
+  // Thursday evening targets Monday against Thursday's close.
+  const evening = target('KRX', '2026-07-16T09:00:00Z');
+  assert.deepEqual([evening.phase, evening.session.date, evening.previous.date], ['after_close', '2026-07-20', '2026-07-16']);
+});
+
+test('KRX changed hours: opening days run 10:00-15:30 and CSAT days 10:00-16:30 KST', () => {
+  for (const date of ['2023-01-02', '2024-01-02', '2025-01-02', '2026-01-02']) {
+    const day = session('KRX', date);
+    assert.deepEqual([iso(day.openMs), iso(day.closeMs)], [`${date}T01:00:00.000Z`, `${date}T06:30:00.000Z`], date);
+  }
+  for (const date of ['2023-11-16', '2024-11-14', '2025-11-13', '2026-11-19']) {
+    const day = session('KRX', date);
+    assert.deepEqual([iso(day.openMs), iso(day.closeMs)], [`${date}T01:00:00.000Z`, `${date}T07:30:00.000Z`], date);
+  }
+  // The next day keeps the regular 09:00-15:30.
+  const regular = session('KRX', '2026-11-20');
+  assert.deepEqual([iso(regular.openMs), iso(regular.closeMs)], ['2026-11-20T00:00:00.000Z', '2026-11-20T06:30:00.000Z']);
+  // A 16:30 close is late, not early; only Nasdaq half days close early.
+  assert.equal(closesEarly('KRX', '2026-11-19'), false);
+  assert.equal(closesEarly('KRX', '2026-01-02'), false);
+  assert.equal(closesEarly('NASDAQ', '2026-11-27'), true);
+  assert.equal(closesEarly('NASDAQ', '2026-11-25'), false);
+});
+
+test('articles around a changed open or close are classified by that day\'s hours', () => {
+  // 09:30 KST on 2026-01-02 (+5 min = 09:35) is before the 10:00 open: entry at that open.
+  const opening = timing('KRX', '2026-01-02T00:30:00Z');
+  assert.deepEqual(pick(opening), { kind: 'out_of_session', date: '2026-01-02' });
+  assert.equal(iso(opening.session.openMs), '2026-01-02T01:00:00.000Z');
+  // 09:57 KST + 5 minutes = 10:02, in session.
+  assert.deepEqual(pick(timing('KRX', '2026-01-02T00:57:00Z')), { kind: 'in_session', date: '2026-01-02' });
+  // 15:50 KST on the CSAT day is in session (16:30 close); 16:25 + 5 = 16:30 still is; 16:27 + 5 = 16:32 is not.
+  assert.deepEqual(pick(timing('KRX', '2026-11-19T06:50:00Z')), { kind: 'in_session', date: '2026-11-19' });
+  assert.deepEqual(pick(timing('KRX', '2026-11-19T07:25:00Z')), { kind: 'in_session', date: '2026-11-19' });
+  assert.deepEqual(pick(timing('KRX', '2026-11-19T07:27:00Z')), { kind: 'out_of_session', date: '2026-11-20' });
+  // 09:30 KST on the CSAT day is before its 10:00 open.
+  assert.deepEqual(pick(timing('KRX', '2026-11-19T00:30:00Z')), { kind: 'out_of_session', date: '2026-11-19' });
+  // The same times on a regular day: 09:30 is in session and 15:50 is after the 15:30 close.
+  assert.deepEqual(pick(timing('KRX', '2026-11-18T00:30:00Z')), { kind: 'in_session', date: '2026-11-18' });
+  assert.deepEqual(pick(timing('KRX', '2026-11-18T06:50:00Z')), { kind: 'out_of_session', date: '2026-11-19' });
+  // The overnight window into the CSAT day ends at its 10:00 open, and the next one starts at its 16:30 close.
+  const csat = overnightWindow('KRX', session('KRX', '2026-11-19')) as OvernightWindow;
+  assert.deepEqual([iso(csat.startMs), iso(csat.endMs)], ['2026-11-18T06:30:00.000Z', '2026-11-19T01:00:00.000Z']);
+  const after = overnightWindow('KRX', session('KRX', '2026-11-20')) as OvernightWindow;
+  assert.equal(iso(after.startMs), '2026-11-19T07:30:00.000Z');
+});
+
+test('during the extra CSAT hour the day is not yet closed', () => {
+  const closed = (now: string) => (lastClosedSession('KRX', at(now)) as Session).date;
+  // 16:00 KST on 2026-11-19: the close is not final until 16:30.
+  assert.equal(closed('2026-11-19T07:00:00Z'), '2026-11-18');
+  assert.equal(closed('2026-11-19T07:30:00Z'), '2026-11-19');
+  assert.equal(closed('2025-11-13T07:00:00Z'), '2025-11-12');
+  const live = target('KRX', '2026-11-19T07:00:00Z');
+  assert.deepEqual([live.phase, live.session.date, live.previous.date], ['in_session', '2026-11-19', '2026-11-18']);
+  // Before the 10:00 open the phase is still before_open.
+  assert.equal(target('KRX', '2026-11-19T00:30:00Z').phase, 'before_open');
 });
 
 test('local wall time converts through the zone database, so US daylight saving moves the open by an hour', () => {

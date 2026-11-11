@@ -17,6 +17,7 @@
     "news:check": "tsx scripts/check-news.ts",
     "ai:check": "tsx scripts/check-ai.ts",
     "goal:check": "tsx scripts/check-goal.ts",
+    "history:check": "tsx scripts/check-history.ts",
     "build": "npm run build --workspace @moneycast/web",
     "start": "tsx server/index.ts",
     "mobile:export": "npm run export --workspace @moneycast/mobile"

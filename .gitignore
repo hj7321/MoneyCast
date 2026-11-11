@@ -16,3 +16,4 @@ apps/mobile/android/
 # Public configuration examples remain part of the repository.
 !.env.example
 !**/.env.example
+.history-check/
