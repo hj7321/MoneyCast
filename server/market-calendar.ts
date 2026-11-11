@@ -25,6 +25,11 @@
 // declared coverage range yield 'calendar_unverified', never a weekday-only
 // guess, because a missed early close would let an already-settled close pass
 // for a post-article price.
+//
+// Memoised (plan step 4): zone offsets per 15-minute UTC bucket (exact for both
+// zones, whose changes fall on whole hours), sessions per date as frozen
+// objects, and one sorted session list per exchange for the exchange-calendar
+// scans. Results equal the direct Intl computation; only the cost changes.
 
 export type Exchange = 'KRX' | 'NASDAQ';
 export type CalendarBasis = 'exchange_calendar' | 'weekdays_only';
@@ -158,10 +163,52 @@ function wallClock(ms: number, timeZone: string): { year: number; month: number;
 }
 
 /** Zone offset (local minus UTC) at an instant, from Intl rather than a fixed table so DST follows the zone database. */
-function offsetMs(ms: number, timeZone: string): number {
+function directOffsetMs(ms: number, timeZone: string): number {
   const wall = wallClock(ms, timeZone);
   const base = Math.floor(ms / 1000) * 1000;
   return Date.UTC(wall.year, wall.month - 1, wall.day, wall.hour, wall.minute, wall.second) - base;
+}
+
+const OFFSET_BUCKET_MS = 15 * 60_000;
+/** Outside these years old offsets (local mean time, half hours) can change off the hour, so they are computed directly. */
+const OFFSET_CACHE_FROM = Date.UTC(1990, 0, 1);
+const OFFSET_CACHE_TO = Date.UTC(2100, 0, 1);
+/** Caches are cleared at this size; a long-lived process then simply rebuilds them. */
+const MAX_CACHE_SIZE = 500_000;
+/** Span sizes from coarse to fine; the finest is the 15-minute bucket. */
+const OFFSET_SPANS_MS = [28 * DAY_MS, DAY_MS, OFFSET_BUCKET_MS] as const;
+/** Per zone and span size: the offset at the start of each span (keyed by span index). */
+const offsetCache = new Map<string, Array<Map<number, number>>>();
+const cacheable = (ms: number) => ms >= OFFSET_CACHE_FROM && ms < OFFSET_CACHE_TO;
+
+function startOffset(starts: Map<number, number>, index: number, size: number, timeZone: string): number {
+  let value = starts.get(index);
+  if (value === undefined) {
+    if (starts.size >= MAX_CACHE_SIZE) starts.clear();
+    value = directOffsetMs(index * size, timeZone);
+    starts.set(index, value);
+  }
+  return value;
+}
+
+/**
+ * Cached offset, equal to the direct Intl one. A span whose start and the next
+ * span's start share an offset has that offset throughout, because neither
+ * zone changes its offset twice within 28 days; otherwise the next finer span
+ * decides. The finest span is a 15-minute bucket, exact because both zones
+ * change on whole UTC hours, which start a bucket.
+ */
+function offsetMs(ms: number, timeZone: string): number {
+  if (!cacheable(ms)) return directOffsetMs(ms, timeZone);
+  let zone = offsetCache.get(timeZone);
+  if (!zone) { zone = OFFSET_SPANS_MS.map(() => new Map<number, number>()); offsetCache.set(timeZone, zone); }
+  for (let level = 0; level < OFFSET_SPANS_MS.length - 1; level += 1) {
+    const size = OFFSET_SPANS_MS[level]!;
+    const index = Math.floor(ms / size);
+    const start = startOffset(zone[level]!, index, size, timeZone);
+    if (start === startOffset(zone[level]!, index + 1, size, timeZone)) return start;
+  }
+  return startOffset(zone[OFFSET_SPANS_MS.length - 1]!, Math.floor(ms / OFFSET_BUCKET_MS), OFFSET_BUCKET_MS, timeZone);
 }
 
 function parseDate(date: string): [number, number, number] {
@@ -184,13 +231,28 @@ const pad = (value: number) => String(value).padStart(2, '0');
 
 /** Exchange-local calendar date of an instant. */
 export function localDate(exchange: Exchange, ms: number): string {
-  const wall = wallClock(ms, EXCHANGE_CALENDARS[exchange].timeZone);
+  const { timeZone } = EXCHANGE_CALENDARS[exchange];
+  // The offset is whole seconds, so shifting the instant by it lands on the wall date.
+  if (cacheable(ms)) return new Date(ms + offsetMs(ms, timeZone)).toISOString().slice(0, 10);
+  const wall = wallClock(ms, timeZone);
   return `${wall.year}-${pad(wall.month)}-${pad(wall.day)}`;
 }
 
+const stepCache = new Map<string, string>();
+
 export function addDays(date: string, days: number): string {
+  // Single steps drive every day-by-day loop, so they are cached.
+  const step = days === 1 || days === -1;
+  const key = step ? `${date}|${days}` : '';
+  const known = step ? stepCache.get(key) : undefined;
+  if (known !== undefined) return known;
   const [year, month, day] = parseDate(date);
-  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+  const value = new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+  if (step) {
+    if (stepCache.size >= MAX_CACHE_SIZE) stepCache.clear();
+    stepCache.set(key, value);
+  }
+  return value;
 }
 
 function weekday(date: string): number {
@@ -216,6 +278,20 @@ export function inCoverage(exchange: Exchange, date: string): boolean {
  * display-only target windows (plan "표 범위를 넘는 targetWindow").
  */
 export function sessionOn(exchange: Exchange, date: string, basis: CalendarBasis = 'exchange_calendar'): Session | null | CalendarUnverified {
+  const key = `${exchange}|${basis}|${date}`;
+  const cached = sessionCache.get(key);
+  if (cached !== undefined) return cached;
+  // Computed first, so an invalid date throws as before and is never cached.
+  const computed = computeSessionOn(exchange, date, basis);
+  const value = computed === null || computed === CALENDAR_UNVERIFIED ? computed : Object.freeze(computed);
+  if (sessionCache.size >= MAX_CACHE_SIZE) sessionCache.clear();
+  sessionCache.set(key, value);
+  return value;
+}
+
+const sessionCache = new Map<string, Session | null | CalendarUnverified>();
+
+function computeSessionOn(exchange: Exchange, date: string, basis: CalendarBasis): Session | null | CalendarUnverified {
   const calendar = EXCHANGE_CALENDARS[exchange];
   const day = weekday(date);
   if (basis === 'exchange_calendar' && !inCoverage(exchange, date)) return CALENDAR_UNVERIFIED;
@@ -244,29 +320,108 @@ function scan(exchange: Exchange, start: string, step: 1 | -1, count: number, ba
   return found;
 }
 
+/** Every exchange-calendar session inside coverage, ascending; built once per exchange. */
+interface SessionList {
+  dates: string[];
+  sessions: Session[];
+}
+const sessionLists = new Map<Exchange, SessionList>();
+
+function sessionList(exchange: Exchange): SessionList {
+  let list = sessionLists.get(exchange);
+  if (!list) {
+    list = { dates: [], sessions: [] };
+    const { from, to } = EXCHANGE_CALENDARS[exchange].coverage;
+    for (let date = from; date <= to; date = addDays(date, 1)) {
+      const session = sessionOn(exchange, date);
+      if (session && session !== CALENDAR_UNVERIFIED) { list.dates.push(date); list.sessions.push(session); }
+    }
+    sessionLists.set(exchange, list);
+  }
+  return list;
+}
+
+/** First index whose date is ≥ `date`, or > `date` when `strict`. */
+function bound(dates: readonly string[], date: string, strict: boolean): number {
+  let lo = 0;
+  let hi = dates.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (strict ? dates[mid]! <= date : dates[mid]! < date) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+// On the exchange calendar the functions below return exactly what `scan`
+// returns: a scan that starts outside coverage, or walks past either end of it
+// before it has enough sessions, is calendar_unverified. Inside coverage the
+// longest closure is far below the scan bound, so the bound never decides.
+// The arrays are fresh; the sessions in them are the frozen cached ones.
+
 /** The first `count` sessions whose open is at or after `fromMs`. */
 export function sessionsFrom(exchange: Exchange, fromMs: number, count: number, basis: CalendarBasis = 'exchange_calendar'): Session[] | CalendarUnverified {
   if (count <= 0) return [];
-  return scan(exchange, localDate(exchange, fromMs), 1, count, basis, session => session.openMs >= fromMs);
+  const start = localDate(exchange, fromMs);
+  if (basis !== 'exchange_calendar') return scan(exchange, start, 1, count, basis, session => session.openMs >= fromMs);
+  if (!inCoverage(exchange, start)) return CALENDAR_UNVERIFIED;
+  const { dates, sessions } = sessionList(exchange);
+  const found: Session[] = [];
+  for (let i = bound(dates, start, false); i < sessions.length && found.length < count; i += 1) {
+    if (sessions[i]!.openMs >= fromMs) found.push(sessions[i]!);
+  }
+  return found.length < count ? CALENDAR_UNVERIFIED : found;
 }
 
 /** The `count` sessions after an exchange-local date, ascending. */
 export function sessionsAfter(exchange: Exchange, date: string, count: number, basis: CalendarBasis = 'exchange_calendar'): Session[] | CalendarUnverified {
   if (count <= 0) return [];
-  return scan(exchange, addDays(date, 1), 1, count, basis, () => true);
+  const start = addDays(date, 1);
+  if (basis !== 'exchange_calendar') return scan(exchange, start, 1, count, basis, () => true);
+  if (!inCoverage(exchange, start)) return CALENDAR_UNVERIFIED;
+  const { dates, sessions } = sessionList(exchange);
+  const first = bound(dates, start, false);
+  return first + count > sessions.length ? CALENDAR_UNVERIFIED : sessions.slice(first, first + count);
 }
 
 /** The `count` sessions before an exchange-local date, ascending. */
 export function sessionsBefore(exchange: Exchange, date: string, count: number, basis: CalendarBasis = 'exchange_calendar'): Session[] | CalendarUnverified {
   if (count <= 0) return [];
-  const found = scan(exchange, addDays(date, -1), -1, count, basis, () => true);
-  return found === CALENDAR_UNVERIFIED ? found : found.reverse();
+  const start = addDays(date, -1);
+  if (basis !== 'exchange_calendar') {
+    const found = scan(exchange, start, -1, count, basis, () => true);
+    return found === CALENDAR_UNVERIFIED ? found : found.reverse();
+  }
+  if (!inCoverage(exchange, start)) return CALENDAR_UNVERIFIED;
+  const { dates, sessions } = sessionList(exchange);
+  const end = bound(dates, start, true);
+  return end < count ? CALENDAR_UNVERIFIED : sessions.slice(end - count, end);
+}
+
+/**
+ * Exchange-calendar sessions dated from `from` to `to` inclusive, ascending.
+ * Dates outside coverage are skipped, exactly as a day-by-day `sessionOn` loop
+ * that ignores calendar_unverified would skip them.
+ */
+export function sessionsBetween(exchange: Exchange, from: string, to: string): Session[] {
+  parseDate(from);
+  parseDate(to);
+  const { dates, sessions } = sessionList(exchange);
+  return sessions.slice(bound(dates, from, false), bound(dates, to, true));
 }
 
 /** The latest session whose close is at or before `atMs`. */
 export function lastClosedSession(exchange: Exchange, atMs: number, basis: CalendarBasis = 'exchange_calendar'): Session | CalendarUnverified {
-  const found = scan(exchange, localDate(exchange, atMs), -1, 1, basis, session => session.closeMs <= atMs);
-  return found === CALENDAR_UNVERIFIED ? found : found[0]!;
+  const start = localDate(exchange, atMs);
+  if (basis !== 'exchange_calendar') {
+    const found = scan(exchange, start, -1, 1, basis, session => session.closeMs <= atMs);
+    return found === CALENDAR_UNVERIFIED ? found : found[0]!;
+  }
+  if (!inCoverage(exchange, start)) return CALENDAR_UNVERIFIED;
+  const { dates, sessions } = sessionList(exchange);
+  let i = bound(dates, start, true) - 1;
+  while (i >= 0 && sessions[i]!.closeMs > atMs) i -= 1;
+  return i < 0 ? CALENDAR_UNVERIFIED : sessions[i]!;
 }
 
 export type ArticleTiming =

@@ -6,6 +6,17 @@ import {
 // Outcomes over daily bars passed in by the caller. Pure: the evaluation
 // clock, bars and calendar come in as arguments, so a replay at an earlier
 // clock sees exactly what was knowable then.
+//
+// Raw-price corporate actions (B-16, A-17). A bar's base factor
+// f = (close − change) / previous close is 1 on an ordinary day; |f − 1| above
+// BASE_FACTOR_TOLERANCE marks an action day. A window spans the sessions after
+// its entry session (s_1 … s_m), never the entry session itself, whose entry
+// price already sits on the post-action basis. A stock window spanning an
+// action day is excluded as suspect_corporate_action; a benchmark window is
+// chained on the exchange base price, r = exit / (start × Π f) − 1, and flagged
+// benchmark_chained. The ±SUSPECT_MOVE rule applies only to days without a
+// factor. Adjusted series (adjClose) ignore factors. Bar arrays are treated as
+// immutable: their date index is cached per array.
 
 /** One regular-session daily bar. `adjClose` present means the provider's adjusted series (plan "기업행동"). */
 export interface DailyBar {
@@ -16,6 +27,11 @@ export interface DailyBar {
   close: number;
   volume: number;
   adjClose?: number;
+  /**
+   * Raw series only: the exchange base price over the previous session's close.
+   * Valid only when finite and > 0; anything else counts as missing (no change field).
+   */
+  baseFactor?: number;
 }
 
 export type OutcomeLabel = 'up' | 'neutral' | 'down';
@@ -35,12 +51,18 @@ export type ExclusionReason = 'calendar_unverified' | 'price_gap' | 'invalid_bar
  * benchmark_gap: no market-relative value. no_open: provider without opens,
  * pre-open reaction not included. unadjusted: raw prices, small corporate
  * actions and ex-dividend drops not reflected. insufficient_volatility_history:
- * fewer than 50 valid prior returns, so no direction label.
+ * fewer than 50 valid prior returns, so no direction label. benchmark_chained:
+ * the benchmark return was chained across a distribution day on the exchange
+ * base price (A-17).
  */
-export type OutcomeFlag = 'benchmark_gap' | 'no_open' | 'unadjusted' | 'insufficient_volatility_history';
+export type OutcomeFlag = 'benchmark_gap' | 'no_open' | 'unadjusted' | 'insufficient_volatility_history' | 'benchmark_chained';
 
 /** Unadjusted single-day moves beyond these are treated as corporate actions (KR price limit, US plan default). */
 export const SUSPECT_MOVE: Readonly<Record<Exchange, number>> = { KRX: 0.3, NASDAQ: 0.5 };
+/** |baseFactor − 1| above this marks a corporate-action (stock) or distribution (benchmark) day (B-16). */
+export const BASE_FACTOR_TOLERANCE = 1e-6;
+/** Bumped whenever a rule here changes a completed outcome; part of every frozen record's priceBasisVersion. */
+export const OUTCOME_RULES_VERSION = 'outcomes-v1';
 export const BAND_K = 0.25;
 export const WEEK_BAND_FLOOR = 0.005;
 export const DAY_BAND_FLOOR = 0.002;
@@ -110,11 +132,25 @@ export function isUsableBar(bar: DailyBar, openAvailable = true): boolean {
   return true;
 }
 
+const barIndexes = new WeakMap<readonly DailyBar[], { length: number; map: Map<string, DailyBar> }>();
+
+/** Date index of a bar array, cached per array (the length check catches an append). */
 function indexBars(bars: readonly DailyBar[]): Map<string, DailyBar> {
+  const cached = barIndexes.get(bars);
+  if (cached && cached.length === bars.length) return cached.map;
   const map = new Map<string, DailyBar>();
   for (const bar of bars) map.set(bar.date, bar);
+  barIndexes.set(bars, { length: bars.length, map });
   return map;
 }
+
+/** Whose return a window measures: the stock's own (actions exclude) or the benchmark's (actions chain). */
+type SeriesRole = 'own' | 'benchmark';
+
+/** The bar's valid base factor, or undefined when the change field was missing. */
+const factorOf = (bar: DailyBar): number | undefined => positive(bar.baseFactor) ? bar.baseFactor : undefined;
+const isAction = (factor: number | undefined): factor is number =>
+  factor !== undefined && Math.abs(factor - 1) > BASE_FACTOR_TOLERANCE;
 
 /** A series is adjusted only when every bar carries adjClose; a mix has no consistent basis. */
 function basisOf(bars: readonly DailyBar[]): PriceBasis | null {
@@ -127,16 +163,26 @@ const closeOf = (bar: DailyBar, basis: PriceBasis) => basis === 'adjusted' ? bar
 /** Adjusted open = open × adjClose / close. */
 const openOf = (bar: DailyBar, basis: PriceBasis) => basis === 'adjusted' ? bar.open * bar.adjClose! / bar.close : bar.open;
 
-/** Close-to-close return between consecutive sessions, null when a bar is missing, bases differ, or a raw move is suspect. */
-function dailyReturn(previous: DailyBar | undefined, current: DailyBar | undefined, limit: number): number | null {
+/**
+ * Close-to-close return between consecutive sessions, null when a bar is
+ * missing, bases differ, or a raw move is suspect. Raw days with a factor: an
+ * action day drops the stock's return and chains the benchmark's; f = 1 keeps
+ * the return whatever its size. Without a factor the ±limit rule decides.
+ */
+function dailyReturn(previous: DailyBar | undefined, current: DailyBar | undefined, limit: number, role: SeriesRole): number | null {
   if (!previous || !current || !positive(previous.close) || !positive(current.close)) return null;
   if (hasAdjusted(previous) !== hasAdjusted(current)) return null;
   if (hasAdjusted(current)) {
     if (!positive(previous.adjClose) || !positive(current.adjClose)) return null;
     return current.adjClose / previous.adjClose - 1;
   }
-  const value = current.close / previous.close - 1;
-  return Math.abs(value) > limit ? null : value;
+  const factor = factorOf(current);
+  if (factor === undefined) {
+    const value = current.close / previous.close - 1;
+    return Math.abs(value) > limit ? null : value;
+  }
+  if (!isAction(factor)) return current.close / previous.close - 1;
+  return role === 'own' ? null : current.close / (previous.close * factor) - 1;
 }
 
 function sampleStd(values: readonly number[]): number {
@@ -152,22 +198,53 @@ function sigmaSessions(exchange: Exchange, last: Session): Session[] | CalendarU
 
 /**
  * Daily standard deviation from the sixty returns ending at `last`; returns
- * across a missing bar or a suspect day are dropped, and fewer than fifty
- * valid ones give null. With a benchmark the returns are market-relative and
- * a day needs both series.
+ * across a missing bar, a suspect day or a stock action day are dropped, and
+ * fewer than fifty valid ones give null. With a benchmark the returns are
+ * market-relative, a day needs both series, and the benchmark is chained on
+ * distribution days. With a clock, a session's bars count only once they were
+ * available at clock.nowMs; a pair touching a later one is dropped as missing.
  */
-export function dailySigma(exchange: Exchange, last: Session, bars: readonly DailyBar[], benchmarkBars?: readonly DailyBar[]): number | null {
+export function dailySigma(exchange: Exchange, last: Session, bars: readonly DailyBar[], benchmarkBars?: readonly DailyBar[],
+  clock?: OutcomeClock): number | null {
+  // Memoised per bar array: many outcomes share the session σ ends at. Exact as
+  // long as bar arrays are not mutated and availability functions are pure.
+  let memo = sigmaMemo.get(bars);
+  if (!memo) { memo = new Map(); sigmaMemo.set(bars, memo); }
+  const key = [exchange, last.date, last.closeMs, bars.length, idOf(benchmarkBars), benchmarkBars?.length ?? -1,
+    clock ? clock.nowMs : '-', clock ? idOf(clock.availableAtMs) : '-'].join('|');
+  const cached = memo.get(key);
+  if (cached !== undefined) return cached;
+  const value = computeSigma(exchange, last, bars, benchmarkBars, clock);
+  if (memo.size >= 100_000) memo.clear();
+  memo.set(key, value);
+  return value;
+}
+
+const sigmaMemo = new WeakMap<readonly DailyBar[], Map<string, number | null>>();
+const objectIds = new WeakMap<object, number>();
+let nextObjectId = 1;
+function idOf(value: object | undefined): number {
+  if (!value) return 0;
+  let id = objectIds.get(value);
+  if (id === undefined) { id = nextObjectId++; objectIds.set(value, id); }
+  return id;
+}
+
+function computeSigma(exchange: Exchange, last: Session, bars: readonly DailyBar[], benchmarkBars?: readonly DailyBar[],
+  clock?: OutcomeClock): number | null {
   const sessions = sigmaSessions(exchange, last);
   if (sessions === CALENDAR_UNVERIFIED) return null;
   const own = indexBars(bars);
   const market = benchmarkBars ? indexBars(benchmarkBars) : null;
   const limit = SUSPECT_MOVE[exchange];
+  const known = clock ? sessions.map(session => availableAt(clock, session) <= clock.nowMs) : null;
   const values: number[] = [];
   for (let i = 1; i < sessions.length; i += 1) {
-    const value = dailyReturn(own.get(sessions[i - 1]!.date), own.get(sessions[i]!.date), limit);
+    if (known && (!known[i - 1] || !known[i])) continue;
+    const value = dailyReturn(own.get(sessions[i - 1]!.date), own.get(sessions[i]!.date), limit, 'own');
     if (value === null) continue;
     if (!market) { values.push(value); continue; }
-    const benchmark = dailyReturn(market.get(sessions[i - 1]!.date), market.get(sessions[i]!.date), limit);
+    const benchmark = dailyReturn(market.get(sessions[i - 1]!.date), market.get(sessions[i]!.date), limit, 'benchmark');
     if (benchmark !== null) values.push(value - benchmark);
   }
   return values.length >= SIGMA_MIN_VALID ? sampleStd(values) : null;
@@ -194,10 +271,16 @@ interface WindowPlan {
 interface WindowPrices {
   r: number;
   basis: PriceBasis;
+  /** The benchmark return was chained across an action day (product of factors ≠ 1). */
+  chained: boolean;
 }
 
-/** Prices for a planned window, or why the series cannot give one. */
-function windowReturn(exchange: Exchange, plan: WindowPlan, bars: readonly DailyBar[], openAvailable: boolean):
+/**
+ * Prices for a planned window, or why the series cannot give one. The window
+ * spans sessions[1..m]; the entry session's own factor never matters, except
+ * that a factor on it skips the open-entry same-day check (B-16).
+ */
+function windowReturn(exchange: Exchange, plan: WindowPlan, bars: readonly DailyBar[], openAvailable: boolean, role: SeriesRole):
   WindowPrices | Exclude<ExclusionReason, 'benchmark_gap' | 'calendar_unverified'> {
   const index = indexBars(bars);
   const window = plan.sessions.map(session => index.get(session.date));
@@ -209,15 +292,24 @@ function windowReturn(exchange: Exchange, plan: WindowPlan, bars: readonly Daily
   const exit = present[present.length - 1]!;
   if (!isUsableBar(entry, openAvailable) || !isUsableBar(exit, openAvailable)) return 'invalid_bar';
   if (present.some(bar => !positive(bar.close))) return 'invalid_bar';
+  let chain = 1;
   if (basis === 'raw') {
     const limit = SUSPECT_MOVE[exchange];
-    if (plan.entryType === 'open' && Math.abs(entry.close / entry.open - 1) > limit) return 'suspect_corporate_action';
+    if (plan.entryType === 'open' && factorOf(entry) === undefined && Math.abs(entry.close / entry.open - 1) > limit) {
+      return 'suspect_corporate_action';
+    }
     for (let i = 1; i < present.length; i += 1) {
-      if (Math.abs(present[i]!.close / present[i - 1]!.close - 1) > limit) return 'suspect_corporate_action';
+      const factor = factorOf(present[i]!);
+      if (factor === undefined) {
+        if (Math.abs(present[i]!.close / present[i - 1]!.close - 1) > limit) return 'suspect_corporate_action';
+      } else if (isAction(factor)) {
+        if (role === 'own') return 'suspect_corporate_action';
+        chain *= factor;
+      }
     }
   }
   const start = plan.entryType === 'open' ? openOf(entry, basis) : closeOf(entry, basis);
-  return { r: closeOf(exit, basis) / start - 1, basis };
+  return { r: closeOf(exit, basis) / (start * chain) - 1, basis, chained: chain !== 1 };
 }
 
 function emptyOutcome(status: OutcomeStatus, reason: ExclusionReason | null): OutcomeBase {
@@ -258,16 +350,17 @@ function measure(exchange: Exchange, plan: WindowPlan, bars: readonly DailyBar[]
   clock: OutcomeClock): OutcomeBase {
   if (!allAvailable(clock, plan.sessions)) return planned(plan, 'pending', null);
   const openAvailable = clock.openAvailable ?? true;
-  const own = windowReturn(exchange, plan, bars, openAvailable);
+  const own = windowReturn(exchange, plan, bars, openAvailable, 'own');
   if (typeof own === 'string') return planned(plan, 'excluded', own);
   const outcome = planned(plan, 'complete', null);
   outcome.basis = own.basis;
   outcome.r = own.r;
   if (own.basis === 'raw') outcome.flags.push('unadjusted');
-  const market = benchmarkBars ? windowReturn(exchange, plan, benchmarkBars, openAvailable) : null;
+  const market = benchmarkBars ? windowReturn(exchange, plan, benchmarkBars, openAvailable, 'benchmark') : null;
   if (market && typeof market !== 'string' && market.basis === own.basis) {
     outcome.benchmarkR = market.r;
     outcome.relative = own.r - market.r;
+    if (market.chained) outcome.flags.push('benchmark_chained');
   } else {
     outcome.flags.push('benchmark_gap');
   }
@@ -300,7 +393,7 @@ export function caseOutcome(input: CaseOutcomeInput): CaseOutcome {
   const outcome = measure(exchange, plan, input.bars, input.benchmarkBars, input);
   if (outcome.status === 'complete') {
     const last = lastClosedSession(exchange, publishedAtMs);
-    outcome.sigma = last === CALENDAR_UNVERIFIED ? null : dailySigma(exchange, last, input.bars);
+    outcome.sigma = last === CALENDAR_UNVERIFIED ? null : dailySigma(exchange, last, input.bars, undefined, input);
     if (outcome.sigma === null) outcome.flags.push('insufficient_volatility_history');
     else {
       outcome.band = neutralBand(outcome.sigma, 5, WEEK_BAND_FLOOR);
@@ -336,7 +429,7 @@ export function weeklyOutcome(input: WeeklyOutcomeInput): WeeklyOutcome {
       outcome.reason = 'benchmark_gap';
     } else {
       const last = lastClosedSession(exchange, weekAsOfMs);
-      outcome.sigma = last === CALENDAR_UNVERIFIED ? null : dailySigma(exchange, last, input.bars, input.benchmarkBars!);
+      outcome.sigma = last === CALENDAR_UNVERIFIED ? null : dailySigma(exchange, last, input.bars, input.benchmarkBars!, input);
       if (outcome.sigma === null) outcome.flags.push('insufficient_volatility_history');
       else {
         outcome.band = neutralBand(outcome.sigma, 5, WEEK_BAND_FLOOR);
@@ -361,9 +454,14 @@ function nextDayBase(previous: Session, session: Session, status: OutcomeStatus,
     intraday: null, benchmarkIntraday: null, relativeIntraday: null };
 }
 
-/** Close-to-close and open-to-close for one series, or why it has none. */
-function dayReturns(exchange: Exchange, previous: Session, session: Session, bars: readonly DailyBar[], openAvailable: boolean):
-  { r: number; intraday: number | null; basis: PriceBasis } | Exclude<ExclusionReason, 'benchmark_gap' | 'calendar_unverified'> {
+/**
+ * Close-to-close and open-to-close for one series, or why it has none. The
+ * window spans N only: an action on N excludes the stock and chains the
+ * benchmark (close(N) / (f · close(N−1)) − 1, the official change vs/base).
+ */
+function dayReturns(exchange: Exchange, previous: Session, session: Session, bars: readonly DailyBar[], openAvailable: boolean,
+  role: SeriesRole): { r: number; intraday: number | null; basis: PriceBasis; chained: boolean } |
+  Exclude<ExclusionReason, 'benchmark_gap' | 'calendar_unverified'> {
   const index = indexBars(bars);
   const before = index.get(previous.date);
   const bar = index.get(session.date);
@@ -371,10 +469,20 @@ function dayReturns(exchange: Exchange, previous: Session, session: Session, bar
   const basis = basisOf([before, bar]);
   if (!basis) return 'price_gap';
   if (!isUsableBar(before, openAvailable) || !isUsableBar(bar, openAvailable)) return 'invalid_bar';
-  const r = closeOf(bar, basis) / closeOf(before, basis) - 1;
-  if (basis === 'raw' && Math.abs(r) > SUSPECT_MOVE[exchange]) return 'suspect_corporate_action';
-  // The adjustment factor cancels within one day, so open → close needs no basis.
-  return { r, intraday: openAvailable ? bar.close / bar.open - 1 : null, basis };
+  let r = closeOf(bar, basis) / closeOf(before, basis) - 1;
+  let chained = false;
+  if (basis === 'raw') {
+    const factor = factorOf(bar);
+    if (factor === undefined) {
+      if (Math.abs(r) > SUSPECT_MOVE[exchange]) return 'suspect_corporate_action';
+    } else if (isAction(factor)) {
+      if (role === 'own') return 'suspect_corporate_action';
+      r = bar.close / (factor * before.close) - 1;
+      chained = true;
+    }
+  }
+  // The adjustment factor cancels within one day, so open → close needs no basis and is never chained.
+  return { r, intraday: openAvailable ? bar.close / bar.open - 1 : null, basis, chained };
 }
 
 /**
@@ -393,7 +501,7 @@ export function nextDayOutcome(input: NextDayOutcomeInput): NextDayOutcome {
   const previous = previousList[0]!;
   if (!allAvailable(input, [previous, session])) return nextDayBase(previous, session, 'pending', null);
   const openAvailable = input.openAvailable ?? true;
-  const own = dayReturns(exchange, previous, session, input.bars, openAvailable);
+  const own = dayReturns(exchange, previous, session, input.bars, openAvailable, 'own');
   if (typeof own === 'string') return nextDayBase(previous, session, 'excluded', own);
   const outcome = nextDayBase(previous, session, 'complete', null);
   outcome.basis = own.basis;
@@ -401,7 +509,7 @@ export function nextDayOutcome(input: NextDayOutcomeInput): NextDayOutcome {
   outcome.intraday = own.intraday;
   if (own.basis === 'raw') outcome.flags.push('unadjusted');
   if (!openAvailable) outcome.flags.push('no_open');
-  const market = input.benchmarkBars ? dayReturns(exchange, previous, session, input.benchmarkBars, openAvailable) : null;
+  const market = input.benchmarkBars ? dayReturns(exchange, previous, session, input.benchmarkBars, openAvailable, 'benchmark') : null;
   if (!market || typeof market === 'string' || market.basis !== own.basis) {
     outcome.status = 'excluded';
     outcome.reason = 'benchmark_gap';
@@ -410,9 +518,10 @@ export function nextDayOutcome(input: NextDayOutcomeInput): NextDayOutcome {
   }
   outcome.benchmarkR = market.r;
   outcome.relative = own.r - market.r;
+  if (market.chained) outcome.flags.push('benchmark_chained');
   outcome.benchmarkIntraday = market.intraday;
   outcome.relativeIntraday = own.intraday === null || market.intraday === null ? null : own.intraday - market.intraday;
-  outcome.sigma = dailySigma(exchange, previous, input.bars, input.benchmarkBars!);
+  outcome.sigma = dailySigma(exchange, previous, input.bars, input.benchmarkBars!, input);
   if (outcome.sigma === null) outcome.flags.push('insufficient_volatility_history');
   else {
     outcome.band = neutralBand(outcome.sigma, 1, DAY_BAND_FLOOR);

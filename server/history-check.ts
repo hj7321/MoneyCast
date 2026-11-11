@@ -9,6 +9,16 @@ import { companies, COMPANY_NEWS_IDENTITY, type Company } from '../packages/core
 import {
   addDays, CALENDAR_UNVERIFIED, EXCHANGE_CALENDARS, closesEarly, localDate, sessionOn, sessionsBefore, weeklyAsOfAtOrBefore, type Exchange,
 } from './market-calendar.js';
+import {
+  codeToken, createRedactor, etTime, finite, fscDate, fscQuery, instant, isKospi200Name, parseFscBody, parseNum, readBounded, type Redactor,
+} from './price-wire.js';
+
+// The generic wire helpers live in price-wire.ts (shared with the production price adapters); re-exported here
+// under their step-3 names so the check tool's API is unchanged.
+export {
+  createRedactor, etTime, extractXmlError, fscDate, fscItems, fscQuery, fscWireKey, isKospi200Name, parseFscBody, parseNum, secretForms,
+  type FscParsed, type Redactor, type XmlError,
+} from './price-wire.js';
 
 export type HistoryProvider = 'fsc' | 'massive' | 'marketaux';
 export const PROVIDERS: readonly HistoryProvider[] = ['fsc', 'massive', 'marketaux'];
@@ -61,48 +71,6 @@ export function createBudget(caps: Readonly<Record<HistoryProvider, number>> = C
       marketaux: { cap: caps.marketaux, used: used.marketaux },
     }),
   };
-}
-
-// ---------------------------------------------------------------- secrets
-
-function safeDecode(value: string): string {
-  try { return decodeURIComponent(value); } catch { return value; }
-}
-
-/** Every textual form a key can take on the wire or in an echo; forms under 8 characters are ignored. */
-export function secretForms(keys: readonly (string | undefined)[]): string[] {
-  const forms = new Set<string>();
-  for (const raw of keys) {
-    const key = raw?.trim();
-    if (!key) continue;
-    for (const base of new Set([key, safeDecode(key)])) {
-      const encoded = encodeURIComponent(base);
-      // URLSearchParams (how the Marketaux URL is built) also encodes !'()~ and sends spaces as '+'.
-      const formEncoded = new URLSearchParams([['k', base]]).toString().slice(2);
-      const lowerHex = (text: string) => text.replace(/%[0-9A-F]{2}/g, hex => hex.toLowerCase());
-      for (const form of [base, encoded, formEncoded, safeDecode(base), lowerHex(encoded), lowerHex(formEncoded),
-        encoded.replace(/%20/g, '+'), base.replace(/\//g, '\\/'), JSON.stringify(base).slice(1, -1)]) {
-        if (form.length >= 8) forms.add(form);
-      }
-    }
-  }
-  return [...forms].sort((a, b) => b.length - a.length);
-}
-
-export interface Redactor {
-  (text: string): string;
-  contains(text: string): boolean;
-}
-
-export function createRedactor(keys: readonly (string | undefined)[]): Redactor {
-  const forms = secretForms(keys);
-  const redact = ((text: string) => {
-    let out = text;
-    for (const form of forms) out = out.split(form).join('[REDACTED]');
-    return out;
-  }) as Redactor;
-  redact.contains = (text: string) => forms.some(form => text.includes(form));
-  return redact;
 }
 
 // ---------------------------------------------------------------- dates
@@ -282,50 +250,12 @@ export function buildPlan(dates: CheckDates, only: readonly HistoryProvider[] = 
 
 // ---------------------------------------------------------------- wire
 
-/** The data.go.kr key as sent: an Encoding (percent-encoded) copy is decoded once, so it is encoded exactly once on the wire. */
-export function fscWireKey(key: string): string {
-  return /%[0-9A-Fa-f]{2}/.test(key) ? safeDecode(key) : key;
-}
-
-/** encodeURIComponent rather than URLSearchParams, which would send spaces as '+'. */
-export function fscQuery(key: string, params: Record<string, string>): string {
-  return [['serviceKey', fscWireKey(key.trim())], ...Object.entries(params)]
-    .map(([name, value]) => `${encodeURIComponent(name!)}=${encodeURIComponent(value!)}`).join('&');
-}
-
 function requestUrl(provider: HistoryProvider, path: string, params: Record<string, string>, key: string): string {
   if (provider === 'fsc') return `${ORIGINS.fsc}${path}?${fscQuery(key, params)}`;
   const url = new URL(path, ORIGINS[provider]);
   for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
   if (provider === 'marketaux') url.searchParams.set('api_token', key);
   return url.toString();
-}
-
-async function readBounded(response: Response, max: number): Promise<string | 'too_large'> {
-  const length = Number(response.headers.get('content-length'));
-  if (Number.isFinite(length) && length > max) {
-    await response.body?.cancel().catch(() => undefined);
-    return 'too_large';
-  }
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    while (true) {
-      const part = await reader.read();
-      if (part.done) break;
-      bytes += part.value.byteLength;
-      if (bytes > max) return 'too_large';
-      chunks.push(part.value);
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
-  const data = new Uint8Array(bytes);
-  let offset = 0;
-  for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder().decode(data);
 }
 
 export interface CallRecord {
@@ -359,12 +289,6 @@ interface Context {
   calls: CallRecord[];
   stopped: Set<HistoryProvider>;
   lastStart: Partial<Record<HistoryProvider, number>>;
-}
-
-/** Provider codes are copied only when they look like identifiers, never as free text. */
-function codeToken(value: unknown, max = 64): string | null {
-  const text = typeof value === 'number' ? String(value) : typeof value === 'string' ? value.trim() : '';
-  return /^[A-Za-z0-9_.:-]+$/.test(text) && text.length <= max ? text : null;
 }
 
 function skip(ctx: Context, call: PlannedCall, code: string): CallRecord {
@@ -416,110 +340,6 @@ async function perform(ctx: Context, call: PlannedCall): Promise<{ record: CallR
   record.code = outcome.code;
   record.ms = Math.max(0, ctx.deps.now() - started);
   return { record, outcome };
-}
-
-// ---------------------------------------------------------------- FSC parsing
-
-/** Numbers arrive as strings ("-.39", "1,234"); '' is missing, not 0. */
-export function parseNum(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value !== 'string') return null;
-  const text = value.trim().replace(/,/g, '');
-  if (text === '') return null;
-  const parsed = Number(text);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-export function fscDate(value: unknown): string | null {
-  const text = typeof value === 'number' ? String(value) : typeof value === 'string' ? value.trim() : '';
-  const match = /^(\d{4})(\d{2})(\d{2})$/.exec(text);
-  if (!match) return null;
-  // Compared field by field: toISOString() on an impossible date such as 20231301 would throw and end the whole run.
-  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  const probe = new Date(Date.UTC(year, month - 1, day));
-  return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day
-    ? `${match[1]}-${match[2]}-${match[3]}` : null;
-}
-
-/** items.item can be an array, a single object, '' or missing. */
-export function fscItems(body: unknown): Json[] {
-  if (!isRecord(body)) return [];
-  const items = body.items;
-  if (!isRecord(items)) return [];
-  const item = items.item;
-  if (item === undefined || item === null || item === '') return [];
-  return (Array.isArray(item) ? item : [item]).filter(isRecord);
-}
-
-const FSC_STOP_NAMES = new Set([
-  'SERVICE_KEY_IS_NOT_REGISTERED_ERROR', 'SERVICE_ACCESS_DENIED_ERROR', 'LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR',
-  'LIMITED_NUMBER_OF_SERVICE_REQUESTS_PER_SECOND_EXCEEDS_ERROR', 'SERVICE_KEY_IS_NULL', 'PERMISSION_DENIED',
-  'BLACKLIST_IP_ACCESS_ERROR', 'DEADLINE_HAS_EXPIRED_ERROR',
-]);
-const FSC_STOP_CODES = new Set(['20', '22', '23', '29', '30', '31']);
-
-interface FscErrorFields { reasonCode: string | null; authMsg: string | null; errMsg: string | null; resultCode: string | null; resultMsg: string | null }
-export interface XmlError extends FscErrorFields { code: string; stop: boolean }
-
-/** A gateway message as an identifier ('SERVICE KEY IS NOT REGISTERED ERROR.' → 'SERVICE_KEY_IS_NOT_REGISTERED_ERROR'); free text yields null. */
-function messageToken(value: unknown): string | null {
-  if (typeof value !== 'string' && typeof value !== 'number') return null;
-  return codeToken(String(value).trim().replace(/\s+/g, '_').replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ''), 80);
-}
-
-function classifyFscError(fields: FscErrorFields): { name: string | null; stop: boolean } {
-  const name = [fields.authMsg, fields.resultMsg].find(value => value && /^[A-Z][A-Z0-9_]+$/.test(value)) ?? null;
-  const stop = [fields.authMsg, fields.resultMsg, fields.errMsg].some(value => value !== null && FSC_STOP_NAMES.has(value.toUpperCase())) ||
-    [fields.reasonCode, fields.resultCode].some(value => value !== null && FSC_STOP_CODES.has(value));
-  return { name, stop };
-}
-
-export function extractXmlError(text: string): XmlError {
-  const tag = (name: string) => {
-    const match = new RegExp(`<${name}>\\s*([^<]{0,200}?)\\s*</${name}>`).exec(text);
-    return match ? messageToken(match[1]) : null;
-  };
-  const fields: FscErrorFields = {
-    reasonCode: tag('returnReasonCode'), authMsg: tag('returnAuthMsg'), errMsg: tag('errMsg'), resultCode: tag('resultCode'), resultMsg: tag('resultMsg'),
-  };
-  const { name, stop } = classifyFscError(fields);
-  return { code: `xml_error:${name ?? fields.reasonCode ?? fields.resultCode ?? 'unknown'}`, ...fields, stop };
-}
-
-export type FscParsed =
-  | { ok: true; items: Json[]; totalCount: number | null; numOfRows: number | null; resultCode: string }
-  | { ok: false; code: string; stop: boolean };
-
-export function parseFscBody(text: string): FscParsed {
-  const trimmed = text.trimStart();
-  if (trimmed.startsWith('<')) {
-    const error = extractXmlError(trimmed);
-    return { ok: false, code: error.code, stop: error.stop };
-  }
-  if (!trimmed.startsWith('{')) return { ok: false, code: 'bad_json', stop: false };
-  let json: unknown;
-  try { json = JSON.parse(trimmed); } catch { return { ok: false, code: 'bad_json', stop: false }; }
-  const root = isRecord(json) && isRecord(json.response) ? json.response : json;
-  if (!isRecord(root)) return { ok: false, code: 'bad_json', stop: false };
-  // The gateway's error envelope may also come as JSON, wrapped in OpenAPI_ServiceResponse or bare.
-  const gateway = isRecord(root.OpenAPI_ServiceResponse) ? root.OpenAPI_ServiceResponse : root;
-  const cmm = isRecord(gateway.cmmMsgHeader) ? gateway.cmmMsgHeader : null;
-  if (cmm) {
-    const fields: FscErrorFields = { reasonCode: messageToken(cmm.returnReasonCode), authMsg: messageToken(cmm.returnAuthMsg),
-      errMsg: messageToken(cmm.errMsg), resultCode: null, resultMsg: null };
-    const { name, stop } = classifyFscError(fields);
-    return { ok: false, code: `fsc_result:${name ?? fields.reasonCode ?? 'unknown'}`, stop };
-  }
-  // resultCode / resultMsg may also sit at the top level instead of under header.
-  const header = isRecord(root.header) ? root.header : 'resultCode' in root || 'resultMsg' in root ? root : {};
-  const resultCode = codeToken(header.resultCode) ?? 'missing';
-  const resultMsg = messageToken(header.resultMsg);
-  if (resultCode !== '00') {
-    const { name, stop } = classifyFscError({ reasonCode: null, authMsg: null, errMsg: null, resultCode, resultMsg });
-    return { ok: false, code: `fsc_result:${resultCode === 'missing' && name ? name : resultCode}`, stop };
-  }
-  const body = isRecord(root.body) ? root.body : {};
-  return { ok: true, items: fscItems(body), totalCount: parseNum(body.totalCount), numOfRows: parseNum(body.numOfRows), resultCode };
 }
 
 // ---------------------------------------------------------------- summaries
@@ -622,15 +442,6 @@ export function summarizeFscSeries(items: readonly Json[]): FscSeriesSummary {
     fieldPresence, invalid: capped(invalid), haltLike, extremeMoves,
     basePrice: { pairs, equal, share: pairs ? round(equal / pairs, 4) : null, mismatches },
   };
-}
-
-const etClock = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : null;
-/** Epoch milliseconds a Date can hold; anything else (nanoseconds, say) would make Intl throw and end the whole run. */
-const instant = (value: unknown) => { const ms = finite(value); return ms !== null && Math.abs(ms) <= 8.64e15 ? ms : null; };
-
-export function etTime(ms: number): string {
-  return instant(ms) === null ? 'invalid' : etClock.format(new Date(ms)).replace(/^24/, '00');
 }
 
 const MASSIVE_FIELDS = ['o', 'h', 'l', 'c', 'v', 'vw', 'n', 't'] as const;
@@ -932,11 +743,6 @@ export function summarizeMarketaux(results: readonly MarketauxQueryResult[], wee
 }
 
 // ---------------------------------------------------------------- live runners
-
-const KOSPI200_NAMES = new Set(['코스피200', 'KOSPI200']);
-export function isKospi200Name(value: unknown): boolean {
-  return typeof value === 'string' && KOSPI200_NAMES.has(value.normalize('NFKC').replace(/\s+/g, '').toUpperCase());
-}
 
 interface FscFetch { items: Json[]; totalCount: number | null; truncated: boolean }
 

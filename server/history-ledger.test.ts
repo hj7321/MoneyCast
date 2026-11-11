@@ -5,6 +5,9 @@ import {
   BACKFILL_KNOWN_DELAY_MS, entriesFromSnapshot, groupEvents, groupStories, independentCount, isStatsEligible, isTimeUnverified,
   knownAtMs, labelAt, ledgerKey, mergeLedger, selectIndependent, statsInclusion, type LedgerEntry, type LedgerLabel,
 } from './history-ledger.js';
+import { backfillEntry, createStoryIndex, foldLedger, mergeEntry, pickOutcome, type LedgerOutcome } from './history-ledger.js';
+import type { NextDayOutcome, WeeklyOutcome } from './history-outcomes.js';
+import { buildDaySample, buildWeekSample } from './history-stats.js';
 import { createSnapshot } from './snapshot-store.js';
 
 const HOUR = 3_600_000;
@@ -308,4 +311,243 @@ test('n_eff counts greedily the windows that enter no earlier than the previous 
   const shuffled = [w(120, 240), w(0, 120), w(60, 180), { entryMs: Number.NaN, exitMs: T0 }, w(50, 10)];
   assert.equal(independentCount(shuffled), 2);
   assert.deepEqual(selectIndependent([w(240, 360), w(0, 120), w(60, 180)]).map(item => item.entryMs), [T0, T0 + 240 * HOUR]);
+});
+
+// --- Step 4: frozen outcomes, segment folding, backfill entries, story index ---------------
+
+function seeded(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = Math.imul(state ^ (state >>> 15), 1 | state);
+    value ^= value + Math.imul(value ^ (value >>> 7), 61 | value);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+function outcome(overrides: Partial<LedgerOutcome> = {}): LedgerOutcome {
+  return {
+    entryType: 'close_no_open', entryDate: '2026-06-01', exitDate: '2026-06-08', entryAt: '2026-06-01T20:00:00.000Z',
+    exitAt: '2026-06-08T20:00:00.000Z', sessions: ['2026-06-01', '2026-06-02', '2026-06-03', '2026-06-04', '2026-06-05', '2026-06-08'],
+    basis: 'raw', r: 0.001, benchmarkR: 0.002, relative: -0.001, sigma: 0.01, band: 0.005, label: 'neutral',
+    flags: ['no_open', 'unadjusted', 'benchmark_chained'], priceBasisVersion: 'fsc-raw-v1/outcomes-v1', frozenAt: at(200), ...overrides,
+  };
+}
+
+test('LedgerOutcome uses the outcome names (neutral, close_no_open) and survives a merge, a fold and JSON', () => {
+  const frozen = outcome();
+  const merged = mergeLedger([entry('a', 0)], [entry('a', 0, { outcome: frozen })])[0]!;
+  assert.deepEqual(merged.outcome, frozen);
+  const folded = foldLedger([[entry('a', 0)], [{ ...merged }]])[0]!;
+  assert.deepEqual(JSON.parse(JSON.stringify(folded)).outcome, frozen);
+  assert.equal(folded.outcome!.label, 'neutral');
+  assert.equal(folded.outcome!.entryType, 'close_no_open');
+  // A null label (insufficient volatility history) is a valid frozen outcome too.
+  assert.equal(mergeLedger([entry('b', 0)], [entry('b', 0, { outcome: outcome({ label: null, sigma: null, band: null }) })])[0]!.outcome!.label, null);
+});
+
+test('pickOutcome: the same version keeps the first frozen outcome, a new version replaces only when frozen later', () => {
+  const first = outcome({ r: 0.01, frozenAt: at(100) });
+  const later = outcome({ r: 0.02, frozenAt: at(150) });
+  assert.equal(pickOutcome(undefined, first), first);
+  assert.equal(pickOutcome(first, undefined), first);
+  assert.equal(pickOutcome(first, later), first);
+  assert.equal(pickOutcome(later, first), later);
+  const rebased = outcome({ r: 0.03, priceBasisVersion: 'fsc-raw-v2/outcomes-v1', frozenAt: at(300) });
+  assert.equal(pickOutcome(first, rebased), rebased);
+  // A record of another version that was frozen earlier (a replayed older file) does not win.
+  assert.equal(pickOutcome(rebased, first), rebased);
+  assert.equal(pickOutcome(first, outcome({ priceBasisVersion: 'x/outcomes-v2', frozenAt: at(100) })), first);
+  // Through mergeEntry: nothing else of the entry changes, and an unchanged merge keeps identity.
+  const stored = entry('a', 0, { outcome: first });
+  assert.equal(mergeEntry(stored, entry('a', 0, { outcome: later })), stored);
+  const replaced = mergeEntry(stored, entry('a', 0, { outcome: rebased }));
+  assert.equal(replaced.outcome, rebased);
+  assert.deepEqual({ ...replaced, outcome: undefined }, { ...stored, outcome: undefined });
+});
+
+test('foldLedger: segments fold in order like sequential mergeEntry, storyId stays and inputs are untouched', () => {
+  const january = [entry('a', 0, { storyId: 'story-x' }), entry('b', 1), entry('c', 2, { companyId: other.id })];
+  const patchA = { ...january[0]!, labels: [...january[0]!.labels, label(30, { sentiment: 'negative' })], storyId: 'ignored' };
+  const february = [patchA, entry('d', 40), { ...january[1]!, outcome: outcome() }];
+  const march = [entry('a', 0, { labels: [label(10, { sentiment: 'neutral' })] }), entry('e', 41, { url: 'https://d.example/a' })];
+  const before = structuredClone([january, february, march]);
+  const folded = foldLedger([january, february, march]);
+  assert.deepEqual([january, february, march], before);
+  assert.deepEqual(folded.map(ledgerKey), [january[0]!, january[1]!, january[2]!, february[1]!, march[1]!].map(ledgerKey));
+  const a = folded[0]!;
+  assert.equal(a.storyId, 'story-x');
+  assert.deepEqual(a.labels.map(item => item.sentiment), ['positive', 'negative']);
+  assert.deepEqual(folded[1]!.outcome, outcome());
+  // The fold never regroups: e keeps its own stored storyId even though its URL matches d.
+  assert.equal(folded[4]!.storyId, 'e');
+  // Equal to applying mergeEntry key by key.
+  const manual = new Map<string, LedgerEntry>();
+  for (const item of [...january, ...february, ...march]) {
+    const key = ledgerKey(item);
+    manual.set(key, manual.has(key) ? mergeEntry(manual.get(key)!, item) : structuredClone(item));
+  }
+  assert.deepEqual(folded, [...manual.values()]);
+  // Shallow copies, not the stored objects: a merge builds new label arrays instead of pushing.
+  assert.notEqual(folded[3], february[1]);
+  assert.notEqual(folded[0]!.labels, january[0]!.labels);
+  assert.equal(january[0]!.labels.length, 1);
+  assert.deepEqual(foldLedger([]), []);
+});
+
+test('backfillEntry: no first sighting, one label dated publication + 24 hours, known from then', () => {
+  const published = '2025-03-04T05:06:07.000Z';
+  const collection = { sort: 'datedesc', limit: 250, languages: ['en'], fetch: 'gdelt:doc/artlist' };
+  const item = backfillEntry({ companyId: company.id, article: article('old', 0, { publishedAt: published, identity: undefined }), collection })!;
+  assert.equal(item.origin, 'backfill');
+  assert.equal(item.firstSeenAt, null);
+  assert.equal(item.storyId, item.id);
+  assert.equal(item.identity, 'name_match');
+  assert.equal(item.timePrecision, 'second');
+  assert.equal(item.labels.length, 1);
+  assert.equal(item.labels[0]!.at, iso(Date.parse(published) + BACKFILL_KNOWN_DELAY_MS));
+  assert.equal(item.labels[0]!.promptVersion, null);
+  assert.equal(knownAtMs(item), Date.parse(published) + 24 * HOUR);
+  assert.equal(isTimeUnverified(item), true);
+  assert.notEqual(item.collection, collection);
+  assert.deepEqual(item.collection, collection);
+  assert.equal(backfillEntry({ companyId: company.id, article: article('bad', 0, { publishedAt: 'not a date' }), collection }), null);
+  assert.equal(backfillEntry({ companyId: company.id, article: article('day', 0, { publishedAt: '2025-03-04T00:00:00Z' }), collection })!.timePrecision, 'day');
+});
+
+test('backfill entries are invisible to a week asOf 12 hours after publication; the day sample uses publication time', () => {
+  const asOf = Date.parse('2026-06-07T23:50:00Z');
+  const make = (id: string, published: string) => backfillEntry({
+    companyId: company.id, article: article(id, 0, { publishedAt: published }),
+    collection: { sort: 'datedesc', limit: 250, languages: [], fetch: 'gdelt:doc/artlist' },
+  })!;
+  const weekOutcome = (weekAsOfMs: number): WeeklyOutcome => ({
+    status: 'complete', reason: null, entryType: 'open', entryDate: '2026-06-08', exitDate: '2026-06-12', entryAtMs: asOf + HOUR,
+    exitAtMs: asOf + 5 * 24 * HOUR, sessions: [], basis: 'raw', r: 0.02, benchmarkR: 0, relative: 0.02, sigma: 0.01, band: 0.005,
+    label: 'up', flags: [], weekAsOfMs,
+  });
+  const week = (entries: LedgerEntry[]) => buildWeekSample({
+    exchange: 'NASDAQ', companyId: company.id, direction: 'positive', entries, nowMs: asOf + 10 * 24 * HOUR,
+    observation: { fromMs: asOf - 7 * 24 * HOUR - HOUR }, outcome: weekOutcome, toMs: asOf,
+  }).units;
+  const late = week([make('half-day', '2026-06-07T11:50:00Z')]);
+  assert.deepEqual(late.map(unit => [unit.group, unit.timeUnverified]), [['other', false]]);
+  const known = week([make('day-old', '2026-06-06T20:00:00Z')]);
+  assert.deepEqual(known.map(unit => [unit.group, unit.timeUnverified]), [['event', true]]);
+  // Day sample: Mon 22:00 ET is overnight before Tue 2026-06-02's open, 11.5 hours later.
+  const dayOutcome = (date: string): NextDayOutcome => ({
+    status: 'complete', reason: null, entryType: 'close', entryDate: date, exitDate: date, entryAtMs: Date.parse(`${date}T00:00:00Z`),
+    exitAtMs: Date.parse(`${date}T20:00:00Z`), sessions: [], basis: 'raw', r: 0.01, benchmarkR: 0, relative: 0.01, sigma: 0.01,
+    band: 0.002, label: 'up', flags: [], intraday: null, benchmarkIntraday: null, relativeIntraday: null,
+  });
+  const days = buildDaySample({
+    exchange: 'NASDAQ', companyId: company.id, direction: 'positive', entries: [make('overnight', '2026-06-02T02:00:00Z')],
+    nowMs: Date.parse('2026-06-03T00:00:00Z'), observation: { fromMs: Date.parse('2026-06-01T00:00:00Z') }, outcome: dayOutcome,
+  });
+  const tuesday = days.units.find(unit => unit.key === '2026-06-02')!;
+  assert.deepEqual([tuesday.group, tuesday.timeUnverified], ['event', true]);
+});
+
+/** Random ledger: two companies, late sightings, backfill, daily recurring titles, URL copies and similar titles. */
+function randomLedger(seed: number, count: number): LedgerEntry[] {
+  const next = seeded(seed);
+  const items: LedgerEntry[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const hours = Math.floor(next() * 24 * 25);
+    const overrides: Partial<LedgerEntry> = { companyId: next() < 0.6 ? company.id : other.id };
+    const kind = next();
+    const source = items.length ? items[Math.floor(next() * items.length)]! : null;
+    if (source && kind < 0.2) overrides.url = source.url;
+    else if (kind < 0.35) overrides.title = `Why ${overrides.companyId} stock is moving today`;
+    else if (source && kind < 0.5) overrides.title = `${source.title} - Wire`;
+    else if (source && kind < 0.6) overrides.title = `${source.title.slice(0, -2)}zz`;
+    const seen = next();
+    if (seen < 0.1) { overrides.firstSeenAt = null; overrides.origin = 'backfill'; }
+    else overrides.firstSeenAt = at(hours + Math.floor(seen * 40));
+    items.push(entry(`e${i}`, next() < 0.1 && source ? (Date.parse(source.publishedAt) - T0) / HOUR : hours, overrides));
+  }
+  return items;
+}
+
+test('createStoryIndex equals groupStories after every advance (seeded property test)', () => {
+  for (const seed of [1, 2, 3, 4, 5, 6]) {
+    const items = randomLedger(seed, 260);
+    const index = createStoryIndex(items);
+    const next = seeded(seed * 97);
+    let checks = 0;
+    for (let asOf = T0 - 20 * HOUR; asOf < T0 + 26 * 24 * HOUR + 60 * HOUR; asOf += Math.floor(1 + next() * 30) * HOUR) {
+      index.advance(asOf);
+      const expected = groupStories(items, asOf);
+      assert.deepStrictEqual(index.stories(), expected, `seed ${seed} at ${iso(asOf)}`);
+      for (const group of expected) for (const member of group.entries) assert.deepStrictEqual(index.storyOf(member), group);
+      checks += 1;
+    }
+    // The same asOf twice is fine; going back is not.
+    index.advance(T0 + 40 * 24 * HOUR);
+    index.advance(T0 + 40 * 24 * HOUR);
+    assert.deepStrictEqual(index.stories(), groupStories(items, T0 + 40 * 24 * HOUR));
+    assert.throws(() => index.advance(T0), RangeError);
+    assert.ok(checks > 20);
+  }
+  // Not yet known: no story.
+  const late = entry('late', 0, { firstSeenAt: at(100) });
+  const index = createStoryIndex([late]);
+  index.advance(T0 + 50 * HOUR);
+  assert.equal(index.storyOf(late), undefined);
+  assert.deepEqual(index.stories(), []);
+});
+
+/** A large ledger: `perCompany` entries per company over two years, one every ~105 minutes per company. */
+function largeLedger(companyIds: readonly string[], perCompany: number): LedgerEntry[] {
+  const next = seeded(7);
+  const items: LedgerEntry[] = [];
+  for (const companyId of companyIds) {
+    for (let i = 0; i < perCompany; i += 1) {
+      const hours = i * 1.75 + next();
+      items.push(entry(`${companyId}-${i}`, hours, { companyId, title: `${companyId} headline ${i} ${Math.floor(next() * 1e6)}`,
+        url: `https://news.example/${companyId}/${i}` }));
+    }
+  }
+  return items;
+}
+
+test('benchmark: merging 240 incoming entries into 40,000 takes under 500 ms', t => {
+  const ids = companies.slice(0, 8).map(item => item.id);
+  const existing = largeLedger(ids, 5_000);
+  const incoming: LedgerEntry[] = [];
+  for (let i = 0; i < 240; i += 1) {
+    const companyId = ids[i % ids.length]!;
+    const n = 4_900 + Math.floor(i / ids.length);
+    if (i % 2 === 0) incoming.push(entry(`${companyId}-${n}`, n * 1.75, { companyId, labels: [label(n * 1.75 + 30, { sentiment: 'negative' })] }));
+    else incoming.push(entry(`${companyId}-copy-${i}`, n * 1.75 + 1, { companyId, url: `https://news.example/${companyId}/${n}` }));
+  }
+  const started = performance.now();
+  const merged = mergeLedger(existing, incoming);
+  const elapsed = performance.now() - started;
+  assert.equal(merged.length, 40_000 + 120);
+  assert.ok(merged.slice(40_000).every(item => item.storyId.includes('-') && !item.storyId.includes('copy')));
+  t.diagnostic(`mergeLedger ${elapsed.toFixed(1)} ms`);
+  assert.ok(elapsed < 500, `${elapsed.toFixed(0)} ms`);
+});
+
+test('benchmark: folding 40,000 entries in 20 segments takes under 300 ms', t => {
+  const all = largeLedger(companies.slice(0, 8).map(item => item.id), 5_000);
+  const segments: LedgerEntry[][] = [];
+  for (let s = 0; s < 20; s += 1) {
+    const segment = all.slice(s * 2_000, (s + 1) * 2_000);
+    // Each later segment also patches 100 entries of the previous one.
+    if (s > 0) {
+      for (const old of all.slice((s - 1) * 2_000, (s - 1) * 2_000 + 100)) {
+        segment.push({ ...old, labels: [...old.labels, label(Date.parse(old.publishedAt) / HOUR - T0 / HOUR + 50, { sentiment: 'negative' })] });
+      }
+    }
+    segments.push(segment);
+  }
+  const started = performance.now();
+  const folded = foldLedger(segments);
+  const elapsed = performance.now() - started;
+  assert.equal(folded.length, 40_000);
+  assert.equal(folded[0]!.labels.length, 2);
+  t.diagnostic(`foldLedger ${elapsed.toFixed(1)} ms`);
+  assert.ok(elapsed < 300, `${elapsed.toFixed(0)} ms`);
 });

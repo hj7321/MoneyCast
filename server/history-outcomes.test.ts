@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DAY_BAND_FLOOR, SIGMA_MIN_VALID, WEEK_BAND_FLOOR, caseOutcome, dailySigma, isUsableBar, labelFor, neutralBand, nextDayOutcome,
-  weeklyOutcome, type CaseOutcomeInput, type DailyBar,
+  BASE_FACTOR_TOLERANCE, DAY_BAND_FLOOR, OUTCOME_RULES_VERSION, SIGMA_MIN_VALID, WEEK_BAND_FLOOR, caseOutcome, dailySigma, isUsableBar,
+  labelFor, neutralBand, nextDayOutcome, weeklyOutcome, type CaseOutcomeInput, type DailyBar,
 } from './history-outcomes.js';
 import {
   ARTICLE_DELAY_MS, CALENDAR_UNVERIFIED, addDays, classifyArticleTime, lastClosedSession, sessionOn, sessionsBefore,
@@ -316,4 +316,206 @@ test('next trading day skips holidays for the base close and excludes gaps, jump
   assert.equal(nextDayOutcome({ ...input, sessionDate: '2027-01-04', exchange: 'KRX', bars: KR, benchmarkBars: KODEX }).reason,
     'calendar_unverified');
   assert.throws(() => nextDayOutcome({ ...input, sessionDate: '2026-11-26' }), RangeError);
+});
+
+// --- Step 4: base factors (B-16), benchmark chaining (A-17), σ clock -------------------------
+
+function near(actual: number, expected: number, tolerance: number, message?: string) {
+  assert.ok(Math.abs(actual - expected) <= tolerance, `${message ?? ''} ${actual} vs ${expected}`);
+}
+
+/**
+ * A raw series with a base factor on every bar but the first: 1 on an ordinary
+ * day, f on an action day, where every price from that day on is scaled by f
+ * (so the official change close / (f · previous close) − 1 is the unscaled return).
+ */
+function factored(series: DailyBar[], factors: Record<string, number> = {}): DailyBar[] {
+  let scale = 1;
+  return series.map((item, i) => {
+    const factor = factors[item.date];
+    if (factor !== undefined) scale *= factor;
+    const scaled = { ...item, open: item.open * scale, high: item.high * scale, low: item.low * scale, close: item.close * scale };
+    return i === 0 ? scaled : { ...scaled, baseFactor: factor ?? 1 };
+  });
+}
+const lift = (series: DailyBar[], from: string, by: number) => series.map(item => item.date >= from
+  ? { ...item, open: item.open * by, high: item.high * by, low: item.low * by, close: item.close * by } : item);
+/** Saturday article: open entry E = 2026-11-09 (Mon) → E+4 = 11-13 close. */
+const KR_OPEN = '2026-11-07T03:00:00Z';
+/** 11:00 KST Tuesday: close entry D = 2026-11-10 → D+5 = 11-17 close. */
+const KR_CLOSE = '2026-11-10T02:00:00Z';
+const krCase = (published: string, own: DailyBar[], market: DailyBar[] | null = KODEX, overrides: Partial<CaseOutcomeInput> = {}) =>
+  caseOutcome({ exchange: 'KRX', publishedAtMs: at(published), bars: own, benchmarkBars: market, nowMs: LATE, ...overrides });
+const krDay = (own: DailyBar[], market: DailyBar[] = KODEX, sessionDate = '2026-11-11') =>
+  nextDayOutcome({ exchange: 'KRX', sessionDate, bars: own, benchmarkBars: market, nowMs: LATE });
+
+test('B-16: a stock window spanning an action day is excluded; the entry session itself is not spanned', () => {
+  const open = krCase(KR_OPEN, factored(KR));
+  assert.deepEqual([open.status, open.entryType, open.entryDate, open.exitDate], ['complete', 'open', '2026-11-09', '2026-11-13']);
+  assert.equal(krCase(KR_OPEN, factored(KR, { '2026-11-10': 0.5 })).reason, 'suspect_corporate_action');
+  assert.equal(krCase(KR_OPEN, factored(KR, { '2026-11-13': 0.5 })).reason, 'suspect_corporate_action');
+  // On E the open already trades on the new basis, so the window is clean.
+  const onEntry = factored(KR, { '2026-11-09': 0.5 });
+  const entryCase = krCase(KR_OPEN, onEntry);
+  assert.equal(entryCase.status, 'complete');
+  assert.equal(entryCase.r, bar(onEntry, '2026-11-13').close / bar(onEntry, '2026-11-09').open - 1);
+  // Close entry: D's close is already after the action; D+1 … D+5 are spanned.
+  const close = krCase(KR_CLOSE, factored(KR, { '2026-11-10': 0.5 }));
+  assert.deepEqual([close.status, close.entryType, close.entryDate, close.exitDate], ['complete', 'close', '2026-11-10', '2026-11-17']);
+  assert.equal(krCase(KR_CLOSE, factored(KR, { '2026-11-11': 0.5 })).reason, 'suspect_corporate_action');
+  assert.equal(krCase(KR_CLOSE, factored(KR, { '2026-11-17': 0.5 })).reason, 'suspect_corporate_action');
+  // Without opens the window is E close → E+5 close and spans E+1 … E+5.
+  const noOpen = { openAvailable: false };
+  assert.equal(krCase(KR_OPEN, factored(KR, { '2026-11-09': 0.5 }), KODEX, noOpen).status, 'complete');
+  assert.equal(krCase(KR_OPEN, factored(KR, { '2026-11-16': 0.5 }), KODEX, noOpen).reason, 'suspect_corporate_action');
+});
+
+test('B-16: next day spans N only, so an action on N excludes and an action on N−1 does not', () => {
+  assert.equal(krDay(factored(KR, { '2026-11-11': 0.5 })).reason, 'suspect_corporate_action');
+  const before = factored(KR, { '2026-11-10': 0.5 });
+  const outcome = krDay(before);
+  assert.equal(outcome.status, 'complete');
+  assert.equal(outcome.r, bar(before, '2026-11-11').close / bar(before, '2026-11-10').close - 1);
+});
+
+test('B-16: the ±30% rule applies only to days without a factor, and the open check only when the entry has none', () => {
+  // f = 1 says the basis did not change: a +60% day is kept as a real move.
+  assert.equal(krCase(KR_OPEN, lift(factored(KR), '2026-11-11', 1.6)).status, 'complete');
+  assert.equal(krDay(lift(factored(KR), '2026-11-11', 1.6)).status, 'complete');
+  // Without factors (change field missing) the old rule decides.
+  assert.equal(krCase(KR_OPEN, lift(KR, '2026-11-11', 1.6)).reason, 'suspect_corporate_action');
+  assert.equal(krDay(lift(KR, '2026-11-11', 1.6)).reason, 'suspect_corporate_action');
+  // A factor within the tolerance of 1 is an ordinary day.
+  assert.equal(BASE_FACTOR_TOLERANCE, 1e-6);
+  assert.equal(krCase(KR_OPEN, factored(KR, { '2026-11-10': 1 + 5e-7 })).status, 'complete');
+  assert.equal(krCase(KR_OPEN, factored(KR, { '2026-11-10': 1 + 2e-6 })).reason, 'suspect_corporate_action');
+  // A +50% open-to-close move on E: not checked with a factor on E, excluded without one.
+  const intraday = (series: DailyBar[]) => {
+    const entry = bar(series, '2026-11-09');
+    return edit(series, '2026-11-09', { open: entry.close / 1.5, low: Math.min(entry.low, entry.close / 1.5) });
+  };
+  assert.equal(krCase(KR_OPEN, intraday(factored(KR))).status, 'complete');
+  assert.equal(krCase(KR_OPEN, intraday(KR)).reason, 'suspect_corporate_action');
+  // An invalid factor counts as missing.
+  const invalid = factored(KR).map(item => item.date === '2026-11-11' ? { ...item, baseFactor: Number.NaN } : item);
+  assert.equal(krCase(KR_OPEN, lift(invalid, '2026-11-11', 1.6)).reason, 'suspect_corporate_action');
+  const zero = factored(KR).map(item => item.date === '2026-11-11' ? { ...item, baseFactor: 0 } : item);
+  assert.equal(krCase(KR_OPEN, lift(zero, '2026-11-11', 1.6)).reason, 'suspect_corporate_action');
+});
+
+test('A-17: the KODEX benchmark is chained on the exchange base price across a spanned distribution day', () => {
+  const F = 0.988;
+  const own = factored(KR);
+  const plain = krCase(KR_OPEN, own);
+  assert.equal(plain.status, 'complete');
+  assert.ok(!plain.flags.includes('benchmark_chained'));
+  // Middle day.
+  const middle = factored(KODEX, { '2026-11-11': F });
+  const chained = krCase(KR_OPEN, own, middle);
+  assert.equal(chained.status, 'complete');
+  assert.equal(chained.benchmarkR, bar(middle, '2026-11-13').close / (bar(middle, '2026-11-09').open * F) - 1);
+  near(chained.benchmarkR!, plain.benchmarkR!, 1e-12);
+  assert.equal(chained.relative, chained.r! - chained.benchmarkR!);
+  assert.ok(chained.flags.includes('benchmark_chained'));
+  // The entry day is not spanned: its open is already on the new basis.
+  const onEntry = factored(KODEX, { '2026-11-09': F });
+  const entry = krCase(KR_OPEN, own, onEntry);
+  assert.equal(entry.benchmarkR, bar(onEntry, '2026-11-13').close / bar(onEntry, '2026-11-09').open - 1);
+  assert.ok(!entry.flags.includes('benchmark_chained'));
+  // Several days multiply.
+  const several = factored(KODEX, { '2026-11-10': 0.99, '2026-11-12': 0.98 });
+  const product = krCase(KR_OPEN, own, several);
+  assert.equal(product.benchmarkR, bar(several, '2026-11-13').close / (bar(several, '2026-11-09').open * (0.99 * 0.98)) - 1);
+  near(product.benchmarkR!, plain.benchmarkR!, 1e-12);
+  assert.ok(product.flags.includes('benchmark_chained'));
+  // The stock is excluded on an action day; the benchmark never is.
+  assert.equal(krCase(KR_OPEN, factored(KR, { '2026-11-11': F }), middle).reason, 'suspect_corporate_action');
+  // Weekly samples use the same window rule.
+  const weekly = weeklyOutcome({ exchange: 'KRX', weekAsOfMs: at('2026-11-08T23:50:00Z'), bars: own, benchmarkBars: middle, nowMs: LATE });
+  assert.equal(weekly.benchmarkR, chained.benchmarkR);
+  assert.ok(weekly.flags.includes('benchmark_chained'));
+});
+
+test('A-17: next day on a distribution day is vs / base; the open-to-close move is never chained', () => {
+  const F = 0.988;
+  const market = factored(KODEX, { '2026-11-11': F });
+  const plain = krDay(factored(KR), factored(KODEX));
+  const outcome = krDay(factored(KR), market);
+  const base = F * bar(market, '2026-11-10').close;
+  const vs = bar(market, '2026-11-11').close - base;
+  assert.equal(outcome.status, 'complete');
+  near(outcome.benchmarkR!, vs / base, 1e-12);
+  near(outcome.benchmarkR!, plain.benchmarkR!, 1e-12);
+  assert.equal(outcome.benchmarkIntraday, bar(market, '2026-11-11').close / bar(market, '2026-11-11').open - 1);
+  assert.ok(outcome.flags.includes('benchmark_chained'));
+  assert.ok(!plain.flags.includes('benchmark_chained'));
+  // An action on N−1 is not spanned.
+  assert.ok(!krDay(factored(KR), factored(KODEX, { '2026-11-10': F })).flags.includes('benchmark_chained'));
+});
+
+test('A-17 check example: KODEX 200 on 2024-04-29 (f ≈ 0.9880, raw −0.23%) chains to about +0.98%', () => {
+  const own = bars('KRX', '2024-01-02', '2024-06-28', 7);
+  const market = edit(edit(bars('KRX', '2024-01-02', '2024-06-28', 8, 0.01),
+    '2024-04-26', { open: 100, high: 100.5, low: 99.5, close: 100 }),
+    '2024-04-29', { open: 98.9, high: 99.9, low: 98.7, close: 99.77, baseFactor: 0.988 });
+  const outcome = krDay(own, market, '2024-04-29');
+  assert.equal(outcome.status, 'complete');
+  near(99.77 / 100 - 1, -0.0023, 1e-12);
+  near(outcome.benchmarkR!, 0.0098, 0.00005);
+  assert.ok(outcome.flags.includes('benchmark_chained'));
+});
+
+test('σ: a stock action day is dropped, a benchmark distribution day is chained, f = 1 days are kept', () => {
+  const last = sessionOn('KRX', '2026-11-06') as Session;
+  const window = [...(sessionsBefore('KRX', last.date, 60) as Session[]), last].map(item => item.date);
+  const action = window[30]!;
+  const std = (values: number[]) => {
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    return Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1));
+  };
+  const returns = (series: DailyBar[]) => window.slice(1).map((date, i) => bar(series, date).close / bar(series, window[i]!).close - 1);
+  // A −10% action is inside the ±30% limit: without its factor that return would count.
+  const split = factored(KR, { [action]: 0.9 });
+  const withoutAction = returns(KR).filter((_, i) => window[i + 1] !== action);
+  near(dailySigma('KRX', last, split)!, std(withoutAction), 1e-12);
+  const unflagged = split.map(item => { const { baseFactor: _ignored, ...rest } = item; return rest; });
+  near(dailySigma('KRX', last, unflagged)!, std(returns(unflagged)), 1e-12);
+  assert.ok(Math.abs(std(returns(unflagged)) - std(withoutAction)) > 1e-4);
+  // Benchmark: chained, so the relative σ matches the unscaled benchmark.
+  near(dailySigma('KRX', last, factored(KR), factored(KODEX, { [action]: 0.9 }))!, dailySigma('KRX', last, KR, KODEX)!, 1e-12);
+  // f = 1 keeps a move beyond the limit.
+  const jump = lift(factored(KR), action, 1.6);
+  near(dailySigma('KRX', last, jump)!, std(returns(jump)), 1e-12);
+  assert.ok(dailySigma('KRX', last, lift(KR, action, 1.6))! < dailySigma('KRX', last, jump)!);
+});
+
+test('σ with a clock counts a session only once its bars were available; without a clock nothing changes', () => {
+  const last = lastClosedSession('NASDAQ', at('2026-11-09T17:00:00Z')) as Session;
+  const late = (sessionsBefore('NASDAQ', last.date, 60) as Session[])[20]!.date;
+  const clock = {
+    nowMs: at('2026-11-20T00:00:00Z'),
+    availableAtMs: (session: Session) => session.date === late ? at('2026-12-01T00:00:00Z') : session.closeMs,
+  };
+  const full = dailySigma('NASDAQ', last, US, SPY);
+  assert.equal(dailySigma('NASDAQ', last, US, SPY, { nowMs: clock.nowMs }), full);
+  const dropped = dailySigma('NASDAQ', last, US, SPY, clock);
+  assert.notEqual(dropped, full);
+  // Dropped like a missing bar: the two returns touching that session go, not the whole σ.
+  assert.equal(dropped, dailySigma('NASDAQ', last, without(US, late), SPY));
+  // The outcomes pass their clock; a later clock restores the full window.
+  const caseLate = usCase('2026-11-09T17:00:00Z', clock);
+  assert.equal(caseLate.status, 'complete');
+  assert.equal(caseLate.sigma, dailySigma('NASDAQ', last, without(US, late)));
+  assert.equal(usCase('2026-11-09T17:00:00Z', { ...clock, nowMs: at('2026-12-01T00:00:00Z') }).sigma, dailySigma('NASDAQ', last, US));
+  const weekly = weeklyOutcome({ exchange: 'NASDAQ', weekAsOfMs: at('2026-11-08T23:50:00Z'), bars: US, benchmarkBars: SPY, ...clock });
+  assert.equal(weekly.status, 'complete');
+  assert.equal(weekly.sigma, dailySigma('NASDAQ', sessionOn('NASDAQ', '2026-11-06') as Session, without(US, late), SPY));
+  const lateBefore = { ...clock, availableAtMs: (session: Session) => session.date === '2026-10-20' ? at('2026-12-01T00:00:00Z') : session.closeMs };
+  const day = nextDayOutcome({ exchange: 'NASDAQ', sessionDate: '2026-11-10', bars: US, benchmarkBars: SPY, ...lateBefore });
+  assert.equal(day.status, 'complete');
+  assert.equal(day.sigma, dailySigma('NASDAQ', sessionOn('NASDAQ', '2026-11-09') as Session, without(US, '2026-10-20'), SPY));
+});
+
+test('the outcome rules version is exported for priceBasisVersion', () => {
+  assert.equal(OUTCOME_RULES_VERSION, 'outcomes-v1');
 });

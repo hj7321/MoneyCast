@@ -4,8 +4,8 @@ import {
   type HistorySources, type Horizon, type NewsTopicKey, type ReturnSummary, type SampleStats, type Verdict,
 } from '../packages/core/src/index.js';
 import {
-  groupEvents, independentCount, isKnownAt, isStatsEligible, isTimeUnverified, labelAt,
-  type EventGroup, type LedgerDirection, type LedgerEntry,
+  createStoryIndex, groupEvents, independentCount, isKnownAt, isStatsEligible, isTimeUnverified, labelAt, ledgerKey, storyRepresentative,
+  type EventGroup, type LedgerDirection, type LedgerEntry, type LedgerOutcome, type StoryIndex,
 } from './history-ledger.js';
 import {
   caseOutcome, nextDayOutcome, weeklyOutcome,
@@ -13,7 +13,7 @@ import {
 } from './history-outcomes.js';
 import {
   ARTICLE_DELAY_MS, CALENDAR_UNVERIFIED, addDays, classifyArticleTime, inOvernightWindow, lastClosedSession, localDate,
-  overnightWindow, sessionOn, sessionsAfter, weeklyAsOfsBetween, weeklyWindows,
+  overnightWindow, sessionOn, sessionsAfter, sessionsBetween, weeklyAsOfsBetween, weeklyWindows,
   type Exchange, type Session,
 } from './market-calendar.js';
 
@@ -21,11 +21,24 @@ import {
 // Pure: the clock, ledger entries and outcomes come in as arguments. Every
 // window is classified with what the ledger knew at that window's own asOf,
 // so a later fetch, relabel or price revision never rewrites an earlier unit.
+// Completed outcomes can be served frozen (withFrozenOutcomes): a frozen
+// record counts only under the current price-basis version and only once its
+// freezing clock has passed, so a replay never sees a later freeze.
 
 const DAY_MS = 86_400_000;
 const WEEK_MS = 7 * DAY_MS;
 const ms = (iso: string): number => Date.parse(iso);
 const iso = (value: number): string => new Date(value).toISOString();
+
+const publishedTimes = new WeakMap<LedgerEntry, { publishedAt: string; ms: number }>();
+/** Parsed publishedAt, cached per entry (entries are treated as immutable). */
+function publishedMs(entry: LedgerEntry): number {
+  const cached = publishedTimes.get(entry);
+  if (cached && cached.publishedAt === entry.publishedAt) return cached.ms;
+  const value = ms(entry.publishedAt);
+  publishedTimes.set(entry, { publishedAt: entry.publishedAt, ms: value });
+  return value;
+}
 
 // ---------------------------------------------------------------------------
 // Intervals
@@ -207,30 +220,59 @@ function touchesGap(observation: Observation, startMs: number, endMs: number): b
 }
 
 function companyEntries(entries: readonly LedgerEntry[], companyId: string): LedgerEntry[] {
-  return entries.filter(entry => entry.companyId === companyId && Number.isFinite(ms(entry.publishedAt)));
+  return entries.filter(entry => entry.companyId === companyId && Number.isFinite(publishedMs(entry)));
 }
 
 const opposite = (direction: LedgerDirection): LedgerDirection => direction === 'positive' ? 'negative' : 'positive';
 
+/** One sample build's entries sorted by publication time, and its incremental stories (asOf only ascends). */
+interface WindowIndex {
+  sorted: LedgerEntry[];
+  times: number[];
+  stories: StoryIndex;
+}
+
+function windowIndex(entries: readonly LedgerEntry[]): WindowIndex {
+  const times = entries.map(publishedMs);
+  const order = times.map((_, i) => i).sort((a, b) => times[a]! - times[b]! || a - b);
+  return { sorted: order.map(i => entries[i]!), times: order.map(i => times[i]!), stories: createStoryIndex(entries) };
+}
+
 /**
  * Event when the window holds an event of the direction known at asOf and no
  * eligible opposite-direction article at all (a story whose copies disagree
- * therefore blocks both directions). Everything else is other.
+ * therefore blocks both directions). Everything else is other. Only entries
+ * published in (fromMs, toMs] can be in the window. An event of direction d
+ * is in the window exactly when a story visible at asOf whose eligible
+ * directional copies are all d has its representative (the earliest one) in
+ * the window: the same as `groupEvents(...).some(e => e.direction === d &&
+ * e.members.some(inWindow))`, without regrouping the whole ledger.
  */
-function classifyWindow(entries: readonly LedgerEntry[], asOfMs: number, inWindow: (entry: LedgerEntry) => boolean,
+function classifyWindow(index: WindowIndex, asOfMs: number, fromMs: number, toMs: number, inWindow: (entry: LedgerEntry) => boolean,
   direction: LedgerDirection, unverified: (entry: LedgerEntry) => boolean): { group: UnitGroup; timeUnverified: boolean } {
   const traces = { positive: false, negative: false };
   let timeUnverified = false;
-  for (const entry of entries) {
+  const candidates: LedgerEntry[] = [];
+  let lo = 0;
+  let hi = index.times.length;
+  while (lo < hi) { const mid = (lo + hi) >>> 1; if (index.times[mid]! <= fromMs) lo = mid + 1; else hi = mid; }
+  for (let i = lo; i < index.sorted.length && index.times[i]! <= toMs; i += 1) {
+    const entry = index.sorted[i]!;
     if (!isKnownAt(entry, asOfMs) || !inWindow(entry) || !isStatsEligible(entry, asOfMs)) continue;
     const sentiment = labelAt(entry, asOfMs)?.sentiment;
     if (sentiment !== 'positive' && sentiment !== 'negative') continue;
     traces[sentiment] = true;
     if (unverified(entry)) timeUnverified = true;
+    if (sentiment === direction) candidates.push(entry);
   }
   if (!traces[direction] || traces[opposite(direction)]) return { group: 'other', timeUnverified };
-  // Grouping is the costly step, so it runs only where the cheap trace check leaves an event possible.
-  const event = groupEvents(entries, asOfMs).some(item => item.direction === direction && item.members.some(inWindow));
+  // Stories are the costly step, so they advance only where the cheap trace check leaves an event possible.
+  index.stories.advance(asOfMs);
+  const event = candidates.some(entry => {
+    const story = index.stories.storyOf(entry);
+    const found = story ? storyRepresentative(story, asOfMs) : null;
+    return found !== null && found.direction === direction && inWindow(found.entry);
+  });
   return { group: event ? 'event' : 'other', timeUnverified };
 }
 
@@ -279,7 +321,7 @@ export interface WeekSampleInput {
  */
 export function buildWeekSample(input: WeekSampleInput): UnitSample {
   const sample = emptySample('week', input.direction);
-  const entries = companyEntries(input.entries, input.companyId);
+  const index = windowIndex(companyEntries(input.entries, input.companyId));
   const endMs = Math.min(input.toMs ?? input.nowMs, input.nowMs);
   const anchors = weeklyAsOfsBetween(input.observation.fromMs + WEEK_MS, endMs);
   for (const window of weeklyWindows(input.exchange, anchors)) {
@@ -292,8 +334,8 @@ export function buildWeekSample(input: WeekSampleInput): UnitSample {
     }
     const measured = measuredOutcome(input.outcome(asOfMs), input.nowMs, sample);
     if (!measured) continue;
-    const inWindow = (entry: LedgerEntry) => { const at = ms(entry.publishedAt); return at > startMs && at <= asOfMs; };
-    const { group, timeUnverified } = classifyWindow(entries, asOfMs, inWindow, input.direction, isTimeUnverified);
+    const inWindow = (entry: LedgerEntry) => { const at = publishedMs(entry); return at > startMs && at <= asOfMs; };
+    const { group, timeUnverified } = classifyWindow(index, asOfMs, startMs, asOfMs, inWindow, input.direction, isTimeUnverified);
     sample.units.push({ key: iso(asOfMs), group, date: measured.entryDate, ...measured, timeUnverified });
   }
   return sample;
@@ -340,6 +382,7 @@ export function buildDaySample(input: DaySampleInput): UnitSample {
     if (view !== entry) backfilled.add(view);
     return view;
   });
+  const index = windowIndex(entries);
   const endMs = Math.min(input.toMs ?? input.nowMs, input.nowMs);
   const last = localDate(input.exchange, endMs);
   for (let date = localDate(input.exchange, input.observation.fromMs); date <= last; date = addDays(date, 1)) {
@@ -358,8 +401,10 @@ export function buildDaySample(input: DaySampleInput): UnitSample {
     if (session.closeMs > input.nowMs) { sample.excluded.pending = (sample.excluded.pending ?? 0) + 1; continue; }
     const measured = measuredOutcome(input.outcome(date), input.nowMs, sample);
     if (!measured) continue;
-    const inWindow = (entry: LedgerEntry) => inOvernightWindow(window, ms(entry.publishedAt), entry.timePrecision === 'day' ? 'day' : 'exact');
-    const { group, timeUnverified } = classifyWindow(entries, session.openMs, inWindow, input.direction, entry => backfilled.has(entry));
+    const inWindow = (entry: LedgerEntry) => inOvernightWindow(window, publishedMs(entry), entry.timePrecision === 'day' ? 'day' : 'exact');
+    // In the window means published in (start − 5 min, end − 5 min], or a day earlier for day precision: a superset bound.
+    const { group, timeUnverified } = classifyWindow(index, session.openMs, window.startMs - ARTICLE_DELAY_MS - DAY_MS, window.endMs,
+      inWindow, input.direction, entry => backfilled.has(entry));
     sample.units.push({ key: date, group, date, ...measured, timeUnverified });
   }
   return sample;
@@ -443,7 +488,7 @@ export function outcomesFromPrices(prices: PriceInput, nowMs: number): OutcomeSo
     week: asOfMs => memo(weeks, asOfMs, () => weeklyOutcome({ ...base, weekAsOfMs: asOfMs })),
     day: date => memo(days, date, () => nextDayOutcome({ ...base, sessionDate: date })),
     case: entry => memo(cases, `${entry.publishedAt}\u0000${entry.timePrecision}`, () => caseOutcome({
-      ...base, publishedAtMs: ms(entry.publishedAt), timePrecision: entry.timePrecision === 'day' ? 'day' : 'exact',
+      ...base, publishedAtMs: publishedMs(entry), timePrecision: entry.timePrecision === 'day' ? 'day' : 'exact',
     })),
     closeWindow: date => memo(windows, date, () => {
       const session = sessionOn(prices.exchange, date);
@@ -451,6 +496,105 @@ export function outcomesFromPrices(prices: PriceInput, nowMs: number): OutcomeSo
       // t′ one minute before the close is in session, so the case rule gives this close → +5 close.
       return caseOutcome({ ...base, publishedAtMs: session.closeMs - ARTICLE_DELAY_MS - 60_000 });
     }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Frozen outcomes (plan "완료 사례의 수익률·라벨·σ는 완료 시점 값으로 동결")
+// ---------------------------------------------------------------------------
+
+/** A completed outcome as stored by the job. */
+export interface FrozenRecord<T> {
+  outcome: T;
+  frozenAt: string;
+  priceBasisVersion: string;
+}
+
+export interface FrozenLookup {
+  week(weekAsOfMs: number): FrozenRecord<WeeklyOutcome> | null;
+  day(sessionDate: string): FrozenRecord<NextDayOutcome> | null;
+}
+
+/** Receives every newly completed outcome; may see one more than once (the job deduplicates). */
+export interface FreezeSink {
+  week(outcome: WeeklyOutcome): void;
+  day(sessionDate: string, outcome: NextDayOutcome): void;
+  case(entry: LedgerEntry, outcome: LedgerOutcome): void;
+}
+
+export interface FrozenSourceInput {
+  computed: OutcomeSource;
+  frozen: FrozenLookup;
+  sink: FreezeSink | null;
+  nowMs: number;
+  /** `${identity.priceBasis}/${OUTCOME_RULES_VERSION}` of the company's current price series. */
+  priceBasisVersion: string;
+}
+
+/**
+ * Frozen outcomes first, computed ones otherwise. A frozen record is used only
+ * under the current price-basis version and once its frozenAt ≤ nowMs, so a
+ * replay at an earlier clock recomputes what was not yet frozen then. Only
+ * complete computed outcomes reach the sink; pending and excluded ones are
+ * recomputed every run. closeWindow (display-only base shares) is never frozen.
+ */
+export function withFrozenOutcomes(input: FrozenSourceInput): OutcomeSource {
+  const { computed, frozen, sink, nowMs, priceBasisVersion } = input;
+  const usable = (record: { frozenAt: string; priceBasisVersion: string } | null | undefined): boolean =>
+    record !== null && record !== undefined && record.priceBasisVersion === priceBasisVersion && ms(record.frozenAt) <= nowMs;
+  const sentWeeks = new Set<number>();
+  const sentDays = new Set<string>();
+  const sentCases = new Set<string>();
+  return {
+    week(weekAsOfMs) {
+      const record = frozen.week(weekAsOfMs);
+      if (record && usable(record)) return record.outcome;
+      const outcome = computed.week(weekAsOfMs);
+      if (outcome.status === 'complete' && sink && !sentWeeks.has(weekAsOfMs)) { sentWeeks.add(weekAsOfMs); sink.week(outcome); }
+      return outcome;
+    },
+    day(sessionDate) {
+      const record = frozen.day(sessionDate);
+      if (record && usable(record)) return record.outcome;
+      const outcome = computed.day(sessionDate);
+      if (outcome.status === 'complete' && sink && !sentDays.has(sessionDate)) { sentDays.add(sessionDate); sink.day(sessionDate, outcome); }
+      return outcome;
+    },
+    case(entry) {
+      if (entry.outcome && usable(entry.outcome)) return caseOutcomeOfLedger(entry, entry.outcome);
+      const outcome = computed.case(entry);
+      const key = ledgerKey(entry);
+      if (sink && !sentCases.has(key)) {
+        const record = ledgerOutcomeOf(outcome, priceBasisVersion, nowMs);
+        if (record) { sentCases.add(key); sink.case(entry, record); }
+      }
+      return outcome;
+    },
+    closeWindow: sessionDate => computed.closeWindow(sessionDate),
+  };
+}
+
+/** Ledger form of a complete case outcome; null for a pending or excluded one. */
+export function ledgerOutcomeOf(outcome: CaseOutcome, priceBasisVersion: string, frozenAtMs: number): LedgerOutcome | null {
+  if (outcome.status !== 'complete' || outcome.entryType === null || outcome.entryDate === null || outcome.exitDate === null ||
+      outcome.entryAtMs === null || outcome.exitAtMs === null || outcome.basis === null || outcome.r === null ||
+      !Number.isFinite(frozenAtMs)) return null;
+  return {
+    entryType: outcome.entryType, entryDate: outcome.entryDate, exitDate: outcome.exitDate,
+    entryAt: iso(outcome.entryAtMs), exitAt: iso(outcome.exitAtMs), sessions: [...outcome.sessions], basis: outcome.basis,
+    r: outcome.r, benchmarkR: outcome.benchmarkR, relative: outcome.relative, sigma: outcome.sigma, band: outcome.band,
+    label: outcome.label, flags: [...outcome.flags], priceBasisVersion, frozenAt: iso(frozenAtMs),
+  };
+}
+
+/** The case outcome a frozen ledger outcome stands for; exactly what `caseOutcome` returned when it was frozen. */
+export function caseOutcomeOfLedger(entry: Pick<LedgerEntry, 'publishedAt' | 'timePrecision'>, outcome: LedgerOutcome): CaseOutcome {
+  const tPrimeMs = ms(entry.publishedAt) + ARTICLE_DELAY_MS + (entry.timePrecision === 'day' ? DAY_MS : 0);
+  return {
+    status: 'complete', reason: null, entryType: outcome.entryType, entryDate: outcome.entryDate, exitDate: outcome.exitDate,
+    entryAtMs: ms(outcome.entryAt), exitAtMs: ms(outcome.exitAt), sessions: [...outcome.sessions], basis: outcome.basis,
+    r: outcome.r, benchmarkR: outcome.benchmarkR, relative: outcome.relative, sigma: outcome.sigma, band: outcome.band,
+    label: outcome.label, flags: [...outcome.flags], tPrimeMs,
   };
 }
 
@@ -502,10 +646,10 @@ interface CaseItem {
 /** The overnight target session of an article, or null when its t′ falls in a session or the calendar cannot tell. */
 function overnightTarget(exchange: Exchange, entry: LedgerEntry): Session | null {
   const precision = entry.timePrecision === 'day' ? 'day' : 'exact';
-  const timing = classifyArticleTime(exchange, ms(entry.publishedAt), { precision });
+  const timing = classifyArticleTime(exchange, publishedMs(entry), { precision });
   if (timing === CALENDAR_UNVERIFIED || timing.kind === 'in_session') return null;
   const window = overnightWindow(exchange, timing.session);
-  if (window === CALENDAR_UNVERIFIED || !inOvernightWindow(window, ms(entry.publishedAt), precision)) return null;
+  if (window === CALENDAR_UNVERIFIED || !inOvernightWindow(window, publishedMs(entry), precision)) return null;
   return timing.session;
 }
 
@@ -520,7 +664,7 @@ function collectCases(horizon: Horizon, exchange: Exchange, events: readonly Eve
   const items: CaseItem[] = [];
   for (const event of events) {
     if (event.direction !== direction) continue;
-    if (!event.members.every(member => ms(member.publishedAt) < nowMs - CASE_RECENT_EXCLUSION_MS)) { count('recent'); continue; }
+    if (!event.members.every(member => publishedMs(member) < nowMs - CASE_RECENT_EXCLUSION_MS)) { count('recent'); continue; }
     const anchor = event.members[0]!;
     let outcome: CaseOutcome | NextDayOutcome;
     if (horizon === 'week') outcome = outcomes.case(anchor);
@@ -572,9 +716,7 @@ function periodShares(horizon: Horizon, exchange: Exchange, period: { from: stri
   let up = 0;
   let down = 0;
   let labelled = 0;
-  for (let date = period.from; date <= period.to; date = addDays(date, 1)) {
-    const session = sessionOn(exchange, date);
-    if (!session || session === CALENDAR_UNVERIFIED) continue;
+  for (const { date } of sessionsBetween(exchange, period.from, period.to)) {
     const outcome = horizon === 'week' ? outcomes.closeWindow(date) : outcomes.day(date);
     if (!outcome || outcome.status !== 'complete' || outcome.label === null || outcome.entryDate === null ||
         outcome.exitDate === null || outcome.entryDate < period.from || outcome.exitDate > period.to ||
@@ -767,7 +909,7 @@ export function companyStats(input: CompanyStatsInput): CompanyStats {
   // A replay at an earlier clock must not count or date entries the ledger had not seen yet.
   const entries = companyEntries(input.entries, input.companyId).filter(entry => isKnownAt(entry, input.nowMs));
   const events = groupEvents(entries, input.nowMs);
-  const published = entries.map(entry => ms(entry.publishedAt)).sort((a, b) => a - b);
+  const published = entries.map(entry => publishedMs(entry)).sort((a, b) => a - b);
   const dataAsOf: HistoryDataAsOf = {
     computedAt: iso(input.nowMs),
     lastPriceDate: input.lastPriceDate,

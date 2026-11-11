@@ -319,3 +319,155 @@ test('day-precision stamps enter at the first open after the end of that day', (
   assert.ok(utc.session.openMs >= at('2026-11-11T00:00:00Z') + ARTICLE_DELAY_MS);
   assert.equal(addDays('2026-12-31', 1), '2027-01-01');
 });
+
+// --- Memoised calendar (step 4): equal to a direct Intl computation ------------------
+
+const HOUR_MS = 60 * MINUTE;
+const DAY_MS = 24 * HOUR_MS;
+const ZONES: Record<Exchange, string> = { KRX: 'Asia/Seoul', NASDAQ: 'America/New_York' };
+const referenceFormats = new Map<string, Intl.DateTimeFormat>();
+function referenceWall(ms: number, timeZone: string) {
+  let format = referenceFormats.get(timeZone);
+  if (!format) {
+    format = new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    referenceFormats.set(timeZone, format);
+  }
+  const parts: Record<string, number> = {};
+  for (const part of format.formatToParts(new Date(ms))) if (part.type !== 'literal') parts[part.type] = Number(part.value);
+  return parts as { year: number; month: number; day: number; hour: number; minute: number; second: number };
+}
+const pad2 = (value: number) => String(value).padStart(2, '0');
+function referenceDate(ms: number, timeZone: string): string {
+  const wall = referenceWall(ms, timeZone);
+  return `${wall.year}-${pad2(wall.month)}-${pad2(wall.day)}`;
+}
+function referenceOffset(ms: number, timeZone: string): number {
+  const wall = referenceWall(ms, timeZone);
+  return Date.UTC(wall.year, wall.month - 1, wall.day, wall.hour % 24, wall.minute, wall.second) - Math.floor(ms / 1000) * 1000;
+}
+function referenceZoned(date: string, time: string, timeZone: string): number {
+  const [year, month, day] = date.split('-').map(Number) as [number, number, number];
+  const [hour, minute] = time.split(':').map(Number) as [number, number];
+  const wall = Date.UTC(year, month - 1, day, hour, minute);
+  return wall - referenceOffset(wall - referenceOffset(wall, timeZone), timeZone);
+}
+function referenceSession(exchange: Exchange, date: string): Session | null | typeof CALENDAR_UNVERIFIED {
+  const calendar = EXCHANGE_CALENDARS[exchange];
+  if (date < calendar.coverage.from || date > calendar.coverage.to) return CALENDAR_UNVERIFIED;
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+  if (weekday === 0 || weekday === 6 || calendar.holidays.has(date)) return null;
+  const hours = calendar.changedHours.get(date) ?? calendar;
+  return { date, openMs: referenceZoned(date, hours.open, calendar.timeZone), closeMs: referenceZoned(date, hours.close, calendar.timeZone) };
+}
+/** The reference sessions, computed once per date (the reference itself is direct Intl, never the module's caches). */
+const referenceSessions = new Map<string, Session | null | typeof CALENDAR_UNVERIFIED>();
+function referenceSessionOnce(exchange: Exchange, date: string) {
+  const key = `${exchange} ${date}`;
+  if (!referenceSessions.has(key)) referenceSessions.set(key, referenceSession(exchange, date));
+  return referenceSessions.get(key)!;
+}
+/** Day-by-day scan over the reference sessions, the step-2 algorithm. */
+function referenceScan(exchange: Exchange, start: string, step: 1 | -1, count: number, accept: (session: Session) => boolean) {
+  const found: Session[] = [];
+  for (let date = start, days = 0; found.length < count; date = addDays(date, step), days += 1) {
+    if (days > 400 + count * 2) return CALENDAR_UNVERIFIED;
+    const value = referenceSessionOnce(exchange, date);
+    if (value === CALENDAR_UNVERIFIED) return CALENDAR_UNVERIFIED;
+    if (value && accept(value)) found.push(value);
+  }
+  return step === 1 ? found : found.reverse();
+}
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = Math.imul(state ^ (state >>> 15), 1 | state);
+    value ^= value + Math.imul(value ^ (value >>> 7), 61 | value);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+test('memoised localDate and zone conversion equal Intl on 20,000 seeded instants from 2023 to 2027, DST weeks included', () => {
+  const next = seededRandom(2023);
+  const from = at('2023-01-01T00:00:00Z');
+  const to = at('2028-01-01T00:00:00Z');
+  // US changes: second Sunday of March 07:00Z and first Sunday of November 06:00Z.
+  const changes: number[] = [];
+  for (let year = 2023; year <= 2027; year += 1) {
+    const march = Array.from({ length: 7 }, (_, i) => Date.UTC(year, 2, 8 + i, 7)).find(ms => new Date(ms).getUTCDay() === 0)!;
+    const november = Array.from({ length: 7 }, (_, i) => Date.UTC(year, 10, 1 + i, 6)).find(ms => new Date(ms).getUTCDay() === 0)!;
+    changes.push(march, november);
+  }
+  let checked = 0;
+  for (let i = 0; i < 20_000; i += 1) {
+    const near = i % 3 === 0;
+    // Near a change: within ±3 days, a third of them within ±2 hours at whole and odd minutes.
+    const base = near ? changes[i % changes.length]! : from;
+    const span = near ? (i % 9 === 0 ? 4 * HOUR_MS : 6 * DAY_MS) : to - from;
+    const ms = Math.floor(near ? base - span / 2 + next() * span : base + next() * span);
+    for (const exchange of ['KRX', 'NASDAQ'] as const) {
+      assert.equal(localDate(exchange, ms), referenceDate(ms, ZONES[exchange]), `${exchange} ${iso(ms)}`);
+    }
+    checked += 1;
+    // Wall time → instant on every fourth one (the reference costs four Intl calls per zone).
+    if (i % 4 !== 0) continue;
+    const wall = referenceWall(ms, 'America/New_York');
+    const date = `${wall.year}-${pad2(wall.month)}-${pad2(wall.day)}`;
+    const time = `${pad2(wall.hour)}:${pad2(wall.minute)}`;
+    for (const zone of Object.values(ZONES)) assert.equal(zonedTimeToUtc(date, time, zone), referenceZoned(date, time, zone), `${zone} ${date} ${time}`);
+  }
+  assert.equal(checked, 20_000);
+  // The exact instants of the changes and the minutes around them.
+  for (const change of changes) {
+    for (let ms = change - 2 * HOUR_MS; ms <= change + 2 * HOUR_MS; ms += 60_000) {
+      assert.equal(localDate('NASDAQ', ms), referenceDate(ms, 'America/New_York'), iso(ms));
+      assert.equal(localDate('NASDAQ', ms + 59_999), referenceDate(ms + 59_999, 'America/New_York'), iso(ms + 59_999));
+    }
+  }
+});
+
+test('memoised sessions and session scans equal the day-by-day reference on every date 2022-12-20..2028-01-10', () => {
+  for (const exchange of ['KRX', 'NASDAQ'] as const) {
+    for (let date = '2022-12-20'; date <= '2028-01-10'; date = addDays(date, 1)) {
+      assert.deepEqual(sessionOn(exchange, date), referenceSessionOnce(exchange, date), `${exchange} ${date}`);
+    }
+  }
+  const next = seededRandom(7);
+  const first = at('2022-12-20T00:00:00Z');
+  const last = at('2028-01-10T00:00:00Z');
+  for (let i = 0; i < 3_000; i += 1) {
+    const exchange = i % 2 === 0 ? 'KRX' : 'NASDAQ';
+    const ms = Math.floor(first + next() * (last - first));
+    const date = localDate(exchange, ms);
+    const count = 1 + Math.floor(next() * 70);
+    const message = `${exchange} ${iso(ms)} ${count}`;
+    assert.deepEqual(sessionsAfter(exchange, date, count), referenceScan(exchange, addDays(date, 1), 1, count, () => true), message);
+    assert.deepEqual(sessionsBefore(exchange, date, count), referenceScan(exchange, addDays(date, -1), -1, count, () => true), message);
+    assert.deepEqual(sessionsFrom(exchange, ms, count), referenceScan(exchange, date, 1, count, session => session.openMs >= ms), message);
+    const closed = referenceScan(exchange, date, -1, 1, session => session.closeMs <= ms);
+    assert.deepEqual(lastClosedSession(exchange, ms), closed === CALENDAR_UNVERIFIED ? closed : closed[0], message);
+  }
+  // Coverage edges, both ends.
+  assert.equal(sessionsAfter('KRX', '2026-12-29', 2), CALENDAR_UNVERIFIED);
+  assert.deepEqual(dates(sessionsAfter('KRX', '2026-12-28', 2)), ['2026-12-29', '2026-12-30']);
+  assert.equal(sessionsBefore('NASDAQ', '2023-01-03', 1), CALENDAR_UNVERIFIED);
+  assert.deepEqual(dates(sessionsBefore('NASDAQ', '2023-01-04', 1)), ['2023-01-03']);
+  assert.equal(sessionsFrom('KRX', at('2027-01-04T00:00:00Z'), 1), CALENDAR_UNVERIFIED);
+  assert.equal(lastClosedSession('KRX', at('2023-01-02T05:00:00Z')), CALENDAR_UNVERIFIED);
+  assert.throws(() => sessionsAfter('KRX', '2026-1-2', 1), RangeError);
+});
+
+test('cached sessions are frozen and the arrays holding them are fresh', () => {
+  const session = sessionOn('NASDAQ', '2026-11-10') as Session;
+  assert.equal(session, sessionOn('NASDAQ', '2026-11-10'));
+  assert.ok(Object.isFrozen(session));
+  assert.throws(() => { (session as { openMs: number }).openMs = 0; }, TypeError);
+  const one = sessionsAfter('NASDAQ', '2026-11-09', 3) as Session[];
+  const two = sessionsAfter('NASDAQ', '2026-11-09', 3) as Session[];
+  assert.notEqual(one, two);
+  assert.ok(one.every(item => Object.isFrozen(item)));
+  one.pop();
+  assert.equal((sessionsAfter('NASDAQ', '2026-11-09', 3) as Session[]).length, 3);
+  assert.ok(Object.isFrozen(lastClosedSession('KRX', at('2026-11-10T08:00:00Z'))));
+});

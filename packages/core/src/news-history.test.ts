@@ -399,3 +399,60 @@ test('CompanyHistory narrows on status', () => {
   const stats: DirectionStats | undefined = week.directions?.positive;
   assert.equal(stats?.verdict, 'supports');
 });
+
+// --- sampleOrigin (step 4) ----------------------------------------------------
+
+test('sampleOrigin parses when consistent and travels only with directions', () => {
+  const withOrigin = (origin: unknown, status = 'ready', withStats = true) => {
+    const value = clone(ready(status, withStats));
+    value.horizons.week.sampleOrigin = origin;
+    return parseCompanyHistory(value) as Extract<CompanyHistory, { horizons: unknown }> | null;
+  };
+  const backfilled = withOrigin({ backfillUnits: 3, includesBackfill: true, pointInTimeGuaranteed: false, extra: 1 })!;
+  assert.deepEqual(backfilled.horizons.week.sampleOrigin, { backfillUnits: 3, includesBackfill: true, pointInTimeGuaranteed: false });
+  assert.deepEqual(withOrigin({ backfillUnits: 0, includesBackfill: false, pointInTimeGuaranteed: true })!.horizons.week.sampleOrigin,
+    { backfillUnits: 0, includesBackfill: false, pointInTimeGuaranteed: true });
+  // Unknown backfill with no counted unit is the conservative form and stays valid.
+  assert.ok(withOrigin({ backfillUnits: 0, includesBackfill: true, pointInTimeGuaranteed: false }));
+  for (const bad of [
+    { backfillUnits: 2, includesBackfill: false, pointInTimeGuaranteed: true },
+    { backfillUnits: 2, includesBackfill: true, pointInTimeGuaranteed: true },
+    { backfillUnits: 0, includesBackfill: false, pointInTimeGuaranteed: false },
+    { backfillUnits: -1, includesBackfill: true, pointInTimeGuaranteed: false },
+    { backfillUnits: 1.5, includesBackfill: true, pointInTimeGuaranteed: false },
+    { backfillUnits: '1', includesBackfill: true, pointInTimeGuaranteed: false },
+    { backfillUnits: 1, includesBackfill: 'yes', pointInTimeGuaranteed: false },
+    { backfillUnits: 1, includesBackfill: true },
+    null, 'backfill', [],
+  ]) assert.equal(withOrigin(bad), null, JSON.stringify(bad));
+  // It describes a verdict sample, so it never comes without one.
+  const consistent = { backfillUnits: 0, includesBackfill: false, pointInTimeGuaranteed: true };
+  assert.equal(withOrigin(consistent, 'ready', false), null);
+  assert.equal(withOrigin(consistent, 'stats_not_public', false), null);
+  assert.equal(withOrigin(consistent, 'no_history', false), null);
+});
+
+test('sampleOrigin is optional: an absent field stays absent and older values parse unchanged', () => {
+  const out = parseCompanyHistory(ready()) as Extract<CompanyHistory, { horizons: unknown }>;
+  assert.equal('sampleOrigin' in out.horizons.week, false);
+  assert.equal('sampleOrigin' in out.horizons.day, false);
+  assert.deepEqual(out, ready());
+  const value = clone(ready());
+  value.horizons.day.sampleOrigin = undefined;
+  assert.deepEqual(parseCompanyHistory(value), ready());
+});
+
+test('horizonSampleOrigin counts backfilled units and is conservative for anything else; the note wording', () => {
+  assert.deepEqual(history.horizonSampleOrigin(0), { backfillUnits: 0, includesBackfill: false, pointInTimeGuaranteed: true });
+  assert.deepEqual(history.horizonSampleOrigin(4), { backfillUnits: 4, includesBackfill: true, pointInTimeGuaranteed: false });
+  for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '2', null, undefined, {}]) {
+    assert.deepEqual(history.horizonSampleOrigin(bad), { backfillUnits: 0, includesBackfill: true, pointInTimeGuaranteed: false }, String(bad));
+  }
+  // Helper output always parses.
+  for (const units of [0, 7]) {
+    const value = clone(ready());
+    value.horizons.day.sampleOrigin = history.horizonSampleOrigin(units);
+    assert.ok(parseCompanyHistory(value), String(units));
+  }
+  assert.equal(history.BACKFILL_SAMPLE_NOTE, '과거 데이터 포함 · 시점 미보증');
+});

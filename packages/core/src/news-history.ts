@@ -101,6 +101,29 @@ export interface HorizonHistory {
   newsWindow: { start: string; end: string } | null;
   /** Null when statistics for the market are not public: no numbers cross the wire. */
   directions: { positive: DirectionStats; negative: DirectionStats } | null;
+  /**
+   * Only with directions. Optional so older values still parse; the server sends
+   * it with every non-null `directions`, and a reader treats its absence as
+   * unknown (shows BACKFILL_SAMPLE_NOTE).
+   */
+  sampleOrigin?: HorizonSampleOrigin;
+}
+
+/** Origin of a horizon's verdict sample. Backfilled articles carry an assumed knowledge time (publication + 24 h). */
+export interface HorizonSampleOrigin {
+  /** Kept units whose directional articles rest on that assumed time. */
+  backfillUnits: number;
+  includesBackfill: boolean;
+  /** True only when no unit rests on an assumed time. */
+  pointInTimeGuaranteed: boolean;
+}
+
+/** From a count of backfilled units; anything that is not a count is treated conservatively as unknown backfill. */
+export function horizonSampleOrigin(backfillUnits: unknown): HorizonSampleOrigin {
+  if (typeof backfillUnits !== 'number' || !Number.isSafeInteger(backfillUnits) || backfillUnits < 0) {
+    return { backfillUnits: 0, includesBackfill: true, pointInTimeGuaranteed: false };
+  }
+  return { backfillUnits, includesBackfill: backfillUnits > 0, pointInTimeGuaranteed: backfillUnits === 0 };
 }
 
 export interface HistoryCoverage {
@@ -334,6 +357,17 @@ function parseHorizon(value: unknown, horizon: Horizon, requireNoStats: boolean)
     if (positive === null || negative === null) return null;
     directions = { positive, negative };
   }
+  let sampleOrigin: HorizonSampleOrigin | undefined;
+  if (value.sampleOrigin !== undefined) {
+    // It describes a verdict sample, so it never travels without one, and its three fields must agree.
+    const origin = value.sampleOrigin;
+    if (directions === null || !isRecord(origin) || !isCount(origin.backfillUnits) ||
+        typeof origin.includesBackfill !== 'boolean' || typeof origin.pointInTimeGuaranteed !== 'boolean' ||
+        (origin.backfillUnits > 0 && !origin.includesBackfill) || origin.pointInTimeGuaranteed !== !origin.includesBackfill) return null;
+    sampleOrigin = {
+      backfillUnits: origin.backfillUnits, includesBackfill: origin.includesBackfill, pointInTimeGuaranteed: origin.pointInTimeGuaranteed,
+    };
+  }
   return {
     validation,
     targetWindow: {
@@ -341,6 +375,7 @@ function parseHorizon(value: unknown, horizon: Horizon, requireNoStats: boolean)
     },
     newsWindow,
     directions,
+    ...(sampleOrigin ? { sampleOrigin } : {}),
   };
 }
 
@@ -521,6 +556,8 @@ export const NO_HISTORY_MESSAGE = '과거 사례 데이터 없음 · 기존 판�
 export const IDENTITY_UNVERIFIED_MESSAGE = '종목 식별을 확인하지 못해 과거 사례 통계가 없습니다 · 기존 판단 유지';
 export const PRICE_UNAVAILABLE_MESSAGE = '가격 데이터를 받지 못해 과거 사례 통계가 없습니다 · 기존 판단 유지';
 export const HISTORY_UNAVAILABLE_MESSAGE = '과거 사례를 불러오지 못했습니다';
+/** Shown when a horizon's sample includes backfilled articles, or when its origin is unknown. */
+export const BACKFILL_SAMPLE_NOTE = '과거 데이터 포함 · 시점 미보증';
 
 /** Row text of the integration table; `day` speaks of days, `week` of weeks. */
 export function integrationMessage(note: IntegrationNote, horizon: Horizon): string {
