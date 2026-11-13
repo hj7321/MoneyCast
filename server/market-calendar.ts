@@ -1,0 +1,603 @@
+// Regular-session calendar for the exchanges history insights measure against.
+// Pure: every function takes its clock as an argument and reads no I/O.
+//
+// Verified on 2026-11-11 (plan step 3) against official sources and observed data:
+// - KRX: the 휴장일 pages (open.krx.co.kr and global.krx.co.kr, 2023-2026 tabs) and
+//   the KRX notices for each temporary holiday, year-end closure, opening day and
+//   CSAT day. 2023-2025 matched date for date; 2026 lacked 2026-07-17 (제헌절, a
+//   public holiday again from 2026, closure announced by KRX on 2026-05-20), now
+//   added. The changed-hours times come from those KRX notices as quoted by
+//   several outlets (the notice bodies are attachments that were not opened).
+// - Nasdaq: the Nasdaq Trader calendars, trading-calendar PDFs and Equity Trader
+//   Alerts, cross-checked with the NYSE holiday and early-close calendars. All
+//   closures and 13:00 ET early closes for 2023-2027 matched; 2025-01-09 (day of
+//   mourning) rests on the alerts, which outrank Nasdaq's stale 2025 PDF.
+// - Observed daily rows (live check of 2026-11-11): the four KRX stocks and KODEX
+//   200 have a row on every session from 2023-01-02 to 2026-11-10 and none on a
+//   holiday; their only gap was 2026-07-17, the closure above. The six US series
+//   match the Nasdaq sessions exactly from 2024-11-11 to 2026-11-09.
+// Still provisional: KRX 2027 (KRX's list is pre-filled and not final, so KRX
+// coverage stays to 2026-12-31); Nasdaq 2027, taken from the NYSE schedule as
+// Nasdaq has not published its own; any unscheduled closure or changed hours
+// announced after 2026-11-11, which must be added by hand; and Nasdaq's 23/5
+// trading hours from 2026-12-06, not modelled because only the regular session
+// counts here. Extend the tables every year end (plan B-10). Dates outside a
+// declared coverage range yield 'calendar_unverified', never a weekday-only
+// guess, because a missed early close would let an already-settled close pass
+// for a post-article price.
+//
+// Memoised (plan step 4): zone offsets per 15-minute UTC bucket (exact for both
+// zones, whose changes fall on whole hours), sessions per date as frozen
+// objects, and one sorted session list per exchange for the exchange-calendar
+// scans. Results equal the direct Intl computation; only the cost changes.
+
+export type Exchange = 'KRX' | 'NASDAQ';
+export type CalendarBasis = 'exchange_calendar' | 'weekdays_only';
+export type SessionPhase = 'before_open' | 'in_session' | 'after_close';
+
+export const CALENDAR_UNVERIFIED = 'calendar_unverified' as const;
+export type CalendarUnverified = typeof CALENDAR_UNVERIFIED;
+
+/**
+ * True: every table below was checked on 2026-11-11 against the exchanges'
+ * official schedules and the observed trading dates, within the stated coverage
+ * and with the provisional parts named in the header (KRX 2027 is outside
+ * coverage; Nasdaq 2027 rests on the NYSE schedule).
+ */
+export const CALENDAR_VERIFIED = true;
+
+/** Article stamps can precede actual publication slightly (plan B-2). */
+export const ARTICLE_DELAY_MS = 5 * 60_000;
+const DAY_MS = 86_400_000;
+
+/** One regular session; times are UTC epoch milliseconds, `date` is the exchange-local date. */
+export interface Session {
+  date: string;
+  openMs: number;
+  closeMs: number;
+}
+
+/** Exchange-local wall times, HH:MM. */
+export interface SessionHours {
+  open: string;
+  close: string;
+}
+
+interface ExchangeCalendar {
+  timeZone: string;
+  /** Regular hours. */
+  open: string;
+  close: string;
+  /** Inclusive exchange-local dates the tables below are complete for. */
+  coverage: { from: string; to: string };
+  holidays: ReadonlySet<string>;
+  /** Sessions whose hours differ from the regular ones, with that day's full open and close. */
+  changedHours: ReadonlyMap<string, SessionHours>;
+}
+
+// KRX: full-day closures. KRX had no early closes in 2023-2026.
+const KRX_HOLIDAYS = [
+  // 2023
+  '2023-01-23', '2023-01-24', '2023-03-01', '2023-05-01', '2023-05-05', '2023-05-29', '2023-06-06',
+  '2023-08-15', '2023-09-28', '2023-09-29', '2023-10-02', '2023-10-03', '2023-10-09', '2023-12-25', '2023-12-29',
+  // 2024
+  '2024-01-01', '2024-02-09', '2024-02-12', '2024-03-01', '2024-04-10', '2024-05-01', '2024-05-06', '2024-05-15',
+  '2024-06-06', '2024-08-15', '2024-09-16', '2024-09-17', '2024-09-18', '2024-10-01', '2024-10-03', '2024-10-09',
+  '2024-12-25', '2024-12-31',
+  // 2025
+  '2025-01-01', '2025-01-27', '2025-01-28', '2025-01-29', '2025-01-30', '2025-03-03', '2025-05-01', '2025-05-05',
+  '2025-05-06', '2025-06-03', '2025-06-06', '2025-08-15', '2025-10-03', '2025-10-06', '2025-10-07', '2025-10-08',
+  '2025-10-09', '2025-12-25', '2025-12-31',
+  // 2026
+  '2026-01-01', '2026-02-16', '2026-02-17', '2026-02-18', '2026-03-02', '2026-05-01', '2026-05-05', '2026-05-25',
+  '2026-06-03', '2026-07-17', '2026-08-17', '2026-09-24', '2026-09-25', '2026-10-05', '2026-10-09', '2026-12-25', '2026-12-31',
+];
+
+// KRX changed hours: the first trading day of each year opens an hour late
+// (10:00-15:30) and the CSAT (수능) day runs an hour late (10:00-16:30).
+const KRX_CHANGED_HOURS: ReadonlyArray<[string, SessionHours]> = [
+  ['2023-01-02', { open: '10:00', close: '15:30' }], ['2023-11-16', { open: '10:00', close: '16:30' }],
+  ['2024-01-02', { open: '10:00', close: '15:30' }], ['2024-11-14', { open: '10:00', close: '16:30' }],
+  ['2025-01-02', { open: '10:00', close: '15:30' }], ['2025-11-13', { open: '10:00', close: '16:30' }],
+  ['2026-01-02', { open: '10:00', close: '15:30' }], ['2026-11-19', { open: '10:00', close: '16:30' }],
+];
+
+// Nasdaq follows the NYSE holiday schedule; early closes are 13:00 ET.
+const NASDAQ_HOLIDAYS = [
+  // 2023
+  '2023-01-02', '2023-01-16', '2023-02-20', '2023-04-07', '2023-05-29', '2023-06-19', '2023-07-04', '2023-09-04',
+  '2023-11-23', '2023-12-25',
+  // 2024
+  '2024-01-01', '2024-01-15', '2024-02-19', '2024-03-29', '2024-05-27', '2024-06-19', '2024-07-04', '2024-09-02',
+  '2024-11-28', '2024-12-25',
+  // 2025 (01-09: national day of mourning)
+  '2025-01-01', '2025-01-09', '2025-01-20', '2025-02-17', '2025-04-18', '2025-05-26', '2025-06-19', '2025-07-04',
+  '2025-09-01', '2025-11-27', '2025-12-25',
+  // 2026
+  '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03', '2026-05-25', '2026-06-19', '2026-07-03', '2026-09-07',
+  '2026-11-26', '2026-12-25',
+  // 2027
+  '2027-01-01', '2027-01-18', '2027-02-15', '2027-03-26', '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06',
+  '2027-11-25', '2027-12-24',
+];
+const NASDAQ_EARLY_CLOSES = [
+  '2023-07-03', '2023-11-24',
+  '2024-07-03', '2024-11-29', '2024-12-24',
+  '2025-07-03', '2025-11-28', '2025-12-24',
+  '2026-11-27', '2026-12-24',
+  '2027-11-26',
+];
+
+export const EXCHANGE_CALENDARS: Readonly<Record<Exchange, ExchangeCalendar>> = {
+  KRX: {
+    timeZone: 'Asia/Seoul', open: '09:00', close: '15:30',
+    coverage: { from: '2023-01-01', to: '2026-12-31' },
+    holidays: new Set(KRX_HOLIDAYS),
+    changedHours: new Map(KRX_CHANGED_HOURS),
+  },
+  NASDAQ: {
+    timeZone: 'America/New_York', open: '09:30', close: '16:00',
+    coverage: { from: '2023-01-01', to: '2027-12-31' },
+    holidays: new Set(NASDAQ_HOLIDAYS),
+    changedHours: new Map(NASDAQ_EARLY_CLOSES.map(date => [date, { open: '09:30', close: '13:00' }])),
+  },
+};
+
+const formatters = new Map<string, Intl.DateTimeFormat>();
+function formatter(timeZone: string): Intl.DateTimeFormat {
+  let value = formatters.get(timeZone);
+  if (!value) {
+    value = new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit',
+      day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    formatters.set(timeZone, value);
+  }
+  return value;
+}
+
+function wallClock(ms: number, timeZone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+  const parts: Record<string, number> = {};
+  for (const part of formatter(timeZone).formatToParts(new Date(ms))) {
+    if (part.type !== 'literal') parts[part.type] = Number(part.value);
+  }
+  return { year: parts.year!, month: parts.month!, day: parts.day!, hour: parts.hour! % 24, minute: parts.minute!, second: parts.second! };
+}
+
+/** Zone offset (local minus UTC) at an instant, from Intl rather than a fixed table so DST follows the zone database. */
+function directOffsetMs(ms: number, timeZone: string): number {
+  const wall = wallClock(ms, timeZone);
+  const base = Math.floor(ms / 1000) * 1000;
+  return Date.UTC(wall.year, wall.month - 1, wall.day, wall.hour, wall.minute, wall.second) - base;
+}
+
+const OFFSET_BUCKET_MS = 15 * 60_000;
+/** Outside these years old offsets (local mean time, half hours) can change off the hour, so they are computed directly. */
+const OFFSET_CACHE_FROM = Date.UTC(1990, 0, 1);
+const OFFSET_CACHE_TO = Date.UTC(2100, 0, 1);
+/** Caches are cleared at this size; a long-lived process then simply rebuilds them. */
+const MAX_CACHE_SIZE = 500_000;
+/** Span sizes from coarse to fine; the finest is the 15-minute bucket. */
+const OFFSET_SPANS_MS = [28 * DAY_MS, DAY_MS, OFFSET_BUCKET_MS] as const;
+/** Per zone and span size: the offset at the start of each span (keyed by span index). */
+const offsetCache = new Map<string, Array<Map<number, number>>>();
+const cacheable = (ms: number) => ms >= OFFSET_CACHE_FROM && ms < OFFSET_CACHE_TO;
+
+function startOffset(starts: Map<number, number>, index: number, size: number, timeZone: string): number {
+  let value = starts.get(index);
+  if (value === undefined) {
+    if (starts.size >= MAX_CACHE_SIZE) starts.clear();
+    value = directOffsetMs(index * size, timeZone);
+    starts.set(index, value);
+  }
+  return value;
+}
+
+/**
+ * Cached offset, equal to the direct Intl one. A span whose start and the next
+ * span's start share an offset has that offset throughout, because neither
+ * zone changes its offset twice within 28 days; otherwise the next finer span
+ * decides. The finest span is a 15-minute bucket, exact because both zones
+ * change on whole UTC hours, which start a bucket.
+ */
+function offsetMs(ms: number, timeZone: string): number {
+  if (!cacheable(ms)) return directOffsetMs(ms, timeZone);
+  let zone = offsetCache.get(timeZone);
+  if (!zone) { zone = OFFSET_SPANS_MS.map(() => new Map<number, number>()); offsetCache.set(timeZone, zone); }
+  for (let level = 0; level < OFFSET_SPANS_MS.length - 1; level += 1) {
+    const size = OFFSET_SPANS_MS[level]!;
+    const index = Math.floor(ms / size);
+    const start = startOffset(zone[level]!, index, size, timeZone);
+    if (start === startOffset(zone[level]!, index + 1, size, timeZone)) return start;
+  }
+  return startOffset(zone[OFFSET_SPANS_MS.length - 1]!, Math.floor(ms / OFFSET_BUCKET_MS), OFFSET_BUCKET_MS, timeZone);
+}
+
+function parseDate(date: string): [number, number, number] {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) throw new RangeError(`invalid date: ${date}`);
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/** Local wall time on a date in a zone, as UTC epoch milliseconds. Two passes settle the offset across a DST change. */
+export function zonedTimeToUtc(date: string, time: string, timeZone: string): number {
+  const [year, month, day] = parseDate(date);
+  const match = /^(\d{2}):(\d{2})$/.exec(time);
+  if (!match) throw new RangeError(`invalid time: ${time}`);
+  const wall = Date.UTC(year, month - 1, day, Number(match[1]), Number(match[2]));
+  const first = wall - offsetMs(wall, timeZone);
+  return wall - offsetMs(first, timeZone);
+}
+
+const pad = (value: number) => String(value).padStart(2, '0');
+
+/** Exchange-local calendar date of an instant. */
+export function localDate(exchange: Exchange, ms: number): string {
+  const { timeZone } = EXCHANGE_CALENDARS[exchange];
+  // The offset is whole seconds, so shifting the instant by it lands on the wall date.
+  if (cacheable(ms)) return new Date(ms + offsetMs(ms, timeZone)).toISOString().slice(0, 10);
+  const wall = wallClock(ms, timeZone);
+  return `${wall.year}-${pad(wall.month)}-${pad(wall.day)}`;
+}
+
+const stepCache = new Map<string, string>();
+
+export function addDays(date: string, days: number): string {
+  // Single steps drive every day-by-day loop, so they are cached.
+  const step = days === 1 || days === -1;
+  const key = step ? `${date}|${days}` : '';
+  const known = step ? stepCache.get(key) : undefined;
+  if (known !== undefined) return known;
+  const [year, month, day] = parseDate(date);
+  const value = new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+  if (step) {
+    if (stepCache.size >= MAX_CACHE_SIZE) stepCache.clear();
+    stepCache.set(key, value);
+  }
+  return value;
+}
+
+function weekday(date: string): number {
+  const [year, month, day] = parseDate(date);
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+}
+
+/** True when the date's hours close before the regular close (a half day); a later close is not early. */
+export function closesEarly(exchange: Exchange, date: string): boolean {
+  const calendar = EXCHANGE_CALENDARS[exchange];
+  const hours = calendar.changedHours.get(date);
+  return hours !== undefined && hours.close < calendar.close;
+}
+
+export function inCoverage(exchange: Exchange, date: string): boolean {
+  const { from, to } = EXCHANGE_CALENDARS[exchange].coverage;
+  return date >= from && date <= to;
+}
+
+/**
+ * The regular session on an exchange-local date, null when the exchange is
+ * closed. `weekdays_only` ignores the tables and their coverage and exists for
+ * display-only target windows (plan "표 범위를 넘는 targetWindow").
+ */
+export function sessionOn(exchange: Exchange, date: string, basis: CalendarBasis = 'exchange_calendar'): Session | null | CalendarUnverified {
+  const key = `${exchange}|${basis}|${date}`;
+  const cached = sessionCache.get(key);
+  if (cached !== undefined) return cached;
+  // Computed first, so an invalid date throws as before and is never cached.
+  const computed = computeSessionOn(exchange, date, basis);
+  const value = computed === null || computed === CALENDAR_UNVERIFIED ? computed : Object.freeze(computed);
+  if (sessionCache.size >= MAX_CACHE_SIZE) sessionCache.clear();
+  sessionCache.set(key, value);
+  return value;
+}
+
+const sessionCache = new Map<string, Session | null | CalendarUnverified>();
+
+function computeSessionOn(exchange: Exchange, date: string, basis: CalendarBasis): Session | null | CalendarUnverified {
+  const calendar = EXCHANGE_CALENDARS[exchange];
+  const day = weekday(date);
+  if (basis === 'exchange_calendar' && !inCoverage(exchange, date)) return CALENDAR_UNVERIFIED;
+  if (day === 0 || day === 6) return null;
+  if (basis === 'weekdays_only') {
+    return { date, openMs: zonedTimeToUtc(date, calendar.open, calendar.timeZone), closeMs: zonedTimeToUtc(date, calendar.close, calendar.timeZone) };
+  }
+  if (calendar.holidays.has(date)) return null;
+  const { open, close } = calendar.changedHours.get(date) ?? calendar;
+  return { date, openMs: zonedTimeToUtc(date, open, calendar.timeZone), closeMs: zonedTimeToUtc(date, close, calendar.timeZone) };
+}
+
+// Longest closure in the tables is under ten days; the bound only stops a runaway scan.
+const MAX_SCAN_DAYS = 400;
+
+function scan(exchange: Exchange, start: string, step: 1 | -1, count: number, basis: CalendarBasis,
+  accept: (session: Session) => boolean): Session[] | CalendarUnverified {
+  const found: Session[] = [];
+  let date = start;
+  for (let days = 0; found.length < count; days += 1, date = addDays(date, step)) {
+    if (days > MAX_SCAN_DAYS + count * 2) return CALENDAR_UNVERIFIED;
+    const session = sessionOn(exchange, date, basis);
+    if (session === CALENDAR_UNVERIFIED) return CALENDAR_UNVERIFIED;
+    if (session && accept(session)) found.push(session);
+  }
+  return found;
+}
+
+/** Every exchange-calendar session inside coverage, ascending; built once per exchange. */
+interface SessionList {
+  dates: string[];
+  sessions: Session[];
+}
+const sessionLists = new Map<Exchange, SessionList>();
+
+function sessionList(exchange: Exchange): SessionList {
+  let list = sessionLists.get(exchange);
+  if (!list) {
+    list = { dates: [], sessions: [] };
+    const { from, to } = EXCHANGE_CALENDARS[exchange].coverage;
+    for (let date = from; date <= to; date = addDays(date, 1)) {
+      const session = sessionOn(exchange, date);
+      if (session && session !== CALENDAR_UNVERIFIED) { list.dates.push(date); list.sessions.push(session); }
+    }
+    sessionLists.set(exchange, list);
+  }
+  return list;
+}
+
+/** First index whose date is ≥ `date`, or > `date` when `strict`. */
+function bound(dates: readonly string[], date: string, strict: boolean): number {
+  let lo = 0;
+  let hi = dates.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (strict ? dates[mid]! <= date : dates[mid]! < date) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+// On the exchange calendar the functions below return exactly what `scan`
+// returns: a scan that starts outside coverage, or walks past either end of it
+// before it has enough sessions, is calendar_unverified. Inside coverage the
+// longest closure is far below the scan bound, so the bound never decides.
+// The arrays are fresh; the sessions in them are the frozen cached ones.
+
+/** The first `count` sessions whose open is at or after `fromMs`. */
+export function sessionsFrom(exchange: Exchange, fromMs: number, count: number, basis: CalendarBasis = 'exchange_calendar'): Session[] | CalendarUnverified {
+  if (count <= 0) return [];
+  const start = localDate(exchange, fromMs);
+  if (basis !== 'exchange_calendar') return scan(exchange, start, 1, count, basis, session => session.openMs >= fromMs);
+  if (!inCoverage(exchange, start)) return CALENDAR_UNVERIFIED;
+  const { dates, sessions } = sessionList(exchange);
+  const found: Session[] = [];
+  for (let i = bound(dates, start, false); i < sessions.length && found.length < count; i += 1) {
+    if (sessions[i]!.openMs >= fromMs) found.push(sessions[i]!);
+  }
+  return found.length < count ? CALENDAR_UNVERIFIED : found;
+}
+
+/** The `count` sessions after an exchange-local date, ascending. */
+export function sessionsAfter(exchange: Exchange, date: string, count: number, basis: CalendarBasis = 'exchange_calendar'): Session[] | CalendarUnverified {
+  if (count <= 0) return [];
+  const start = addDays(date, 1);
+  if (basis !== 'exchange_calendar') return scan(exchange, start, 1, count, basis, () => true);
+  if (!inCoverage(exchange, start)) return CALENDAR_UNVERIFIED;
+  const { dates, sessions } = sessionList(exchange);
+  const first = bound(dates, start, false);
+  return first + count > sessions.length ? CALENDAR_UNVERIFIED : sessions.slice(first, first + count);
+}
+
+/** The `count` sessions before an exchange-local date, ascending. */
+export function sessionsBefore(exchange: Exchange, date: string, count: number, basis: CalendarBasis = 'exchange_calendar'): Session[] | CalendarUnverified {
+  if (count <= 0) return [];
+  const start = addDays(date, -1);
+  if (basis !== 'exchange_calendar') {
+    const found = scan(exchange, start, -1, count, basis, () => true);
+    return found === CALENDAR_UNVERIFIED ? found : found.reverse();
+  }
+  if (!inCoverage(exchange, start)) return CALENDAR_UNVERIFIED;
+  const { dates, sessions } = sessionList(exchange);
+  const end = bound(dates, start, true);
+  return end < count ? CALENDAR_UNVERIFIED : sessions.slice(end - count, end);
+}
+
+/**
+ * Exchange-calendar sessions dated from `from` to `to` inclusive, ascending.
+ * Dates outside coverage are skipped, exactly as a day-by-day `sessionOn` loop
+ * that ignores calendar_unverified would skip them.
+ */
+export function sessionsBetween(exchange: Exchange, from: string, to: string): Session[] {
+  parseDate(from);
+  parseDate(to);
+  const { dates, sessions } = sessionList(exchange);
+  return sessions.slice(bound(dates, from, false), bound(dates, to, true));
+}
+
+/** The latest session whose close is at or before `atMs`. */
+export function lastClosedSession(exchange: Exchange, atMs: number, basis: CalendarBasis = 'exchange_calendar'): Session | CalendarUnverified {
+  const start = localDate(exchange, atMs);
+  if (basis !== 'exchange_calendar') {
+    const found = scan(exchange, start, -1, 1, basis, session => session.closeMs <= atMs);
+    return found === CALENDAR_UNVERIFIED ? found : found[0]!;
+  }
+  if (!inCoverage(exchange, start)) return CALENDAR_UNVERIFIED;
+  const { dates, sessions } = sessionList(exchange);
+  let i = bound(dates, start, true) - 1;
+  while (i >= 0 && sessions[i]!.closeMs > atMs) i -= 1;
+  return i < 0 ? CALENDAR_UNVERIFIED : sessions[i]!;
+}
+
+export type ArticleTiming =
+  /** open < t′ ≤ close of session D: the first observable price is D's close. */
+  | { kind: 'in_session'; tPrimeMs: number; session: Session }
+  /** Before an open, after a close, or on a closed day: E is the first session opening at or after t′. */
+  | { kind: 'out_of_session'; tPrimeMs: number; session: Session };
+
+export interface ArticleTimeOptions {
+  /** 'day' marks a midnight stamp whose time of day is unknown (plan "기사 시각 오류"). */
+  precision?: 'exact' | 'day';
+  basis?: CalendarBasis;
+}
+
+/**
+ * Classifies an article by t′ = publishedAt + 5 minutes. A day-precision stamp
+ * could be any time that day, so it enters at the first open at or after the
+ * end of that day plus the same margin.
+ */
+export function classifyArticleTime(exchange: Exchange, publishedAtMs: number, options: ArticleTimeOptions = {}): ArticleTiming | CalendarUnverified {
+  const basis = options.basis ?? 'exchange_calendar';
+  if (options.precision === 'day') {
+    const tPrimeMs = publishedAtMs + DAY_MS + ARTICLE_DELAY_MS;
+    if (basis === 'exchange_calendar' && !inCoverage(exchange, localDate(exchange, publishedAtMs))) return CALENDAR_UNVERIFIED;
+    const next = sessionsFrom(exchange, tPrimeMs, 1, basis);
+    return next === CALENDAR_UNVERIFIED ? next : { kind: 'out_of_session', tPrimeMs, session: next[0]! };
+  }
+  const tPrimeMs = publishedAtMs + ARTICLE_DELAY_MS;
+  const today = sessionOn(exchange, localDate(exchange, tPrimeMs), basis);
+  if (today === CALENDAR_UNVERIFIED) return today;
+  if (today && today.openMs < tPrimeMs && tPrimeMs <= today.closeMs) return { kind: 'in_session', tPrimeMs, session: today };
+  const next = sessionsFrom(exchange, tPrimeMs, 1, basis);
+  return next === CALENDAR_UNVERIFIED ? next : { kind: 'out_of_session', tPrimeMs, session: next[0]! };
+}
+
+export interface TargetSession {
+  /** N: the nearest regular session that has not yet closed. */
+  session: Session;
+  /** N−1, whose close is the next-day return's base. */
+  previous: Session;
+  phase: SessionPhase;
+}
+
+/**
+ * Next-trading-day target. Before the open and during the session it is
+ * today; at or after the close, on weekends and on holidays it is the next
+ * session, and the phase reads after_close.
+ */
+export function targetSession(exchange: Exchange, nowMs: number, basis: CalendarBasis = 'exchange_calendar'): TargetSession | CalendarUnverified {
+  const date = localDate(exchange, nowMs);
+  const today = sessionOn(exchange, date, basis);
+  if (today === CALENDAR_UNVERIFIED) return today;
+  let session: Session;
+  let phase: SessionPhase;
+  if (today && nowMs < today.closeMs) {
+    session = today;
+    phase = nowMs < today.openMs ? 'before_open' : 'in_session';
+  } else {
+    const next = sessionsAfter(exchange, date, 1, basis);
+    if (next === CALENDAR_UNVERIFIED) return next;
+    session = next[0]!;
+    phase = 'after_close';
+  }
+  const previous = sessionsBefore(exchange, session.date, 1, basis);
+  if (previous === CALENDAR_UNVERIFIED) return previous;
+  return { session, previous: previous[0]!, phase };
+}
+
+/** Overnight news window for a target session: t′ in (previous close, this open]. */
+export interface OvernightWindow {
+  startMs: number;
+  endMs: number;
+}
+
+export function overnightWindow(exchange: Exchange, session: Session, basis: CalendarBasis = 'exchange_calendar'): OvernightWindow | CalendarUnverified {
+  const previous = sessionsBefore(exchange, session.date, 1, basis);
+  if (previous === CALENDAR_UNVERIFIED) return previous;
+  return { startMs: previous[0]!.closeMs, endMs: session.openMs };
+}
+
+/**
+ * Same boundaries as classifyArticleTime: an article whose t′ lands in a
+ * session belongs to no window. A day-precision stamp counts only when the
+ * whole day it could fall in lies inside the window.
+ */
+export function inOvernightWindow(window: OvernightWindow, publishedAtMs: number, precision: 'exact' | 'day' = 'exact'): boolean {
+  const earliest = publishedAtMs + ARTICLE_DELAY_MS;
+  const latest = precision === 'day' ? earliest + DAY_MS : earliest;
+  return window.startMs < earliest && latest <= window.endMs;
+}
+
+/** Weekly sample anchor: Sunday 23:50 UTC, before both markets' Monday opens even after the 5-minute margin. */
+export const WEEKLY_AS_OF_UTC = { weekday: 0, hour: 23, minute: 50 } as const;
+
+/** The latest weekly anchor at or before `atMs`. */
+export function weeklyAsOfAtOrBefore(atMs: number): number {
+  const day = new Date(atMs);
+  const sameDay = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), WEEKLY_AS_OF_UTC.hour, WEEKLY_AS_OF_UTC.minute);
+  let anchor = sameDay - ((day.getUTCDay() - WEEKLY_AS_OF_UTC.weekday + 7) % 7) * DAY_MS;
+  if (anchor > atMs) anchor -= 7 * DAY_MS;
+  return anchor;
+}
+
+/** Weekly anchors in [fromMs, toMs], ascending. */
+export function weeklyAsOfsBetween(fromMs: number, toMs: number): number[] {
+  const anchors: number[] = [];
+  let anchor = weeklyAsOfAtOrBefore(toMs);
+  while (anchor >= fromMs) { anchors.push(anchor); anchor -= 7 * DAY_MS; }
+  return anchors.reverse();
+}
+
+/** The five sessions a weekly sample measures: next open after asOf + 5 minutes through the fourth session after it. */
+export function weekSessions(exchange: Exchange, asOfMs: number, basis: CalendarBasis = 'exchange_calendar'): Session[] | CalendarUnverified {
+  return sessionsFrom(exchange, asOfMs + ARTICLE_DELAY_MS, 5, basis);
+}
+
+export interface WeeklyWindow {
+  asOfMs: number;
+  sessions: Session[] | null;
+  /** overlap: entry before the last kept window's exit (holiday weeks); such a week is skipped. */
+  skip: 'overlap' | 'calendar_unverified' | null;
+}
+
+/** Weekly windows for ascending anchors, skipping any that would overlap the previous kept window. */
+export function weeklyWindows(exchange: Exchange, asOfs: readonly number[]): WeeklyWindow[] {
+  let lastExitMs = -Infinity;
+  return asOfs.map(asOfMs => {
+    const sessions = weekSessions(exchange, asOfMs);
+    if (sessions === CALENDAR_UNVERIFIED) return { asOfMs, sessions: null, skip: CALENDAR_UNVERIFIED };
+    if (sessions[0]!.openMs < lastExitMs) return { asOfMs, sessions, skip: 'overlap' };
+    lastExitMs = sessions[sessions.length - 1]!.closeMs;
+    return { asOfMs, sessions, skip: null };
+  });
+}
+
+/** Display window for one horizon; dates are exchange-local. */
+export interface TargetWindow {
+  start: string;
+  end: string;
+  basis: CalendarBasis;
+  exchange: Exchange;
+  phase: SessionPhase;
+}
+
+/** Five sessions a request at `nowMs` looks ahead to, by the same entry rule as an article at that time. */
+function fiveSessionsAhead(exchange: Exchange, nowMs: number, basis: CalendarBasis): Session[] | CalendarUnverified {
+  const timing = classifyArticleTime(exchange, nowMs - ARTICLE_DELAY_MS, { basis });
+  if (timing === CALENDAR_UNVERIFIED) return timing;
+  if (timing.kind === 'in_session') return sessionsAfter(exchange, timing.session.date, 5, basis);
+  const rest = sessionsAfter(exchange, timing.session.date, 4, basis);
+  return rest === CALENDAR_UNVERIFIED ? rest : [timing.session, ...rest];
+}
+
+/**
+ * Request-time windows (never stored, so a past session is never shown as
+ * next). Outside table coverage they fall back to weekdays_only for display;
+ * nothing measured may use that basis.
+ */
+export function dayTargetWindow(exchange: Exchange, nowMs: number): { targetWindow: TargetWindow; newsWindow: { start: string; end: string } } {
+  let basis: CalendarBasis = 'exchange_calendar';
+  let target = targetSession(exchange, nowMs, basis);
+  if (target === CALENDAR_UNVERIFIED) { basis = 'weekdays_only'; target = targetSession(exchange, nowMs, basis) as TargetSession; }
+  return {
+    targetWindow: { start: target.session.date, end: target.session.date, basis, exchange, phase: target.phase },
+    newsWindow: { start: new Date(target.previous.closeMs).toISOString(), end: new Date(target.session.openMs).toISOString() },
+  };
+}
+
+export function weekTargetWindow(exchange: Exchange, nowMs: number): TargetWindow {
+  let basis: CalendarBasis = 'exchange_calendar';
+  let sessions = fiveSessionsAhead(exchange, nowMs, basis);
+  let target = targetSession(exchange, nowMs, basis);
+  if (sessions === CALENDAR_UNVERIFIED || target === CALENDAR_UNVERIFIED) {
+    basis = 'weekdays_only';
+    sessions = fiveSessionsAhead(exchange, nowMs, basis) as Session[];
+    target = targetSession(exchange, nowMs, basis) as TargetSession;
+  }
+  return { start: sessions[0]!.date, end: sessions[sessions.length - 1]!.date, basis, exchange, phase: target.phase };
+}

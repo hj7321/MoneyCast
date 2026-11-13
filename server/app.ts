@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { companies, searchCompanies, NEWS_CACHE_TTL_MS, type NewsAnalysis } from '../packages/core/src/index.js';
 import { collectNews } from './collect.js';
 import { createGoalClarifier, type GoalClarifier } from './goal-clarify.js';
+import { createHistoryService, parseHistoryMode, type HistoryService } from './history-job.js';
 import { createAiClassifier } from './llm.js';
 import { createLlmClients, createLlmJudges } from './llm-judges.js';
 import { createNewsProvider } from './news-provider.js';
@@ -15,7 +16,16 @@ interface HandlerOptions {
   staticDirectory?: string | null; clock?: () => number; env?: NodeJS.ProcessEnv;
   /** Defaults to the models named in GOAL_AI_PROVIDERS, sharing the news service's clients when both are defaults. */
   goals?: GoalClarifier;
+  /** The scheduled history job. Defaults to the Blob-backed service when no news service is passed; without either the route answers 503. */
+  history?: HistoryService | null;
 }
+
+/**
+ * vercel.json schedules of `/api/cron/history?step=ledger`. Vercel names the triggering schedule in
+ * x-vercel-cron-schedule (its documented way to tell apart cron jobs that share a path) but does not document that a
+ * cron path's query string arrives, so these schedules mean the ledger step even without `step`.
+ */
+export const HISTORY_LEDGER_SCHEDULES: ReadonlySet<string> = new Set(['0 23 * * *', '0 12 * * *']);
 
 /** A goal description is short; anything larger is refused before it is read. */
 export const GOAL_BODY_LIMIT_BYTES = 2_048;
@@ -27,13 +37,15 @@ const GOAL_WINDOW_MS = 10 * 60_000;
  * connected, and models when keys exist. The news check and goal
  * clarification share one client per model, so a quota pause holds for both.
  */
-export function createDefaultServices(env: NodeJS.ProcessEnv = process.env): { news: NewsService; goals: GoalClarifier } {
+export function createDefaultServices(env: NodeJS.ProcessEnv = process.env): { news: NewsService; goals: GoalClarifier; history: HistoryService } {
   const clients = createLlmClients(env);
   return {
     news: createNewsService(createNewsProvider(env), undefined, {
       store: createBlobSnapshotStore(env), classifier: createAiClassifier(createLlmJudges(env, undefined, undefined, clients)),
     }),
     goals: createGoalClarifier(clients, env),
+    // Built without I/O: HISTORY_INSIGHTS is checked per request, before the job touches Blob or a provider.
+    history: createHistoryService(env),
   };
 }
 
@@ -130,6 +142,7 @@ export function createRequestHandler(service?: NewsService, options: HandlerOpti
   const defaults = service ? null : createDefaultServices(env);
   const news = service ?? defaults!.news;
   const goals = options.goals ?? defaults?.goals ?? createGoalClarifier(createLlmClients(env), env);
+  const history = options.history ?? defaults?.history ?? null;
   const limited = createRequestLimiter(options.clock ?? Date.now);
   return async (request: IncomingMessage, response: ServerResponse) => {
     try {
@@ -168,6 +181,20 @@ export function createRequestHandler(service?: NewsService, options: HandlerOpti
         if (!secret) return send(response, 503, { error: '예약 수집이 설정되지 않았습니다.' });
         if (!authorizedCron(request.headers.authorization, secret)) return send(response, 401, { error: '인증되지 않은 요청입니다.' });
         return send(response, 200, await collectNews(news, companies));
+      }
+      if (url.pathname === '/api/cron/history') {
+        const secret = env.CRON_SECRET?.trim();
+        if (!secret) return send(response, 503, { error: '예약 수집이 설정되지 않았습니다.' });
+        if (!authorizedCron(request.headers.authorization, secret)) return send(response, 401, { error: '인증되지 않은 요청입니다.' });
+        // Off (the default) answers without touching Blob or a price provider.
+        if (parseHistoryMode(env.HISTORY_INSIGHTS) === 'off') return send(response, 200, { status: 'off' });
+        const steps = url.searchParams.getAll('step');
+        if (steps.length > 1 || (steps.length === 1 && steps[0] !== 'ledger')) return send(response, 400, { error: '지원하지 않는 단계입니다.' });
+        if (!history) return send(response, 503, { error: '과거 데이터 작업이 설정되지 않았습니다.' });
+        const schedule = request.headers['x-vercel-cron-schedule'];
+        const ledger = steps[0] === 'ledger' || (typeof schedule === 'string' && HISTORY_LEDGER_SCHEDULES.has(schedule.trim()));
+        const summary = await history.run(ledger ? 'ledger' : 'full');
+        return send(response, summary.status === 'not_configured' ? 503 : summary.status === 'failed' ? 500 : 200, summary);
       }
       if (url.pathname === '/api/news') {
         const id = url.searchParams.get('companyId');

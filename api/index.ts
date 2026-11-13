@@ -1,12 +1,14 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createRequestHandler } from '../server/app.js';
+import type { HistoryService } from '../server/history-job.js';
 
 const ROUTE_PARAMETER = '__moneycast_route';
-const ROUTES = new Set(['health', 'companies', 'news', 'cron/collect', 'goals/clarify']);
+const ROUTES = new Set(['health', 'companies', 'news', 'cron/collect', 'cron/history', 'goals/clarify']);
 
 /** Shared by the Vercel Node runtime and HTTP integration tests; never listens. */
-export function createApiHandler(service?: Parameters<typeof createRequestHandler>[0], env?: NodeJS.ProcessEnv) {
-  const handle = createRequestHandler(service, { staticDirectory: null, env });
+export function createApiHandler(service?: Parameters<typeof createRequestHandler>[0], env?: NodeJS.ProcessEnv,
+  options: { history?: HistoryService | null } = {}) {
+  const handle = createRequestHandler(service, { staticDirectory: null, env, ...('history' in options ? { history: options.history } : {}) });
   return async (request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url || '/', 'http://localhost');
     // Vercel may preserve the public URL or present the rewritten function URL.
