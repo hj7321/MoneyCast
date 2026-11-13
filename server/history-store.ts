@@ -12,7 +12,8 @@ import type { CalendarBasis, Exchange, SessionPhase } from './market-calendar.js
 // Private storage for historical news insights (step 4, spec ch. 4).
 // Invariants:
 // - Everything lives under news-history/v1/, private, never with a random suffix.
-// - Construction does no I/O. Every Blob call carries a 20 s abort signal.
+// - Construction does no I/O. Every Blob call carries a 20 s abort signal, and a put stops waiting at
+//   20 s even between the SDK's own retries.
 // - Reads are bounded at 5 MiB while streaming; writes are checked before put,
 //   and a too_large or invalid value never reaches put.
 // - A file that fails its version or shape check is rejected as a whole. A ledger
@@ -853,16 +854,27 @@ export function createBlobHistoryStore(
       return { text: await readBoundedText(result.stream, MAX_FILE_BYTES, file, signal), etag };
     },
     async write(file, body, condition) {
-      const signal = AbortSignal.timeout(STORE_TIMEOUT_MS);
+      // put() retries a TimeoutError (AbortSignal.timeout) like a network error, with 17-34 min of backoff by
+      // default, and gives up only on an AbortError: an abort without a reason. The abort ends a request in flight;
+      // the race ends the wait when the deadline falls in a backoff sleep, which the SDK ends only at its next attempt.
+      const controller = new AbortController();
+      const signal = controller.signal;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => { controller.abort(); reject(signal.reason); }, STORE_TIMEOUT_MS);
+        timer.unref?.();
+      });
       const last = condition.kind === 'overwrite' ? { allowOverwrite: true }
         : condition.kind === 'ifMatch' ? { ifMatch: condition.etag } : { allowOverwrite: false };
       try {
-        const result = await blob.put(HISTORY_PREFIX + file, body, {
+        const result = await Promise.race([blob.put(HISTORY_PREFIX + file, body, {
           access: 'private', addRandomSuffix: false, contentType: 'application/json', cacheControlMaxAge: 60, abortSignal: signal, ...last,
-        });
+        }), expired]);
         return typeof result?.etag === 'string' ? result.etag : '';
       } catch (error) {
         throw new HistoryStoreError(putErrorCode(error, signal), file);
+      } finally {
+        clearTimeout(timer);
       }
     },
   });

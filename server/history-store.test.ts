@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BlobError, BlobPreconditionFailedError, type get, type put } from '@vercel/blob';
+import { BlobError, BlobPreconditionFailedError, BlobRequestAbortedError, type get, type put } from '@vercel/blob';
 import type { LedgerEntry } from './history-ledger.js';
 import type { DailyBar, NextDayOutcome, WeeklyOutcome } from './history-outcomes.js';
 import { companyStats, outcomesFromPrices, type CompanyStats } from './history-stats.js';
@@ -440,6 +440,54 @@ test('Blob store: precondition failures are conflicts, a landed retry with our w
   assert.equal(puts.length, 8);
   assert.equal(store.attempts, 8);
   assert.equal(store.writes, 2, 'the first write and the landed retry');
+});
+
+test('Blob store: a put still pending at 20 s ends as timeout with an AbortError, also between SDK retries', async t => {
+  // @vercel/blob 2.8.2 gives up only on an AbortError. A TimeoutError (AbortSignal.timeout) is retried like a
+  // network error, with 17 to 34 minutes of backoff by default, so these puts stay pending on any other abort reason.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const signals: AbortSignal[] = [];
+  let inBackoff = false;
+  const pendingPut = ((_pathname: string, _body: unknown, options: { abortSignal: AbortSignal }) => new Promise((_resolve, reject) => {
+    const signal = options.abortSignal;
+    signals.push(signal);
+    const giveUp = () => { if ((signal.reason as Error | undefined)?.name === 'AbortError') reject(new BlobRequestAbortedError()); };
+    // In flight, the abort reaches the request; in a backoff sleep, the SDK sees it only at its next attempt.
+    if (inBackoff) setTimeout(giveUp, STORE_TIMEOUT_MS + 7_000);
+    else signal.addEventListener('abort', giveUp, { once: true });
+  })) as unknown as typeof put;
+  const store = createBlobHistoryStore({ BLOB_STORE_ID: 'store_test' }, { get: fakeBlob().api.get, put: pendingPut })!;
+  for (const backoff of [false, true]) {
+    inBackoff = backoff;
+    let settled = false;
+    const code = codeOf(store.writeStats(STATS)).finally(() => { settled = true; });
+    await flush();
+    assert.equal(signals.length, backoff ? 2 : 1);
+    t.mock.timers.tick(STORE_TIMEOUT_MS - 1);
+    await flush();
+    assert.equal(settled, false, 'still waiting just before 20 s');
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(settled, true, backoff ? 'stopped at 20 s in a backoff sleep' : 'stopped at 20 s in flight');
+    assert.equal(await code, 'timeout');
+    assert.equal(signals.at(-1)!.aborted, true);
+    assert.equal((signals.at(-1)!.reason as Error).name, 'AbortError', 'an AbortError, which the SDK does not retry');
+  }
+  // The sleeping put gives up at its next attempt; its late rejection is handled.
+  t.mock.timers.tick(7_000);
+  await flush();
+  assert.equal(store.attempts, 2);
+  assert.equal(store.writes, 0);
+  // A put that settles first clears its deadline: 20 s later neither signal has been aborted.
+  const quick = fakeBlob();
+  const quickStore = createBlobHistoryStore({ BLOB_STORE_ID: 'store_test' }, quick.api)!;
+  await quickStore.writeStats(STATS);
+  quick.hooks.put = () => { throw new BlobPreconditionFailedError(); };
+  assert.equal(await codeOf(quickStore.writeStats(STATS)), 'conflict');
+  t.mock.timers.tick(STORE_TIMEOUT_MS);
+  await flush();
+  assert.deepEqual(quick.puts.map(call => (call.options.abortSignal as AbortSignal).aborted), [false, false]);
 });
 
 // ---------------------------------------------------------------------------
