@@ -1,16 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { BlobError, BlobNotFoundError, BlobPreconditionFailedError, type get as blobGet, type head as blobHead, type put as blobPut } from '@vercel/blob';
 import { companies, integrateOutlook, NEWS_CACHE_ANALYSIS_VERSION, type Company, type NewsAnalysis, type NewsArticle } from '@moneycast/core';
 import {
-  DAILY_WRITE_CAP, FULL_MIN_WRITES, FULL_RESERVE_FOR_LEDGER, GDELT_COLLECTION, MARKETAUX_COLLECTION,
-  allowedWrites, companyStatsInput, coverageStartMs, createHistoryService, frozenIndex, kstDate, observationAt, observeSnapshot,
-  parseHistoryMode, runHistoryJob, selectWrites, shadowRecordsFor, usedWrites,
+  DAILY_WRITE_CAP, FULL_MIN_WRITES, FULL_RESERVE_FOR_LEDGER, GDELT_COLLECTION, HISTORY_RUN_LOG_MAX_CHARS, MARKETAUX_COLLECTION,
+  allowedWrites, companyStatsInput, coverageStartMs, createHistoryService, frozenIndex, historyRunLogLine, kstDate, observationAt,
+  observeSnapshot, parseHistoryMode, runHistoryJob, selectWrites, shadowRecordsFor, usedWrites,
   type HistoryFileKind, type HistoryJobDeps, type HistoryJobMode, type HistoryJobSummary,
 } from './history-job.js';
 import { entriesFromSnapshot, foldLedger, ledgerKey, mergeLedger, type LedgerEntry } from './history-ledger.js';
 import { companyStats } from './history-stats.js';
 import {
-  HISTORY_VERSIONS, createMemoryHistoryStore, parseLedgerSegmentFile,
+  HISTORY_VERSIONS, createBlobHistoryStore, createMemoryHistoryStore, parseLedgerSegmentFile,
   type DailyOutcomesFile, type FrozenDailyRecord, type FrozenWeeklyRecord, type HistoryStore, type LedgerSegmentFile,
   type MemoryHistoryStore, type MemoryStoreOptions, type PricesFile, type ShadowFile, type StatsFile, type StoredPriceSeries,
   type WeeklyOutcomesFile,
@@ -1214,4 +1215,186 @@ test('duplicate runs that split between rewriting the head and opening its next 
     const head = (await w.store.findLedgerHead('2026-11'))!;
     assert.equal(head.value.state.journal.writes, written.length, `the head's journal counts every write of the day: ${report}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Production incident regressions (2026-11-14 to 2026-11-23)
+// ---------------------------------------------------------------------------
+
+/**
+ * @vercel/blob 2.8.2 against the Blob API as production showed it (history-store.test.ts has the full fake): head() answers
+ * the API's etag, get() passes on only the CDN's ETag header (none, or a weak one), and put() drops an empty ifMatch as
+ * the SDK does before the API applies its rules.
+ */
+function productionBlob(cdn: 'none' | 'weak') {
+  const objects = new Map<string, { text: string; etag: string }>();
+  const puts: Array<{ file: string; ifMatch: unknown; allowOverwrite: unknown; refused: boolean }> = [];
+  let version = 0;
+  const api = {
+    get: (async (pathname: string) => {
+      const stored = objects.get(pathname);
+      if (!stored) return null;
+      const etag = cdn === 'none' ? '' : `W/${stored.etag}`;
+      return { statusCode: 200, stream: new Response(stored.text).body, headers: new Headers(etag ? { etag } : {}), blob: { pathname, etag } };
+    }) as unknown as typeof blobGet,
+    head: (async (pathname: string) => {
+      const stored = objects.get(pathname);
+      if (!stored) throw new BlobNotFoundError();
+      return { pathname, etag: stored.etag, size: Buffer.byteLength(stored.text, 'utf8') };
+    }) as unknown as typeof blobHead,
+    put: (async (pathname: string, body: unknown, options: { ifMatch?: string; allowOverwrite?: boolean }) => {
+      const existing = objects.get(pathname);
+      const ifMatch = options.ifMatch || null;
+      const refused = ifMatch !== null ? existing?.etag !== ifMatch : existing !== undefined && options.allowOverwrite !== true;
+      puts.push({ file: pathname.replace(/^news-history\/v1\//, ''), ifMatch: options.ifMatch, allowOverwrite: options.allowOverwrite, refused });
+      if (refused && ifMatch !== null) throw new BlobPreconditionFailedError();
+      if (refused) throw new BlobError('This blob already exists, use `allowOverwrite: true` if you want to overwrite it.');
+      version += 1;
+      const etag = `"api-${version}"`;
+      objects.set(pathname, { text: String(body), etag });
+      return { pathname, etag };
+    }) as unknown as typeof blobPut,
+  };
+  return { objects, puts, store: createBlobHistoryStore({ BLOB_STORE_ID: 'store_test' }, api)! };
+}
+
+test('the real job on a production-like Blob store: the 08:35 ledger step, 15:20 full job and 21:10 ledger step of a KST day, then the next day', async () => {
+  // Regression: the ledger head's etag came from get(), the CDN's header. Every run after the first (2026-11-14 08:35 KST)
+  // failed at its first write, the head's rewrite, so the full job never reached the shadow file, prices.json or stats.json.
+  const ids = TWO.map(item => item.id);
+  for (const cdn of ['none', 'weak'] as const) {
+    const blob = productionBlob(cdn);
+    const w = world({ companies: TWO });
+    const runs: HistoryJobSummary[] = [];
+    for (const day of ['2026-11-24', '2026-11-25']) {
+      const kst = (time: string) => at(`${day}T${time}:00+09:00`);
+      refreshSnapshots(w, kst('06:40'), 2, ids);
+      runs.push(await w.run('ledger', kst('08:35'), { store: blob.store }));
+      runs.push(await w.run('full', kst('15:20'), { store: blob.store }));
+      refreshSnapshots(w, kst('20:40'), 1, ids);
+      runs.push(await w.run('ledger', kst('21:10'), { store: blob.store }));
+    }
+    const report = `${cdn}: ${JSON.stringify(runs.map(run => [run.mode, run.status, run.errors, run.writes.done, run.writes.failed]))}`;
+    assert.deepEqual(runs.map(run => run.status), ['done', 'done', 'done', 'done', 'done', 'done'], report);
+    assert.ok(runs.every(run => run.writes.done[0] === 'ledger/2026-11.json' && run.writes.failed.length === 0), report);
+    for (const full of [runs[1]!, runs[4]!]) {
+      for (const file of ['shadow/2026.json', 'prices.json', 'stats.json']) assert.ok(full.writes.done.includes(file), `${file} ${report}`);
+    }
+    // One createOnly put made the head; every later run rewrote it under the etag head() gave, and no put was refused.
+    const heads = blob.puts.filter(item => item.file === 'ledger/2026-11.json');
+    assert.equal(heads.length, 6, report);
+    assert.deepEqual([heads[0]!.allowOverwrite, heads[0]!.ifMatch], [false, undefined]);
+    assert.ok(heads.slice(1).every(item => typeof item.ifMatch === 'string' && /^"api-\d+"$/.test(item.ifMatch)), JSON.stringify(heads));
+    assert.ok(blob.puts.every(item => !item.refused), JSON.stringify(blob.puts));
+    const head = JSON.parse(blob.objects.get('news-history/v1/ledger/2026-11.json')!.text) as LedgerSegmentFile;
+    const secondDay = runs.slice(3).reduce((sum, run) => sum + run.writes.done.length, 0);
+    assert.deepEqual(head.state.journal, { kstDate: '2026-11-25', writes: secondDay, fullDone: true });
+    assert.equal(head.state.writeToken, runs[5]!.runId);
+    assert.equal((JSON.parse(blob.objects.get('news-history/v1/stats.json')!.text) as StatsFile).computedAt, '2026-11-25T06:20:00.000Z');
+  }
+});
+
+test('historyRunLogLine: one line of counts, codes and file names whose JSON parses, cut by its lists to 2,000 characters, never a throw', async () => {
+  const w = world({ companies: TWO });
+  refreshSnapshots(w, at('2026-11-10T21:40:00Z'), 1, TWO.map(item => item.id));
+  const summary = await w.run('full', undefined, { priceProviders: fakeProviders(w.clock, { fail: key => key === 'nasdaq:QQQ' ? 'timeout' : null }) });
+  assert.ok(summary.errors.includes('price_fetch_failed'), JSON.stringify(summary.errors));
+  const line = historyRunLogLine(summary);
+  assert.ok(line.startsWith('history_run {') && !line.includes('\n') && line.length <= HISTORY_RUN_LOG_MAX_CHARS, line);
+  const fields = JSON.parse(line.slice('history_run '.length)) as Record<string, any>;
+  const statusCounts: Record<string, number> = {};
+  for (const status of Object.values(summary.stats!.statuses)) statusCounts[status] = (statusCounts[status] ?? 0) + 1;
+  assert.deepEqual(fields, {
+    mode: 'full', status: summary.status, errors: summary.errors, elapsedMs: summary.elapsedMs,
+    ledger: {
+      head: '2026-11', entries: 2, newEntries: 2, changedEntries: 0, rejectedEntries: 0,
+      snapshotsMissing: 0, snapshotsUnreadable: 0, gapsAdded: 0, rolledOver: false,
+    },
+    prices: { ok: Object.keys(summary.prices!).length - 1, failed: { 'nasdaq:QQQ': 'timeout' } },
+    stats: { computed: 2, failed: summary.stats!.failed, statusCounts },
+    frozen: json(summary.frozen), shadow: { recorded: 4, kept: 0 },
+    writes: { usedBefore: 0, allowance: 7, done: summary.writes.done, deferred: [], failed: [] },
+  });
+  // Left out: the run id, its times and anything a provider said.
+  for (const key of ['runId', 'startedAt', 'finishedAt', 'providerCode', 'lastDate', 'newBars', 'ms', 'truncated']) {
+    assert.ok(!line.includes(`"${key}"`), key);
+  }
+  assert.ok(!line.includes(summary.runId));
+
+  // Far past the bound: every list is cut, the JSON stays whole, and the cut is marked.
+  const huge = json(summary);
+  huge.errors = Array.from({ length: 400 }, (_, i) => `error_${i}`) as unknown as HistoryJobSummary['errors'];
+  huge.ledger.head = 'x'.repeat(5_000);
+  huge.prices = Object.fromEntries(Array.from({ length: 400 }, (_, i) => [`krx:${String(i).padStart(6, '0')}`,
+    { code: 'provider_error', providerCode: null, newBars: 0, lastDate: null, ms: 0 }]));
+  huge.writes.done = Array.from({ length: 400 }, (_, i) => `shadow/${2000 + i}.json`);
+  huge.writes.deferred = Array.from({ length: 400 }, (_, i) => `daily/${2000 + i}.json`);
+  huge.writes.failed = Array.from({ length: 400 }, (_, i) => ({ file: `weekly/${2000 + i}.json`, code: 'write_failed' }));
+  huge.stats!.failed = Array.from({ length: 400 }, (_, i) => `krx:${String(i).padStart(6, '0')}`);
+  huge.stats!.statuses = Object.fromEntries(Array.from({ length: 400 }, (_, i) => [`krx:${i}`, `status_${i}`])) as unknown as
+    NonNullable<HistoryJobSummary['stats']>['statuses'];
+  const cut = historyRunLogLine(huge);
+  assert.ok(cut.length <= HISTORY_RUN_LOG_MAX_CHARS, String(cut.length));
+  const cutFields = JSON.parse(cut.slice('history_run '.length)) as Record<string, any>;
+  assert.equal(cutFields.truncated, true);
+  assert.deepEqual([cutFields.mode, cutFields.status], ['full', summary.status]);
+  assert.ok(cutFields.errors.length > 0 && cutFields.errors.length < 400, String(cutFields.errors.length));
+  assert.ok(Object.keys(cutFields.prices.failed).length < 400 && cutFields.writes.failed.length < 400);
+  assert.ok(cutFields.writes.deferred.length < 400 && cutFields.stats.failed.length < 400 && Object.keys(cutFields.stats.statusCounts).length < 400, cut);
+  assert.equal(cutFields.ledger.head, 'x'.repeat(40));
+  // Whatever reaches it, it answers with one parseable line.
+  for (const bad of [null, undefined, {}, { ...json(summary), ledger: null }, { mode: 'full', status: 'failed' }]) {
+    const text = historyRunLogLine(bad as unknown as HistoryJobSummary);
+    assert.ok(text.startsWith('history_run {') && text.length <= HISTORY_RUN_LOG_MAX_CHARS, text);
+    assert.equal(typeof JSON.parse(text.slice('history_run '.length)), 'object');
+  }
+  assert.equal(historyRunLogLine({ mode: 'full', status: 'failed' } as unknown as HistoryJobSummary),
+    'history_run {"mode":"full","status":"failed","truncated":true}');
+});
+
+test('historyRunLogLine prints only numbers, booleans, nulls and short safe texts, whatever a field holds', async () => {
+  // Regression: a count slot printed whatever it held (an object or a text in full), a text passed control and line
+  // separator characters through, and a field whose getter threw, even mode, made the line itself throw.
+  const w = world({ companies: TWO });
+  refreshSnapshots(w, at('2026-11-10T21:40:00Z'), 1, TWO.map(item => item.id));
+  const summary = await w.run('full');
+  const token = 'vercel_blob_rw_fixturestore_fixture-blob-token-never-real';
+  const odd = json(summary) as unknown as Record<string, any>;
+  odd.elapsedMs = { token };
+  odd.ledger.entries = [token];
+  odd.ledger.newEntries = token;
+  odd.ledger.rolledOver = token;
+  odd.ledger.snapshots.missing = { length: { token } };
+  odd.frozen.cases = { token };
+  odd.shadow.kept = 10n;
+  odd.writes.allowance = Infinity;
+  odd.ledger.head = '2026-11\n"},"injected":"\u2028\u0000\\';
+  odd.errors = ['write_failed\r\nsecond line', 'ledger_conflict'];
+  odd.writes.failed = [{ file: 'stats.json', code: { token } }, null];
+  const line = historyRunLogLine(odd as unknown as HistoryJobSummary);
+  assert.match(line, /^history_run \{[\x20-\x7e]*\}$/, 'one line of printable ASCII');
+  assert.ok(line.length <= HISTORY_RUN_LOG_MAX_CHARS && !line.includes('fixture-blob-token') && !line.includes('"truncated"'), line);
+  const fields = JSON.parse(line.slice('history_run '.length)) as Record<string, any>;
+  assert.deepEqual([fields.elapsedMs, fields.ledger.entries, fields.ledger.newEntries, fields.ledger.rolledOver, fields.ledger.snapshotsMissing,
+    fields.frozen.cases, fields.shadow.kept, fields.writes.allowance], [null, null, null, null, null, null, null, null]);
+  assert.equal(fields.ledger.head, '2026-11?????injected?:????');
+  assert.equal(fields.injected, undefined);
+  assert.deepEqual(fields.errors, ['write_failed??second?line', 'ledger_conflict']);
+  assert.deepEqual(fields.writes.failed, [{ file: 'stats.json', code: null }, { file: null, code: null }]);
+  assert.deepEqual([fields.mode, fields.status, fields.ledger.changedEntries, fields.shadow.recorded], ['full', summary.status, 0, 4]);
+  // Every text in it, key or value, is at most 40 characters of those codes, ids and file names use.
+  const texts: string[] = [];
+  const walk = (value: unknown): void => {
+    if (typeof value === 'string') texts.push(value);
+    else if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === 'object') for (const [key, item] of Object.entries(value)) { texts.push(key); walk(item); }
+    else assert.ok(value === null || typeof value === 'number' || typeof value === 'boolean', String(value));
+  };
+  walk(fields);
+  assert.ok(texts.length > 30 && texts.every(text => /^[A-Za-z0-9_.:\/?-]{0,40}$/.test(text)), JSON.stringify(texts));
+  // A getter that throws still yields the minimal line, and so does one on mode itself.
+  const throwing = Object.defineProperty(json(summary), 'writes', { get() { throw new Error('writes'); } });
+  assert.equal(historyRunLogLine(throwing), `history_run {"mode":"full","status":"${summary.status}","truncated":true}`);
+  const hostile = { get mode() { throw new Error('mode'); } } as unknown as HistoryJobSummary;
+  assert.equal(historyRunLogLine(hostile), 'history_run {"mode":null,"status":null,"truncated":true}');
 });

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { get as blobGet } from '@vercel/blob';
+import { readFileSync } from 'node:fs';
+import { BlobNotFoundError, type get as blobGet, type head as blobHead } from '@vercel/blob';
 import { companies, NEWS_CACHE_ANALYSIS_VERSION, type NewsAnalysis, type NewsArticle } from '@moneycast/core';
 import { LEDGER_ROLLOVER_BYTES, MARKETAUX_COLLECTION, runHistoryJob, type HistoryJobMode, type HistoryJobSummary } from './history-job.js';
 import { entriesFromSnapshot, type LedgerEntry } from './history-ledger.js';
@@ -9,8 +10,9 @@ import {
   type LedgerSegmentFile, type MemoryHistoryStore, type MemoryStoreOptions, type PricesFile, type ShadowFile, type StatsFile,
 } from './history-store.js';
 import {
-  MISSING_TOKEN_LINE, NEAR_CAP_BYTES, SHADOW_RECORDS_PER_DAY, STATUS_TOKEN_ENV, TOKEN_FORMAT_LINE, blobTokenProblem, createReadOnlyBlobHistoryStore,
-  everyReadFailed, formatHistoryStatus, readHistoryStatus, readOnlyBlobFunctions, readOnlyHistoryStore, safePriceCode,
+  BLOB_API_URL_ENV, MISSING_TOKEN_LINE, NEAR_CAP_BYTES, SHADOW_RECORDS_PER_DAY, STATUS_TOKEN_ENV, TOKEN_FORMAT_LINE, blobApiUrlOverride,
+  blobTokenProblem, createReadOnlyBlobHistoryStore, everyReadFailed, formatHistoryStatus, readHistoryStatus, readOnlyBlobFunctions,
+  readOnlyHistoryStore, safePriceCode,
   type HistoryStatus, type StatusWarningCode,
 } from './history-status.js';
 import { CALENDAR_UNVERIFIED, sessionOn, sessionsBetween } from './market-calendar.js';
@@ -239,6 +241,17 @@ function fakeBlobGet(files: ReadonlyMap<string, { text: string; etag: string }>,
     if (!stored) return null;
     return { statusCode: 200, stream: new Blob([stored.text]).stream(), headers: new Headers(), blob: { etag: stored.etag } };
   }) as unknown as typeof blobGet;
+}
+
+type HeadOptions = NonNullable<Parameters<typeof blobHead>[1]>;
+/** The Blob SDK's head over the same map: the API etag, or BlobNotFoundError for a missing pathname (as on a 404). */
+function fakeBlobHead(files: ReadonlyMap<string, { text: string; etag: string }>, calls: Array<{ pathname: string; options: HeadOptions }>): typeof blobHead {
+  return (async (pathname: string, options?: HeadOptions) => {
+    calls.push({ pathname, options: { ...options } });
+    const stored = pathname.startsWith(HISTORY_PREFIX) ? files.get(pathname.slice(HISTORY_PREFIX.length)) : undefined;
+    if (!stored) throw new BlobNotFoundError();
+    return { pathname, etag: stored.etag, size: Buffer.byteLength(stored.text, 'utf8') };
+  }) as unknown as typeof blobHead;
 }
 
 const codes = (status: HistoryStatus) => status.warnings.map(warning => warning.code);
@@ -656,8 +669,9 @@ test('the Blob helper reads with the token option only, cannot write, and no tok
   const w = await sharedDay();
   const files = new Map([...w.store.files].map(([name, file]) => [name, { ...file }]));
   const calls: Array<{ pathname: string; options: GetOptions }> = [];
+  const heads: Array<{ pathname: string; options: HeadOptions }> = [];
   const envBefore = process.env.BLOB_READ_WRITE_TOKEN;
-  const store = createReadOnlyBlobHistoryStore(TOKEN, { get: fakeBlobGet(files, calls) });
+  const store = createReadOnlyBlobHistoryStore(TOKEN, { get: fakeBlobGet(files, calls), head: fakeBlobHead(files, heads) });
   assert.deepEqual(Object.keys(store).sort(), READ_METHODS);
   // Through the real Blob backend the summary equals the memory store's.
   const viaBlob = await readHistoryStatus(store, CHECK_AT);
@@ -670,17 +684,25 @@ test('the Blob helper reads with the token option only, cannot write, and no tok
     assert.equal(call.options.access, 'private');
     assert.equal(call.options.useCache, false);
   }
+  // Ledger reads ask head() for the etag first, with the same token.
+  assert.ok(heads.length >= 2, String(heads.length));
+  for (const call of heads) {
+    assert.ok(call.pathname.startsWith(`${HISTORY_PREFIX}ledger/`), call.pathname);
+    assert.equal(call.options.token, TOKEN);
+  }
   // The token wins over any token in the options, and put always throws.
-  const blob = readOnlyBlobFunctions(TOKEN, fakeBlobGet(files, calls));
+  const blob = readOnlyBlobFunctions(TOKEN, fakeBlobGet(files, calls), fakeBlobHead(files, heads));
   await blob.get(`${HISTORY_PREFIX}stats.json`, { access: 'private', token: 'vercel_blob_rw_other_secret' });
   assert.equal(calls[calls.length - 1]!.options.token, TOKEN);
+  await blob.head(`${HISTORY_PREFIX}ledger/2026-11.json`, { token: 'vercel_blob_rw_other_secret' });
+  assert.equal(heads[heads.length - 1]!.options.token, TOKEN);
   assert.throws(() => blob.put(`${HISTORY_PREFIX}stats.json`, '{}', { access: 'private', allowOverwrite: true }), /read_only/);
 
   // A stored code shaped like the token is shown as an unknown code, never echoed.
   const prices = JSON.parse(files.get('prices.json')!.text) as PricesFile;
   prices.series['nasdaq:TSLA']!.lastAttempt.code = TOKEN;
   files.set('prices.json', { text: JSON.stringify(prices), etag: '"planted"' });
-  const planted = await readHistoryStatus(createReadOnlyBlobHistoryStore(TOKEN, { get: fakeBlobGet(files, []) }), CHECK_AT);
+  const planted = await readHistoryStatus(createReadOnlyBlobHistoryStore(TOKEN, { get: fakeBlobGet(files, []), head: fakeBlobHead(files, []) }), CHECK_AT);
   assert.equal(planted.prices.series.find(series => series.key === 'nasdaq:TSLA')!.lastAttempt.code, 'unknown_code');
   const text = formatHistoryStatus(planted).join('\n');
   assert.ok(text.includes('[unknown_code: 알 수 없는 코드]: 테슬라'));
@@ -695,11 +717,26 @@ test('token checks, the runner’s messages and the code filter', () => {
   assert.equal(blobTokenProblem('BLOB_READ_WRITE_TOKEN=vercel_blob_rw_a_b'), 'format');
   assert.equal(blobTokenProblem('vercel_blob_rw_store'), 'format');
   assert.equal(blobTokenProblem(` ${TOKEN} `), null);
-  assert.throws(() => createReadOnlyBlobHistoryStore('  ', { get: fakeBlobGet(new Map(), []) }), /missing_token/);
+  assert.throws(() => createReadOnlyBlobHistoryStore('  ', { get: fakeBlobGet(new Map(), []), head: fakeBlobHead(new Map(), []) }), /missing_token/);
   for (const line of [MISSING_TOKEN_LINE, TOKEN_FORMAT_LINE]) {
     assert.ok(!line.includes('\n') && line.startsWith('history:status 중단: ') && line.includes(`${STATUS_TOKEN_ENV}=`));
   }
   assert.ok(MISSING_TOKEN_LINE.includes('D:\\moneycast\\.env') && MISSING_TOKEN_LINE.includes('Storage') && MISSING_TOKEN_LINE.includes('채팅'));
   for (const code of ['ok', 'not_configured', 'stopped', 'provider_error', 'http_401', 'http_429', 'http_0']) assert.equal(safePriceCode(code), code);
   for (const code of ['constructor', '__proto__', TOKEN, 'http_4010', 'ok_']) assert.equal(safePriceCode(code), 'unknown_code');
+});
+
+test('the runner stops before any read when a variable replaces the Blob API address that head() sends the token to', () => {
+  // @vercel/blob 2.8.2 sends head() (requestApi) to VERCEL_BLOB_API_URL || NEXT_PUBLIC_VERCEL_BLOB_API_URL || vercel.com;
+  // get() builds the store's own host from the token. dotenv puts .env lines into process.env.
+  assert.deepEqual([...BLOB_API_URL_ENV], ['VERCEL_BLOB_API_URL', 'NEXT_PUBLIC_VERCEL_BLOB_API_URL']);
+  assert.equal(blobApiUrlOverride({}), null);
+  assert.equal(blobApiUrlOverride({ VERCEL_BLOB_API_URL: '', NEXT_PUBLIC_VERCEL_BLOB_API_URL: undefined, BLOB_READ_WRITE_TOKEN: TOKEN }), null);
+  assert.equal(blobApiUrlOverride({ VERCEL_BLOB_API_URL: 'http://localhost:3000/api/blob' }), 'VERCEL_BLOB_API_URL');
+  assert.equal(blobApiUrlOverride({ NEXT_PUBLIC_VERCEL_BLOB_API_URL: 'https://example.com/api/blob' }), 'NEXT_PUBLIC_VERCEL_BLOB_API_URL');
+  // The SDK takes any non-empty value, and a URL parser drops the spaces around one.
+  assert.equal(blobApiUrlOverride({ VERCEL_BLOB_API_URL: ' https://example.com/api/blob ' }), 'VERCEL_BLOB_API_URL');
+  const runner = readFileSync(new URL('../scripts/history-status.ts', import.meta.url), 'utf8');
+  const check = runner.indexOf('blobApiUrlOverride(process.env)');
+  assert.ok(check > 0 && check < runner.indexOf('createReadOnlyBlobHistoryStore(token'), 'checked before the store is built');
 });

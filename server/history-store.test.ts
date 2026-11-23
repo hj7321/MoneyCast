@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BlobError, BlobPreconditionFailedError, BlobRequestAbortedError, type get, type put } from '@vercel/blob';
+import {
+  BlobError, BlobNotFoundError, BlobPreconditionFailedError, BlobRequestAbortedError, BlobServiceNotAvailable, type get, type head, type put,
+} from '@vercel/blob';
 import type { LedgerEntry } from './history-ledger.js';
 import type { DailyBar, NextDayOutcome, WeeklyOutcome } from './history-outcomes.js';
 import { companyStats, outcomesFromPrices, type CompanyStats } from './history-stats.js';
@@ -211,9 +213,10 @@ interface Call { pathname: string; options: Record<string, unknown> }
 function fakeBlob() {
   const objects = new Map<string, { text: string; etag: string }>();
   const gets: Call[] = [];
+  const heads: Call[] = [];
   const puts: Array<Call & { body: string }> = [];
   let version = 0;
-  const hooks: { get?: (pathname: string) => unknown; put?: (pathname: string) => unknown } = {};
+  const hooks: { get?: (pathname: string) => unknown; head?: (pathname: string) => unknown; put?: (pathname: string) => unknown } = {};
   const api = {
     get: (async (pathname: string, options: Record<string, unknown>) => {
       gets.push({ pathname, options });
@@ -222,6 +225,15 @@ function fakeBlob() {
       const stored = objects.get(pathname);
       return stored ? { statusCode: 200, stream: new Response(stored.text).body, blob: { etag: stored.etag } } : null;
     }) as unknown as typeof get,
+    // Ledger reads ask head() first; like the SDK, it throws BlobNotFoundError for a missing pathname.
+    head: (async (pathname: string, options: Record<string, unknown>) => {
+      heads.push({ pathname, options });
+      const hooked = hooks.head?.(pathname);
+      if (hooked !== undefined) return hooked;
+      const stored = objects.get(pathname);
+      if (!stored) throw new BlobNotFoundError();
+      return { pathname, etag: stored.etag, size: Buffer.byteLength(stored.text, 'utf8') };
+    }) as unknown as typeof head,
     put: (async (pathname: string, body: unknown, options: Record<string, unknown>) => {
       puts.push({ pathname, body: String(body), options });
       hooks.put?.(pathname);
@@ -236,7 +248,7 @@ function fakeBlob() {
       return { etag, pathname, url: `https://store.example/${pathname}` };
     }) as unknown as typeof put,
   };
-  return { api, objects, gets, puts, hooks };
+  return { api, objects, gets, heads, puts, hooks };
 }
 
 function blobStore() {
@@ -457,7 +469,7 @@ test('Blob store: a put still pending at 20 s ends as timeout with an AbortError
     if (inBackoff) setTimeout(giveUp, STORE_TIMEOUT_MS + 7_000);
     else signal.addEventListener('abort', giveUp, { once: true });
   })) as unknown as typeof put;
-  const store = createBlobHistoryStore({ BLOB_STORE_ID: 'store_test' }, { get: fakeBlob().api.get, put: pendingPut })!;
+  const store = createBlobHistoryStore({ BLOB_STORE_ID: 'store_test' }, { ...fakeBlob().api, put: pendingPut })!;
   for (const backoff of [false, true]) {
     inBackoff = backoff;
     let settled = false;
@@ -488,6 +500,262 @@ test('Blob store: a put still pending at 20 s ends as timeout with an AbortError
   t.mock.timers.tick(STORE_TIMEOUT_MS);
   await flush();
   assert.deepEqual(quick.puts.map(call => (call.options.abortSignal as AbortSignal).aborted), [false, false]);
+});
+
+// ---------------------------------------------------------------------------
+// Production-like Blob: the ledger etag (incident of 2026-11-14 to 2026-11-23)
+// ---------------------------------------------------------------------------
+
+type BlobMethod = 'get' | 'head' | 'put';
+const HEAD_PATH = 'news-history/v1/ledger/2026-11.json';
+
+/**
+ * @vercel/blob 2.8.2 against the Blob API as production showed it: head() answers the API's etag, the one put() returns
+ * and the API compares x-if-match with; get() passes on only the CDN's ETag header, here none or a weak one; put() maps
+ * its options to headers as the SDK does (x-if-match only for a non-empty ifMatch) and the API then applies its rules.
+ * A GET that may use the cache is served the copy in `cdnCache` when there is one (the CDN keeps a file up to 60 s).
+ */
+function productionBlob(cdn: 'none' | 'weak') {
+  const objects = new Map<string, { text: string; etag: string }>();
+  const cdnCache = new Map<string, { text: string; etag: string }>();
+  const calls: Array<{ method: BlobMethod; pathname: string; options: Record<string, unknown> }> = [];
+  const hooks: {
+    head?: (options: Record<string, unknown>) => unknown;
+    /** undefined falls through to the store; null answers as the SDK does on a 404. */
+    get?: (pathname: string, options: Record<string, unknown>) => unknown;
+  } = {};
+  let version = 0;
+  const api = {
+    get: (async (pathname: string, options: Record<string, unknown>) => {
+      calls.push({ method: 'get', pathname, options });
+      const hooked = hooks.get?.(pathname, options);
+      if (hooked !== undefined) return hooked;
+      const stored = (options.useCache === false ? undefined : cdnCache.get(pathname)) ?? objects.get(pathname);
+      if (!stored) return null;
+      const etag = cdn === 'none' ? '' : `W/${stored.etag}`;
+      return { statusCode: 200, stream: new Response(stored.text).body, headers: new Headers(etag ? { etag } : {}), blob: { pathname, etag } };
+    }) as unknown as typeof get,
+    head: (async (pathname: string, options: Record<string, unknown>) => {
+      calls.push({ method: 'head', pathname, options });
+      if (hooks.head) return hooks.head(options);
+      const stored = objects.get(pathname);
+      if (!stored) throw new BlobNotFoundError();
+      return { pathname, etag: stored.etag, size: Buffer.byteLength(stored.text, 'utf8'), contentType: 'application/json' };
+    }) as unknown as typeof head,
+    put: (async (pathname: string, body: unknown, options: Record<string, unknown>) => {
+      calls.push({ method: 'put', pathname, options });
+      const ifMatch = options.ifMatch ? String(options.ifMatch) : null;
+      const existing = objects.get(pathname);
+      if (ifMatch !== null && existing?.etag !== ifMatch) throw new BlobPreconditionFailedError();
+      if (ifMatch === null && existing && options.allowOverwrite !== true) {
+        throw new BlobError('This blob already exists, use `allowOverwrite: true` if you want to overwrite it.');
+      }
+      version += 1;
+      const etag = `"api-${version}"`;
+      objects.set(pathname, { text: String(body), etag });
+      return { pathname, etag, url: `https://store.private.blob.vercel-storage.com/${pathname}` };
+    }) as unknown as typeof put,
+  };
+  return { objects, cdnCache, calls, hooks, store: createBlobHistoryStore({ BLOB_STORE_ID: 'store_test' }, api)! };
+}
+
+const callsOf = (calls: ReadonlyArray<{ method: BlobMethod; pathname: string }>) =>
+  calls.map(call => `${call.method} ${call.pathname.slice(HISTORY_PREFIX.length)}`);
+
+for (const cdn of ['none', 'weak'] as const) {
+  test(`production-like Blob (CDN ETag ${cdn}): the head is created once, then every later read rewrites it under the API etag`, async () => {
+    const blob = productionBlob(cdn);
+    assert.equal(blob.calls.length, 0, 'construction does no I/O');
+    assert.equal(await blob.store.findLedgerHead('2026-11', 1), null);
+    assert.deepEqual(callsOf(blob.calls), ['head ledger/2026-11.json'], 'a segment head() does not find is never fetched');
+    await blob.store.writeLedgerSegment(SEGMENT, { kind: 'createOnly' });
+    for (let run = 2; run <= 4; run += 1) {
+      blob.calls.length = 0;
+      const head = (await blob.store.findLedgerHead('2026-11', 1))!;
+      assert.deepEqual(callsOf(blob.calls), ['head ledger/2026-11.json', 'get ledger/2026-11.json', 'head ledger/2026-11.1.json']);
+      assert.deepEqual(withoutSignal(blob.calls[0]!.options), {});
+      assert.deepEqual(withoutSignal(blob.calls[1]!.options), { access: 'private', useCache: false });
+      assert.equal(head.etag, blob.objects.get(HEAD_PATH)!.etag, `run ${run}: the API etag, not the CDN header`);
+      const next = { ...head.value, writtenAt: iso(NOW + run * HOUR), state: { ...head.value.state, writeToken: `run-${run}` } };
+      const written = await blob.store.writeLedgerSegment(next, { kind: 'ifMatch', etag: head.etag });
+      assert.equal(written.etag, blob.objects.get(HEAD_PATH)!.etag);
+      assert.deepEqual(withoutSignal(blob.calls.at(-1)!.options), { ...BASE_PUT, ifMatch: head.etag });
+      assert.equal((JSON.parse(blob.objects.get(HEAD_PATH)!.text) as LedgerSegmentFile).state.writeToken, `run-${run}`);
+    }
+    assert.equal(blob.store.writes, 4);
+    // What the store used to send as ifMatch, the CDN header, can never rewrite the head: empty is refused before put
+    // (put() would send no condition and the API answer "already exists"), and a weak etag fails the precondition.
+    const stored = { ...blob.objects.get(HEAD_PATH)! };
+    const header = cdn === 'none' ? '' : `W/${stored.etag}`;
+    const late = { ...SEGMENT, state: { ...SEGMENT.state, writeToken: 'run-late' } };
+    assert.equal(await codeOf(blob.store.writeLedgerSegment(late, { kind: 'ifMatch', etag: header })), 'conflict');
+    assert.deepEqual(blob.objects.get(HEAD_PATH), stored);
+  });
+}
+
+test('production-like Blob: a fresh ledger read is null only when head() finds nothing; a failed head() or one without an etag is an error, never fetched', async () => {
+  const blob = productionBlob('none');
+  assert.equal(await blob.store.readLedgerSegment('2026-11', { fresh: true }), null);
+  assert.deepEqual(callsOf(blob.calls), ['head ledger/2026-11.json']);
+  await blob.store.writeLedgerSegment(SEGMENT, { kind: 'createOnly' });
+  blob.calls.length = 0;
+  for (const answer of [{ etag: '' }, { etag: undefined }, { etag: 7 }, {}, null, undefined, 'etag']) {
+    blob.hooks.head = () => answer;
+    assert.equal(await codeOf(blob.store.readLedgerSegment('2026-11', { fresh: true })), 'unreadable', String(JSON.stringify(answer)));
+  }
+  const failures: Array<[unknown, HistoryStoreErrorCode]> = [
+    [new BlobError('Failed to fetch blob: 500 secret-token-text'), 'unreadable'],
+    [new BlobServiceNotAvailable(), 'unreadable'],
+    [new TypeError('fetch failed secret-token-text'), 'unreadable'],
+    [new BlobRequestAbortedError(), 'timeout'],
+    [new DOMException('The operation timed out.', 'TimeoutError'), 'timeout'],
+  ];
+  for (const [failure, code] of failures) {
+    blob.hooks.head = () => { throw failure; };
+    let caught: unknown = null;
+    try { await blob.store.findLedgerHead('2026-11', 1); } catch (error) { caught = error; }
+    assert.ok(caught instanceof HistoryStoreError, 'a failed head() never looks like an empty ledger');
+    assert.deepEqual([caught.code, caught.file, caught.message], [code, 'ledger/2026-11.json', code]);
+    assert.doesNotMatch(String(caught.stack), /secret-token-text/);
+  }
+  assert.ok(blob.calls.every(call => call.method === 'head'), 'nothing is fetched after a failed head()');
+  // Gone between head() and the uncached GET: unreadable, never an absent segment (findLedgerHead would take an older
+  // shard for the head). A cached read asks no head(), and its GET finding nothing is not found, as before.
+  blob.hooks.head = () => ({ pathname: HEAD_PATH, etag: '"api-1"' });
+  blob.objects.delete(HEAD_PATH);
+  assert.equal(await codeOf(blob.store.readLedgerSegment('2026-11', { fresh: true })), 'unreadable');
+  assert.deepEqual(callsOf(blob.calls).slice(-2), ['head ledger/2026-11.json', 'get ledger/2026-11.json']);
+  assert.equal(await blob.store.readLedgerSegment('2026-11'), null);
+  assert.deepEqual(callsOf(blob.calls).slice(-1), ['get ledger/2026-11.json']);
+  // Other files never ask head(): they are written with allowOverwrite, and their etag is never a condition.
+  blob.hooks.head = () => { throw new Error('head() is for ledger segments only'); };
+  blob.calls.length = 0;
+  await blob.store.writeStats(STATS);
+  assert.deepEqual(plain((await blob.store.readStats({ fresh: true }))!.value), plain(STATS));
+  assert.deepEqual(callsOf(blob.calls), ['put stats.json', 'get stats.json']);
+});
+
+test('production-like Blob: a head() still pending at 20 s ends as timeout with an AbortError, in flight or between SDK retries', async t => {
+  // head() goes through the SDK's requestApi like put(): a TimeoutError is retried with backoff, an AbortError is not.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const blob = productionBlob('none');
+  const signals: AbortSignal[] = [];
+  let inBackoff = false;
+  blob.hooks.head = options => new Promise((_resolve, reject) => {
+    const signal = options.abortSignal as AbortSignal;
+    signals.push(signal);
+    const giveUp = () => { if ((signal.reason as Error | undefined)?.name === 'AbortError') reject(new BlobRequestAbortedError()); };
+    // In flight, the abort reaches the request; in a backoff sleep, the SDK sees it only at its next attempt.
+    if (inBackoff) setTimeout(giveUp, STORE_TIMEOUT_MS + 7_000);
+    else signal.addEventListener('abort', giveUp, { once: true });
+  });
+  for (const backoff of [false, true]) {
+    inBackoff = backoff;
+    let settled = false;
+    const code = codeOf(blob.store.findLedgerHead('2026-11', 1)).finally(() => { settled = true; });
+    await flush();
+    assert.equal(signals.length, backoff ? 2 : 1);
+    t.mock.timers.tick(STORE_TIMEOUT_MS - 1);
+    await flush();
+    assert.equal(settled, false, 'still waiting just before 20 s');
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(settled, true, backoff ? 'stopped at 20 s in a backoff sleep' : 'stopped at 20 s in flight');
+    assert.equal(await code, 'timeout');
+    assert.equal(signals.at(-1)!.aborted, true);
+    assert.equal((signals.at(-1)!.reason as Error).name, 'AbortError', 'an AbortError, which the SDK does not retry');
+  }
+  // The sleeping head() gives up at its next attempt; its late rejection is handled.
+  t.mock.timers.tick(7_000);
+  await flush();
+  assert.deepEqual(callsOf(blob.calls), ['head ledger/2026-11.json', 'head ledger/2026-11.json'], 'no GET after a head() that timed out');
+  // A head() that answers first clears its deadline: 20 s later its signal has not been aborted.
+  blob.hooks.head = undefined;
+  assert.equal(await blob.store.findLedgerHead('2026-11', 1), null);
+  t.mock.timers.tick(STORE_TIMEOUT_MS);
+  await flush();
+  assert.equal((blob.calls.at(-1)!.options.abortSignal as AbortSignal).aborted, false);
+});
+
+test('production-like Blob: a ledger rewrite with an empty etag is refused before put, so it can never turn into a create-only put', async () => {
+  const blob = productionBlob('none');
+  const next = { ...SEGMENT, state: { ...SEGMENT.state, writeToken: 'run-2' } };
+  // No file yet: a put without a condition would have created it.
+  assert.equal(await codeOf(blob.store.writeLedgerSegment(next, { kind: 'ifMatch', etag: '' })), 'conflict');
+  assert.equal(blob.objects.size, 0);
+  await blob.store.writeLedgerSegment(SEGMENT, { kind: 'createOnly' });
+  const stored = { ...blob.objects.get(HEAD_PATH)! };
+  assert.equal(await codeOf(blob.store.writeLedgerSegment(next, { kind: 'ifMatch', etag: '' })), 'conflict');
+  assert.deepEqual(blob.objects.get(HEAD_PATH), stored);
+  assert.deepEqual(blob.calls.filter(call => call.method === 'put').map(call => withoutSignal(call.options)), [{ ...BASE_PUT, allowOverwrite: false }],
+    'only the createOnly put was ever sent');
+  assert.equal(blob.store.writes, 1);
+});
+
+test('an empty-etag ledger rewrite is a conflict before anything is sent, never a landed retry of this run\'s earlier write', async () => {
+  // The landed-retry check takes a stored file with our writeToken for this write. Nothing was sent, so nothing landed.
+  const blob = productionBlob('none');
+  const memory = createMemoryHistoryStore();
+  const again = { ...SEGMENT, writtenAt: iso(NOW + HOUR), entries: SEGMENT.entries.slice(1) };
+  for (const store of [blob.store, memory]) {
+    await store.writeLedgerSegment(SEGMENT, { kind: 'createOnly' });
+    assert.equal(await codeOf(store.writeLedgerSegment(again, { kind: 'ifMatch', etag: '' })), 'conflict');
+    assert.deepEqual([store.writes, store.attempts], [1, 1], 'neither a write nor an attempt');
+  }
+  assert.deepEqual(callsOf(blob.calls), ['put ledger/2026-11.json'], 'no second put, and no head() or GET to check for a landed one');
+  assert.deepEqual(memory.writeLog.map(item => item.ok), [true]);
+  assert.equal(memory.reads.length, 0);
+  assert.equal((JSON.parse(blob.objects.get(HEAD_PATH)!.text) as LedgerSegmentFile).entries.length, SEGMENT.entries.length);
+});
+
+test('production-like Blob: a cached ledger read is one GET that keeps its own ETag, so it can never overwrite a newer head', async () => {
+  // head() always answers for the current file, while a cached GET can still serve an older one: that pair would let a
+  // conditional write pass over content its caller never read.
+  for (const cdn of ['none', 'weak'] as const) {
+    const blob = productionBlob(cdn);
+    await blob.store.writeLedgerSegment(SEGMENT, { kind: 'createOnly' });
+    const first = { ...blob.objects.get(HEAD_PATH)! };
+    blob.cdnCache.set(HEAD_PATH, first);
+    // Another run rewrites the head while the CDN still holds the first version.
+    const head = (await blob.store.findLedgerHead('2026-11', 1))!;
+    assert.equal(head.value.state.writeToken, 'run-1');
+    await blob.store.writeLedgerSegment({ ...head.value, state: { ...head.value.state, writeToken: 'run-other' } }, { kind: 'ifMatch', etag: head.etag });
+    const newer = { ...blob.objects.get(HEAD_PATH)! };
+    blob.calls.length = 0;
+    const cached = (await blob.store.readLedgerSegment('2026-11'))!;
+    assert.deepEqual(callsOf(blob.calls), ['get ledger/2026-11.json'], `${cdn}: no head() for a cached read`);
+    assert.deepEqual(withoutSignal(blob.calls[0]!.options), { access: 'private', useCache: true });
+    assert.equal(cached.value.state.writeToken, 'run-1', 'the CDN served the first version');
+    assert.equal(cached.etag, cdn === 'none' ? '' : `W/${first.etag}`, 'the ETag that came with it, never the newer API etag');
+    const stale = { ...cached.value, writtenAt: iso(NOW + 2 * HOUR), state: { ...cached.value.state, writeToken: 'run-stale' } };
+    assert.equal(await codeOf(blob.store.writeLedgerSegment(stale, { kind: 'ifMatch', etag: cached.etag })), 'conflict');
+    assert.deepEqual(blob.objects.get(HEAD_PATH), newer, 'the newer head is kept');
+    // A fresh read skips the CDN and pairs the newer content with its API etag.
+    const fresh = (await blob.store.readLedgerSegment('2026-11', { fresh: true }))!;
+    assert.deepEqual([fresh.value.state.writeToken, fresh.etag], ['run-other', newer.etag]);
+  }
+});
+
+test('production-like Blob: once head() finds the newest shard, an uncached GET that does not is unreadable, never an older head', async () => {
+  const blob = productionBlob('none');
+  await blob.store.writeLedgerSegment(SEGMENT, { kind: 'createOnly' });
+  await blob.store.writeLedgerSegment(segmentFile('2026-11.1', ['2026-10', '2026-11', '2026-11.1'], 'run-2'), { kind: 'createOnly' });
+  assert.equal((await blob.store.findLedgerHead('2026-11', 1))!.value.segment, '2026-11.1');
+  // head() and the uncached GET disagree (an inconsistent store, or a delete in between). Taking 2026-11 for the head
+  // would let the job rewrite it under its own, valid etag, beside the newer shard.
+  blob.hooks.get = (pathname, options) => pathname.endsWith('2026-11.1.json') && options.useCache === false ? null : undefined;
+  blob.calls.length = 0;
+  assert.equal(await codeOf(blob.store.findLedgerHead('2026-11', 1)), 'unreadable');
+  assert.deepEqual(callsOf(blob.calls),
+    ['head ledger/2026-11.json', 'get ledger/2026-11.json', 'head ledger/2026-11.1.json', 'get ledger/2026-11.1.json']);
+  assert.equal(await codeOf(blob.store.readLedgerSegment('2026-11.1', { fresh: true })), 'unreadable');
+  // The SDK's get() returns null on a 404; one that throws BlobNotFoundError reads the same.
+  blob.hooks.get = (pathname, options) => {
+    if (pathname.endsWith('2026-11.1.json') && options.useCache === false) throw new BlobNotFoundError();
+    return undefined;
+  };
+  assert.equal(await codeOf(blob.store.findLedgerHead('2026-11', 1)), 'unreadable');
 });
 
 // ---------------------------------------------------------------------------
@@ -799,13 +1067,16 @@ test('findLedgerHead throws on any failure other than not found', async () => {
   store.files.set('ledger/2026-10.1.json', { text: JSON.stringify({ ...segmentFile('2026-10.1', ['2026-10', '2026-10.1']), version: 'news-history-ledger-v9' }), etag: '"c"' });
   assert.equal(await codeOf(store.findLedgerHead('2026-11')), 'unsupported_version');
 
+  // Through Blob each probe asks head() first: not found ends the month, a failure stops the probe, neither is fetched.
   const fake = blobStore();
-  fake.hooks.get = pathname => {
-    if (pathname.endsWith('2026-11.json')) return null;
+  fake.hooks.head = pathname => {
+    if (pathname.endsWith('2026-11.json')) throw new BlobNotFoundError();
     throw new DOMException('timed out', 'TimeoutError');
   };
   assert.equal(await codeOf(fake.store.findLedgerHead('2026-11')), 'timeout');
-  assert.deepEqual(fake.gets.map(call => withoutSignal(call.options)), [{ access: 'private', useCache: false }, { access: 'private', useCache: false }]);
+  assert.deepEqual(fake.heads.map(call => [call.pathname, withoutSignal(call.options)]),
+    [['news-history/v1/ledger/2026-11.json', {}], ['news-history/v1/ledger/2026-10.json', {}]]);
+  assert.equal(fake.gets.length, 0);
 });
 
 // ---------------------------------------------------------------------------

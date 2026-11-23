@@ -1,4 +1,4 @@
-import type { get as blobGet, put as blobPut } from '@vercel/blob';
+import type { get as blobGet, head as blobHead, put as blobPut } from '@vercel/blob';
 import {
   companies as coreCompanies, type HistoryReadyStatus, type Horizon, type Signal, type Verdict,
 } from '../packages/core/src/index.js';
@@ -68,12 +68,14 @@ export function readOnlyHistoryStore(source: ReadOnlyHistoryStore): ReadOnlyHist
 }
 
 type BlobGet = typeof blobGet;
+type BlobHead = typeof blobHead;
 type BlobPut = typeof blobPut;
 
-/** What the read-only Blob store is built on: every get carries the token, and put always throws. */
-export function readOnlyBlobFunctions(token: string, get: BlobGet): { get: BlobGet; put: BlobPut } {
+/** What the read-only Blob store is built on: every get and head carries the token, and put always throws. */
+export function readOnlyBlobFunctions(token: string, get: BlobGet, head: BlobHead): { get: BlobGet; head: BlobHead; put: BlobPut } {
   return {
     get: (pathname, options) => get(pathname, { ...options, token }),
+    head: (pathname, options) => head(pathname, { ...options, token }),
     put: () => { throw new Error('read_only'); },
   };
 }
@@ -82,8 +84,8 @@ export function readOnlyBlobFunctions(token: string, get: BlobGet): { get: BlobG
  * The Blob history store of the status command, from a read-write token passed in explicitly. The store sees
  * { BLOB_READ_WRITE_TOKEN: token } only; process.env is neither read nor set.
  */
-export function createReadOnlyBlobHistoryStore(token: string, blob: { get: BlobGet }): ReadOnlyHistoryStore {
-  const store = createBlobHistoryStore({ BLOB_READ_WRITE_TOKEN: token }, readOnlyBlobFunctions(token, blob.get));
+export function createReadOnlyBlobHistoryStore(token: string, blob: { get: BlobGet; head: BlobHead }): ReadOnlyHistoryStore {
+  const store = createBlobHistoryStore({ BLOB_READ_WRITE_TOKEN: token }, readOnlyBlobFunctions(token, blob.get, blob.head));
   if (!store) throw new RangeError('missing_token');
   return readOnlyHistoryStore(store);
 }
@@ -93,6 +95,17 @@ export function blobTokenProblem(value: string | undefined): 'missing' | 'format
   const token = value?.trim() ?? '';
   if (!token) return 'missing';
   return /^vercel_blob_rw_[^_\s]+_\S+$/.test(token) ? null : 'format';
+}
+
+/**
+ * Variables that replace the Blob API address in @vercel/blob 2.8.2 (any non-empty value, read at each call). head()
+ * sends the token there, while get() always goes to the store's own host.
+ */
+export const BLOB_API_URL_ENV = ['VERCEL_BLOB_API_URL', 'NEXT_PUBLIC_VERCEL_BLOB_API_URL'] as const;
+
+/** The first of BLOB_API_URL_ENV that `env` sets, or null. */
+export function blobApiUrlOverride(env: Readonly<Record<string, string | undefined>>): (typeof BLOB_API_URL_ENV)[number] | null {
+  return BLOB_API_URL_ENV.find(name => Boolean(env[name])) ?? null;
 }
 
 /** One line: where the token is (current Vercel docs: the read-write token exists only when the store connection adds it). */

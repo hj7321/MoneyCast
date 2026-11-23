@@ -1,8 +1,8 @@
 import 'dotenv/config';
-import { get } from '@vercel/blob';
+import { get, head } from '@vercel/blob';
 import {
-  MISSING_TOKEN_LINE, STATUS_TOKEN_ENV, TOKEN_FORMAT_LINE, blobTokenProblem, createReadOnlyBlobHistoryStore, everyReadFailed,
-  formatHistoryStatus, readHistoryStatus,
+  MISSING_TOKEN_LINE, STATUS_TOKEN_ENV, TOKEN_FORMAT_LINE, blobApiUrlOverride, blobTokenProblem, createReadOnlyBlobHistoryStore,
+  everyReadFailed, formatHistoryStatus, readHistoryStatus,
 } from '../server/history-status.js';
 import { createRedactor, unsafeNetworkEnv } from '../server/price-wire.js';
 
@@ -41,7 +41,13 @@ async function main(): Promise<void> {
       : 'tls_unverified (NODE_TLS_REJECT_UNAUTHORIZED=0이면 토큰이 검증되지 않은 연결로 갈 수 있습니다. 그 설정을 지우고 다시 실행하세요.)');
     return;
   }
-  const status = await readHistoryStatus(createReadOnlyBlobHistoryStore(token, { get }), Date.now());
+  // head() (the ledger etag) sends the token to the Blob API, whose address these variables replace.
+  const apiOverride = blobApiUrlOverride(process.env);
+  if (apiOverride) {
+    fail(`blob_api_url_set (${apiOverride}이 설정되어 있으면 토큰이 Vercel이 아닌 주소로 갈 수 있습니다. 그 설정을 지우고 다시 실행하세요.)`);
+    return;
+  }
+  const status = await readHistoryStatus(createReadOnlyBlobHistoryStore(token, { get, head }), Date.now());
   for (const line of formatHistoryStatus(status)) print(line);
   if (everyReadFailed(status)) process.exitCode = 1;
 }
