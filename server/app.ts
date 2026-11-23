@@ -4,6 +4,7 @@ import { companies, searchCompanies, NEWS_CACHE_TTL_MS, type NewsAnalysis } from
 import { collectNews } from './collect.js';
 import { createGoalClarifier, type GoalClarifier } from './goal-clarify.js';
 import { createHistoryService, historyRunLogLine, parseHistoryMode, type HistoryService } from './history-job.js';
+import { createHistoryServe, withHistoryHint, type HistoryServe } from './history-serve.js';
 import { createAiClassifier } from './llm.js';
 import { createLlmClients, createLlmJudges } from './llm-judges.js';
 import { createNewsProvider } from './news-provider.js';
@@ -18,6 +19,8 @@ interface HandlerOptions {
   goals?: GoalClarifier;
   /** The scheduled history job. Defaults to the Blob-backed service when no news service is passed; without either the route answers 503. */
   history?: HistoryService | null;
+  /** GET /api/news/history. Defaults to the Blob-backed reader, built without I/O and reading only when asked. */
+  historyServe?: HistoryServe;
 }
 
 /**
@@ -143,6 +146,7 @@ export function createRequestHandler(service?: NewsService, options: HandlerOpti
   const news = service ?? defaults!.news;
   const goals = options.goals ?? defaults?.goals ?? createGoalClarifier(createLlmClients(env), env);
   const history = options.history ?? defaults?.history ?? null;
+  const historyServe = options.historyServe ?? createHistoryServe(env, options.clock ? { clock: options.clock } : {});
   const limited = createRequestLimiter(options.clock ?? Date.now);
   return async (request: IncomingMessage, response: ServerResponse) => {
     try {
@@ -200,12 +204,21 @@ export function createRequestHandler(service?: NewsService, options: HandlerOpti
         else console.log(line);
         return send(response, summary.status === 'not_configured' ? 503 : summary.status === 'failed' ? 500 : 200, summary);
       }
+      if (url.pathname === '/api/news/history') {
+        const id = url.searchParams.get('companyId');
+        const company = companies.find(item => item.id === id);
+        if (!company) return send(response, 400, { error: '검색 결과에서 회사와 거래소를 선택해 주세요.' });
+        // Statistics only, never provider calls; answer() never throws and picks the CDN lifetime.
+        const { body, cdnCacheControl } = await historyServe.answer(company);
+        return send(response, 200, body, cdnCacheControl);
+      }
       if (url.pathname === '/api/news') {
         const id = url.searchParams.get('companyId');
         const company = companies.find(item => item.id === id);
         if (!company) return send(response, 400, { error: '검색 결과에서 회사와 거래소를 선택해 주세요.' });
         const analysis = await news.getAnalysis(company);
-        return send(response, 200, analysis, newsCdnCacheControl(analysis, options.clock?.() ?? Date.now()));
+        // The hint is added to a copy only while HISTORY_INSIGHTS is on; stats.json is never read here.
+        return send(response, 200, withHistoryHint(analysis, parseHistoryMode(env.HISTORY_INSIGHTS)), newsCdnCacheControl(analysis, options.clock?.() ?? Date.now()));
       }
       return send(response, 404, { error: '요청한 API를 찾을 수 없습니다.' });
     } catch {

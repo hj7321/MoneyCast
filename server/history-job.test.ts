@@ -1398,3 +1398,37 @@ test('historyRunLogLine prints only numbers, booleans, nulls and short safe text
   const hostile = { get mode() { throw new Error('mode'); } } as unknown as HistoryJobSummary;
   assert.equal(historyRunLogLine(hostile), 'history_run {"mode":null,"status":null,"truncated":true}');
 });
+
+// ---------------------------------------------------------------------------
+// Step 6: neutral-only overnight news in the shadow record
+// ---------------------------------------------------------------------------
+
+test('shadow records: neutral-only overnight news is recorded as all_neutral and passes the store check the job uses', async () => {
+  const { parseShadowFile } = await import('./history-store.js');
+  const computeAtMs = at('2026-11-11T06:20:00Z');
+  for (const [companyId, exchange] of [['krx:005930', 'KRX'], ['nasdaq:AAPL', 'NASDAQ']] as const) {
+    const { newsWindow } = dayTargetWindow(exchange, computeAtMs);
+    const inside = Date.parse(newsWindow.start) + HOUR;
+    const pool = [
+      article(companyId, inside, 'neutral'), article(companyId, inside + MIN, 'neutral'),
+      // Not about the company: it changes nothing.
+      article(companyId, inside + 2 * MIN, 'positive', { aiRelevance: 'unrelated', sentimentScore: undefined, classificationMethod: undefined }),
+    ];
+    const snapshot = snapshotOf(companyId, computeAtMs - 10 * MIN, pool, { positiveFactors: [], negativeFactors: [] });
+    const records = shadowRecordsFor({ companyId, exchange, snapshot, stats: null, computeAtMs, previous: [] });
+    const day = records.find(record => record.horizon === 'day')!;
+    assert.deepEqual(day.overnight, { reason: 'all_neutral', evidence: 'none', counts: { positive: 0, negative: 0, neutral: 2, ignored: 1 } }, companyId);
+    assert.deepEqual([day.baseline, day.verdict, day.integrated, day.changed, day.note], ['withheld', null, 'withheld', false, 'baseline_withheld']);
+    // validShadow's probe: the same file check every shadow write passes before it reaches the store.
+    const file = { version: HISTORY_VERSIONS.shadow, year: 2026, writtenAt: iso(computeAtMs), records: json(records) };
+    const parsed = parseShadowFile(file, 2026);
+    assert.ok(parsed.ok, companyId);
+    assert.equal(parsed.value.records.find(record => record.horizon === 'day')!.overnight!.reason, 'all_neutral');
+    // With one unclassified article the window stays "no news", as before.
+    const unclassified = snapshotOf(companyId, computeAtMs - 10 * MIN, [...pool, article(companyId, inside + 3 * MIN, 'unclassified', {
+      sentimentScore: undefined, classificationMethod: 'unavailable',
+    })], { positiveFactors: [], negativeFactors: [] });
+    const before = shadowRecordsFor({ companyId, exchange, snapshot: unclassified, stats: null, computeAtMs, previous: [] });
+    assert.equal(before.find(record => record.horizon === 'day')!.overnight!.reason, 'no_overnight_news');
+  }
+});

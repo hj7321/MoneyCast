@@ -509,7 +509,7 @@ function parseShadowRecord(value: unknown): ShadowRecord {
     const item = record(source.overnight);
     const counts = record(item.counts);
     overnight = {
-      reason: oneOf(item.reason, ['conflicting', 'one_direction', 'no_overnight_news'] as const),
+      reason: oneOf(item.reason, ['conflicting', 'one_direction', 'no_overnight_news', 'all_neutral'] as const),
       evidence: oneOf(item.evidence, ['none', 'low', 'moderate'] as const),
       counts: { positive: count(counts.positive), negative: count(counts.negative), neutral: count(counts.neutral), ignored: count(counts.ignored) },
     };

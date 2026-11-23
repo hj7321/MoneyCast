@@ -9,6 +9,7 @@
 | `GET /api/health` | 서비스 실행 상태 |
 | `GET /api/companies?q=삼성` | `{ "companies": [...] }`. 고정 식별 목록 검색이며 실시간 상장 목록이 아닙니다. |
 | `GET /api/news?companyId=krx%3A005930` | 공용 `NewsAnalysis` 계약 |
+| `GET /api/news/history?companyId=…` | 두 기간 전망(다음 거래일·다음 주)에 쓰는 과거 기록(`CompanyHistory`). 대상 구간은 요청 시각으로 계산. 알 수 없는 회사는 400(`/api/news`와 같음). `HISTORY_INSIGHTS=on`이 아니면 `{ "status": "off" }`. `HISTORY_PUBLIC_MARKETS`에 없는 시장은 `stats_not_public`(통계·가격 숫자 없이 답하고 `stats.json`도 읽지 않음). 읽기 실패 등은 `unavailable`. CDN 보관은 실패·`off`면 60초, 그 밖에는 다음 개장·마감 시각까지(최대 3600초, 그때까지 30초가 안 남았으면 30초)이며 브라우저 캐시는 `no-store`. 외부 API 호출 없음 |
 | `GET /api/cron/collect` | 예약 수집. `Authorization: Bearer <CRON_SECRET>`가 필요하며 `{ "refreshed": [...], "failed": [...], "skipped": [...] }`만 반환 |
 | `GET /api/cron/history[?step=ledger]` | 과거 데이터 작업. 인증은 수집과 같음(`CRON_SECRET` 없음 503, 인증 실패 401, GET 외 405). `HISTORY_INSIGHTS`가 `off`면 `{ "status": "off" }`만 반환하고 아무것도 읽거나 쓰지 않음. 그 밖에는 작업 요약(`status`·`errors`·쓰기 내역, 비밀값 없음). 켜져 있을 때 `step`은 `ledger`만 허용(그 외 400). Vercel Cron이 보내는 `x-vercel-cron-schedule`이 장부 단계 시각(`0 23 * * *`·`0 12 * * *`)이면 `step`이 없어도 장부 단계로 돎(Vercel 문서가 cron 경로의 쿼리 전달을 보장하지 않아서). 작업 상태 `failed`는 500, `not_configured`는 503 |
 | `GET /api/goals/clarify` | 자유 목표 설명 AI 정리를 쓸 수 있는지(`enabled`)와 모델 목록. 아래 [목표 설명 AI 정리](#목표-설명-ai-정리선택) 참고 |
@@ -143,7 +144,7 @@ NEWS_API_KEY=your-server-only-key
 
 과거 비슷한 뉴스 뒤의 주가 흐름을 나중에 보여주기 위해, 지금은 **모으기만** 합니다. 화면은 바뀌지 않습니다.
 
-- **모드**: `HISTORY_INSIGHTS`가 `off`(기본)면 `/api/cron/history`는 아무 일도 하지 않습니다. `collect`(또는 아직은 같은 뜻인 `on`)면 아래 장부 단계와 전체 작업이 돕니다. 저녁 `/api/cron/collect`는 이 값과 상관없이 돕니다.
+- **모드**: `HISTORY_INSIGHTS`가 `off`(기본)면 `/api/cron/history`는 아무 일도 하지 않습니다. `collect`나 `on`이면 아래 장부 단계와 전체 작업이 돕니다. `on`이면 여기에 더해 `/api/news`가 `historyAvailable` 힌트를 붙이고, 웹이 `GET /api/news/history`로 두 기간 전망을 보여 줍니다(통계 숫자는 `HISTORY_PUBLIC_MARKETS`에 있는 시장만). 저녁 `/api/cron/collect`는 이 값과 상관없이 돕니다.
 - **예약 시각(UTC → KST)**: `0 23 * * *`(08시대) 장부 단계, `0 6 * * *`(15시대) 전체 작업, `0 12 * * *`(21시대) 장부 단계. 기존 `/api/cron/collect`는 `0 21 * * *`에 더해 `0 11 * * *`(20시대)에 한 번 더 돕니다.
 - **장부 단계**(`?step=ledger`): 회사 스냅샷의 기사를 기사 장부에 더합니다. 새 기사나 분류 변화가 있을 때만 장부 파일 하나를 씁니다.
 - **전체 작업**: 장부를 합친 뒤 한국(공공데이터포털, 기준가 반영 원주가)·미국(Massive, 분할 조정) 일별 가격을 두 갈래로 동시에 받고, 끝난 결과(주·일·사례)를 그 시점 값으로 고정하고, 회사별 통계와 그날 화면에 보였을 판단 기록(회사 8곳 × 2기간 = 16건)을 남깁니다. 계산은 가격을 받은 뒤의 한 시각으로만 하며, 그 시각 뒤에 알게 된 기사·라벨·가격·수집 공백은 쓰지 않습니다.
@@ -157,9 +158,10 @@ NEWS_API_KEY=your-server-only-key
 
 | 변수 | 위치 | 용도 |
 | --- | --- | --- |
-| `HISTORY_INSIGHTS` | 루트 `.env`·Vercel | `off`(기본·알 수 없는 값) / `collect` / `on`(지금은 `collect`와 같음) |
+| `HISTORY_INSIGHTS` | 루트 `.env`·Vercel | `off`(기본·알 수 없는 값) / `collect` / `on`(`collect`의 작업에 더해 `/api/news`의 `historyAvailable` 힌트와 웹의 두 기간 전망 표시) |
 | `KR_PRICE_API_KEY` | 루트 `.env`·Vercel(서버 전용) | 공공데이터포털 일반 인증키. `serviceKey` 쿼리로만 전송하며 응답·요약에 남기지 않음 |
 | `US_PRICE_API_KEY` | 루트 `.env`·Vercel(서버 전용) | Massive Basic 키. `Authorization: Bearer` 헤더로만 전송 |
+| `HISTORY_PUBLIC_MARKETS` | 루트 `.env`·Vercel | 주가 통계를 보여 줄 시장. `KR`·`US`를 쉼표로 구분(공백·대소문자 무관, 그 밖의 값은 무시). 비어 있으면(기본) 없음: 카드에는 뉴스 기반 신호만 나오고 `/api/news/history`는 `stats_not_public`으로 숫자 없이 답함. 가격 제공자의 이용 허가를 확인한 시장만 넣음 |
 
 ## AI 교차 판단
 

@@ -3,6 +3,7 @@ import { companies, searchCompanies, INVESTMENT_NOTICE, type AiProviderState, ty
 import { Icon } from './icons';
 import { CompanyAvatar } from './CompanyAvatar';
 import { loadCachedNews, peekCachedNews, peekLastGoodNews } from './news-cache';
+import { HistoryInsight } from './HistoryInsight';
 
 const sentimentLabels = { positive: '긍정', negative: '부정', neutral: '중립', unclassified: '미분류' };
 const VISIBLE_ARTICLES = 8;
@@ -141,6 +142,8 @@ export function NewsPanel() {
   const shown = failed && fallback ? fallback : analysis;
   const stale = shown && (shown.servedFrom === 'stale' || shown === fallback)
     ? { asOf: shown.asOf, reason: shown === fallback ? error || analysis?.message : shown.message } : null;
+  // The outlook pairs with today's own analysis only: never an old result, never without the server's hint.
+  const showHistory = !!shown && !stale && shown.company.id === company.id && shown.historyAvailable === true && (shown.status === 'ready' || shown.status === 'insufficient');
   const marketaux = /marketaux/i.test(`${shown?.provider ?? ''} ${shown?.message ?? ''}`);
   const aiOutput = !!shown?.articles.some(article => article.summary || article.aiJudgements);
   // Articles both models judged unrelated are folded below the list; factors never point at them.
@@ -169,6 +172,7 @@ export function NewsPanel() {
           : failed && !fallback ? <div className="empty-state" role="alert"><div className="state-illustration orange"><Icon name="info" size={30}/></div><span className="status-badge orange">{analysis?.status === 'rate_limited' ? '호출 제한' : '연결 오류'}</span><h3>뉴스를 불러오지 못했어요</h3><p>{error || analysis?.message || '뉴스 제공자 응답을 확인하지 못했습니다.'}</p>{analysis?.retryAt && <p>다시 요청 가능한 시각: {formatTime(analysis.retryAt)}</p>}<button className="primary-button" onClick={() => setRetry(n => n + 1)} disabled={refreshDisabled}>다시 시도 <Icon name="refresh" size={16}/></button></div>
             : pending ? <div className="empty-state"><div className="state-illustration"><Icon name="news" size={32}/><span className="illustration-dot"/></div><span className="status-badge">데이터 연동 대기</span><h3>좋은 판단은, 확인된 근거에서</h3><p>{analysis?.message || '아직 뉴스 제공자가 연결되지 않았습니다. 실제 기사가 연결되면 출처와 불확실성을 함께 보여드려요.'}</p><div className="connection-notice"><Icon name="shield" size={18}/><span>뉴스가 없으면 방향을 추측하지 않습니다.</span></div><details className="setup-details"><summary>뉴스 연동 설정 안내</summary><p><a href="https://www.marketaux.com/" target="_blank" rel="noopener noreferrer">Marketaux 무료 계정</a>에서 API 토큰을 발급한 뒤 프로젝트 루트의 <code>.env</code>에 <code>NEWS_PROVIDER=marketaux</code>와 서버 전용 <code>MARKETAUX_API_TOKEN</code>을 설정하고 API 서버를 재시작하세요. 키는 브라우저나 앱에 입력하지 않습니다. 기존 게이트웨이 설정은 서버 README를 확인해 주세요.</p></details></div>
               : shown ? <>
+                {showHistory && <HistoryInsight key={shown.company.id} analysis={shown}/>}
                 {stale && <div className="stale-banner" role="status"><strong>이전 결과</strong><p>새 기사를 불러오지 못해 {formatTime(stale.asOf)} 기준 결과({elapsedLabel(stale.asOf)})를 보여드립니다.{stale.reason ? ` ${stale.reason}` : ''}</p><button className="stale-retry" onClick={() => setRetry(n => n + 1)} disabled={refreshDisabled}>다시 시도</button></div>}
                 <div className="evidence-summary"><span className={`status-badge ${shown.status === 'insufficient' ? 'orange' : ''}`}>{shown.status === 'insufficient' ? '근거 부족 · 판단 유보' : '뉴스 참고 · 불확실성 존재'}</span><h3>{shown.summary}</h3><p>근거 수준: {shown.evidence === 'moderate' ? '보통' : shown.evidence === 'low' ? '낮음' : '없음'} · 기사 {related.length}건{unrelated.length ? ` · 관련성 낮음 ${unrelated.length}건` : ''}</p>
                   {shown.sources && <p className="source-status">출처 상태: {shown.sources.map(sourceStatusLabel).join(' · ')}</p>}

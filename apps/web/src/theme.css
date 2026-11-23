@@ -374,3 +374,44 @@ button, .news-promo { transition: transform .17s; }
   .results-column, .news-main { padding: 10px; }
   .analysis-card { padding-inline: 13px; }
 }
+
+/* Two-horizon outlook: cards side by side, the chosen horizon's evidence below. Colour always comes with words. */
+.history-insight { margin: 22px 0 18px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.history-insight > * + * { margin-top: 12px; }
+.history-insight-title { color: var(--text-primary); font-size: 17px; line-height: 1.6; }
+.history-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.history-card { display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: 100%; min-width: 0; margin: 0; padding: 14px 16px; border: 1px solid var(--line-secondary); border-radius: 10px; background: var(--surface-secondary); background-image: var(--panel-gradient); color: var(--text-primary); font: inherit; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.history-card:hover { border-color: var(--line-featured); }
+.history-card.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.history-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.history-card-title { display: block; font-size: 15px; font-weight: 650; line-height: 1.5; }
+.history-card-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.history-card-line { display: block; color: var(--supporting-text); font-size: 15px; line-height: 1.6; }
+.history-signal { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 14px; font-weight: 650; line-height: 1.6; }
+.history-signal-positive { background: #512f34; color: #ffb1b4; }
+.history-signal-negative { background: #243d5c; color: #aecbff; }
+.history-signal-withheld { background: #3a4645; color: #d5dcd9; }
+.history-validation { display: inline-block; justify-self: start; border: 1px solid var(--line-secondary); border-radius: 999px; padding: 1px 9px; color: var(--supporting-text); font-size: 13px; line-height: 1.6; }
+.history-note, .history-disclaimer { color: var(--supporting-text); font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
+.history-evidence { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--line-secondary); border-radius: 10px; background: var(--surface-secondary); background-image: var(--panel-gradient); }
+.history-evidence h4 { color: var(--text-primary); font-size: 16px; line-height: 1.6; }
+.history-evidence > div { display: grid; gap: 6px; min-width: 0; padding-top: 14px; border-top: 1px solid var(--line); }
+.history-evidence > div > div { display: grid; gap: 4px; min-width: 0; }
+.history-evidence h5, .history-evidence h6 { margin: 0; color: var(--text-primary); font-weight: 650; line-height: 1.6; }
+.history-evidence h5 { font-size: 15px; }
+.history-evidence h6 { margin-top: 4px; font-size: 14px; }
+.history-evidence p { color: var(--text-primary); font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; }
+.history-evidence a { color: var(--accent); text-underline-offset: 2px; overflow-wrap: anywhere; }
+.history-cases { max-width: none; margin: 4px 0 0; color: var(--supporting-text); font-size: 14px; line-height: 1.7; }
+.history-cases summary { color: var(--supporting-text); font-size: 14px; text-align: left; cursor: pointer; }
+.history-case-list { display: grid; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.history-case-list li { display: grid; gap: 2px; min-width: 0; padding: 10px 12px; border: 1px solid var(--line-secondary); border-radius: 8px; background: var(--surface-well); overflow-wrap: anywhere; }
+.history-case-list span { color: var(--supporting-text); font-size: 14px; line-height: 1.6; }
+.history-loading, .history-failure { color: var(--supporting-text); font-size: 15px; line-height: 1.7; }
+.history-retry { min-height: 36px; border: 1px solid var(--line-secondary); border-radius: 6px; background: transparent; color: var(--text-primary); font: inherit; font-size: 14px; padding: 6px 12px; cursor: pointer; }
+.history-retry:hover { background: var(--surface-soft); }
+@media (max-width: 760px) {
+  .history-cards { grid-template-columns: 1fr; }
+  .history-card { padding: 13px 14px; }
+  .history-evidence { padding: 14px; }
+}

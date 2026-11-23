@@ -1175,3 +1175,33 @@ test('memory and Blob stores agree on bytes, files and round trips', async () =>
     assert.equal(s.attempts, 6);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Step 6: the all_neutral overnight reason
+// ---------------------------------------------------------------------------
+
+test('shadow records: the all_neutral overnight reason parses; an unknown reason is still rejected', async () => {
+  const neutral = plain(SHADOW) as unknown as Record<string, any>;
+  Object.assign(neutral.records[0], {
+    baseline: 'withheld', verdict: null, integrated: 'withheld', changed: false, note: 'baseline_withheld',
+    overnight: { reason: 'all_neutral', evidence: 'none', counts: { positive: 0, negative: 0, neutral: 2, ignored: 1 } },
+  });
+  const parsed = parseShadowFile(neutral);
+  assert.ok(parsed.ok);
+  assert.deepEqual(parsed.value.records[0]!.overnight, { reason: 'all_neutral', evidence: 'none', counts: { positive: 0, negative: 0, neutral: 2, ignored: 1 } });
+  // Through a store read, as the job and the status command read it.
+  const store = createMemoryHistoryStore();
+  store.files.set('shadow/2026.json', { text: JSON.stringify(neutral), etag: '"n"' });
+  assert.equal((await store.readShadow(2026))!.value.records[0]!.overnight!.reason, 'all_neutral');
+  await mutationTable('shadow/2026.json', neutral, s => s.readShadow(2026), [
+    ['unknown overnight reason', v => { v.records[0].overnight.reason = 'something_else'; }],
+    ['empty overnight reason', v => { v.records[0].overnight.reason = ''; }],
+    ['reason in another case', v => { v.records[0].overnight.reason = 'ALL_NEUTRAL'; }],
+  ]);
+  // Older files keep parsing: every earlier reason is still accepted.
+  for (const reason of ['conflicting', 'one_direction', 'no_overnight_news']) {
+    const older = plain(neutral);
+    older.records[0].overnight.reason = reason;
+    assert.ok(parseShadowFile(older).ok, reason);
+  }
+});

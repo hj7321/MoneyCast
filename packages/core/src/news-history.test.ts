@@ -456,3 +456,50 @@ test('horizonSampleOrigin counts backfilled units and is conservative for anythi
   }
   assert.equal(history.BACKFILL_SAMPLE_NOTE, '과거 데이터 포함 · 시점 미보증');
 });
+
+// --- all-neutral overnight news (step 6) ----------------------------------------
+
+test('overnight signal: related articles that are all neutral give all_neutral, distinct from no news', () => {
+  const neutral = deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T13:00:00.000Z', 'neutral')], window);
+  assert.deepEqual(neutral, {
+    signal: 'withheld', reason: 'all_neutral', evidence: 'none',
+    counts: { positive: 0, negative: 0, neutral: 2, ignored: 0 },
+  });
+  // Unrelated articles are not news about the company, so they do not change it.
+  const withUnrelated = deriveOvernightSignal([
+    at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T12:00:00.000Z', 'positive', 'unrelated'), at('2026-11-09T12:00:00.000Z', 'negative', 'unrelated'),
+  ], window);
+  assert.deepEqual([withUnrelated.signal, withUnrelated.reason, withUnrelated.evidence], ['withheld', 'all_neutral', 'none']);
+  assert.deepEqual(withUnrelated.counts, { positive: 0, negative: 0, neutral: 1, ignored: 2 });
+  // An unclassified related article could have had a direction: still no_overnight_news.
+  const withUnclassified = deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T12:00:00.000Z', 'unclassified')], window);
+  assert.deepEqual([withUnclassified.reason, withUnclassified.evidence], ['no_overnight_news', 'none']);
+  assert.deepEqual(withUnclassified.counts, { positive: 0, negative: 0, neutral: 1, ignored: 1 });
+  assert.equal(deriveOvernightSignal([], window).reason, 'no_overnight_news');
+  assert.equal(deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'unclassified')], window).reason, 'no_overnight_news');
+  assert.equal(deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral', 'unrelated')], window).reason, 'no_overnight_news');
+  // Neutral articles outside the window count for nothing.
+  assert.equal(deriveOvernightSignal([at('2026-11-10T03:00:00.000Z', 'neutral')], window).reason, 'no_overnight_news');
+  // A direction still wins over neutral ones, and the result keeps exactly four counts.
+  const directional = deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T12:00:00.000Z', 'positive')], window);
+  assert.deepEqual([directional.signal, directional.reason], ['positive', 'one_direction']);
+  assert.deepEqual(Object.keys(neutral).sort(), ['counts', 'evidence', 'reason', 'signal']);
+  assert.deepEqual(Object.keys(neutral.counts).sort(), ['ignored', 'negative', 'neutral', 'positive']);
+});
+
+test('overnight summary text and messages for all-neutral and empty windows', () => {
+  const neutral = deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T13:00:00.000Z', 'neutral')], window);
+  assert.equal(overnightSummaryText(neutral), '밤사이 뉴스는 방향이 뚜렷하지 않음');
+  assert.equal(overnightSummaryText(deriveOvernightSignal([], window)), '밤사이 새 뉴스 없음');
+  assert.equal(history.NEUTRAL_OVERNIGHT_NEWS_MESSAGE, '판단 유보 · 밤사이 뉴스는 방향이 뚜렷하지 않음');
+  assert.equal(history.NO_OVERNIGHT_NEWS_MESSAGE, '판단 유보 · 밤사이 새 뉴스 없음');
+  assert.notEqual(history.NEUTRAL_OVERNIGHT_NEWS_MESSAGE, history.NO_OVERNIGHT_NEWS_MESSAGE);
+});
+
+// --- integration sentence particles (step 6 integration) --------------------------
+
+test('the no-clear-difference sentence takes the particle each unit needs', () => {
+  // 주 ends in a vowel (와), 날 in a consonant (과); the plan's table reads "이 종목의 다른 주와 뚜렷한 차이 없음".
+  assert.equal(integrationMessage('no_clear_difference', 'week'), '이 종목의 다른 주와 뚜렷한 차이가 없었습니다.');
+  assert.equal(integrationMessage('no_clear_difference', 'day'), '이 종목의 다른 날과 뚜렷한 차이가 없었습니다.');
+});
