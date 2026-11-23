@@ -1,4 +1,4 @@
-import { BlobError, BlobNotFoundError, BlobPreconditionFailedError, BlobRequestAbortedError, get, put } from '@vercel/blob';
+import { BlobError, BlobNotFoundError, BlobPreconditionFailedError, BlobRequestAbortedError, get, head, put } from '@vercel/blob';
 import {
   NEWS_HISTORY_VERSION, integrateOutlook, isNewsTopicKey, parseCompanyHistory,
   type HistoryReadyStatus, type Horizon, type IntegrationNote, type NewsAnalysis, type OvernightEvidence, type OvernightReason,
@@ -12,8 +12,11 @@ import type { CalendarBasis, Exchange, SessionPhase } from './market-calendar.js
 // Private storage for historical news insights (step 4, spec ch. 4).
 // Invariants:
 // - Everything lives under news-history/v1/, private, never with a random suffix.
-// - Construction does no I/O. Every Blob call carries a 20 s abort signal, and a put stops waiting at
-//   20 s even between the SDK's own retries.
+// - Construction does no I/O. Every Blob call carries a 20 s abort signal, and a put or head stops
+//   waiting at 20 s even between the SDK's own retries.
+// - A fresh ledger read takes its etag from head() (the Blob API, which ifMatch is compared with), asked
+//   before the uncached GET, so the etag is never newer than the content; only such an etag may feed a
+//   conditional write. get() passes on only the CDN's ETag header, which cached reads keep with their content.
 // - Reads are bounded at 5 MiB while streaming; writes are checked before put,
 //   and a too_large or invalid value never reaches put.
 // - A file that fails its version or shape check is rejected as a whole. A ledger
@@ -643,7 +646,7 @@ export function parseLedgerSegmentFile(value: unknown, expectedSegment?: string)
 // ---------------------------------------------------------------------------
 
 export interface StoredFile<T> { value: T; etag: string }
-/** fresh → useCache:false */
+/** fresh → useCache:false. Only a fresh ledger read's etag may feed ifMatch (Blob: head() before the uncached GET). */
 export interface ReadOptions { fresh?: boolean }
 export type LedgerWriteCondition = { kind: 'ifMatch'; etag: string } | { kind: 'createOnly' };
 export interface WriteResult { etag: string; bytes: number }
@@ -744,6 +747,10 @@ function storeOn(backend: Backend): HistoryStore {
 
     async writeLedgerSegment(v, condition) {
       const file = segmentFile(v.segment);
+      // put() sends x-if-match only for a non-empty ifMatch, and then no condition at all: the rewrite would turn into
+      // a create-only put. With no etag to compare it is a conflict before anything is sent, so it is no attempt and
+      // skips the landed-retry check below, which would take a file this run wrote earlier for this write.
+      if (condition.kind === 'ifMatch' && !condition.etag) throw new HistoryStoreError('conflict', file);
       try {
         return await write(file, v, ledgerParser(v.segment), condition);
       } catch (error) {
@@ -830,52 +837,98 @@ function putErrorCode(error: unknown, signal: AbortSignal): HistoryStoreErrorCod
   return 'write_failed';
 }
 
+const readErrorCode = (error: unknown, signal: AbortSignal): HistoryStoreErrorCode => isAbort(error, signal) ? 'timeout' : 'unreadable';
+
+/**
+ * A call through the SDK's requestApi (put, head) that stops waiting at STORE_TIMEOUT_MS. requestApi retries a
+ * TimeoutError (AbortSignal.timeout) like a network error, with 17-34 min of backoff by default, and gives up only on
+ * an AbortError: an abort without a reason. The abort ends a request in flight; the race ends the wait when the
+ * deadline falls in a backoff sleep, which the SDK ends only at its next attempt. Failures are thrown as `code` maps them.
+ */
+async function withApiDeadline<T>(file: string, call: (signal: AbortSignal) => Promise<T>,
+  code: (error: unknown, signal: AbortSignal) => HistoryStoreErrorCode): Promise<T> {
+  const controller = new AbortController();
+  const signal = controller.signal;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(signal.reason); }, STORE_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([call(signal), expired]);
+  } catch (error) {
+    throw new HistoryStoreError(code(error, signal), file);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Private Vercel Blob storage, or null when no store is connected. Same auth as
  * snapshot-store: OIDC on Vercel (BLOB_STORE_ID), else BLOB_READ_WRITE_TOKEN.
  */
 export function createBlobHistoryStore(
   env: NodeJS.ProcessEnv = process.env,
-  blob: { get: typeof get; put: typeof put } = { get, put },
+  blob: { get: typeof get; put: typeof put; head: typeof head } = { get, put, head },
 ): HistoryStore | null {
   if (!env.BLOB_READ_WRITE_TOKEN?.trim() && !env.BLOB_STORE_ID?.trim()) return null;
+
+  /**
+   * A ledger segment's etag from the Blob API: the one put() returns and ifMatch is compared with. null when there is no
+   * such file. get() passes on only the CDN's ETag header; empty, it makes put() send no condition (an existing file is
+   * then refused as "already exists"), and in another form it fails the precondition. Either way, from 2026-11-14 on,
+   * every rewrite of the production ledger head failed.
+   */
+  async function apiEtag(file: string): Promise<string | null> {
+    const found = await withApiDeadline(file, async signal => {
+      try {
+        return { meta: await blob.head(HISTORY_PREFIX + file, { abortSignal: signal }) as unknown };
+      } catch (error) {
+        if (error instanceof BlobNotFoundError) return null;
+        throw error;
+      }
+    }, readErrorCode);
+    if (found === null) return null;
+    const etag = isRecord(found.meta) ? found.meta.etag : undefined;
+    if (typeof etag !== 'string' || !etag) throw new HistoryStoreError('unreadable', file);
+    return etag;
+  }
+
   return storeOn({
     async read(file, fresh) {
+      // A fresh ledger read, the kind a conditional write takes its etag from, asks head() before the uncached GET, so
+      // its etag is never newer than its content: a write in between turns our ifMatch into a conflict instead of
+      // overwriting data we did not read. A cached GET can be older than head(), so a cached read keeps the GET's own
+      // ETag, which belongs to the content it came with. Once head() has found the file, a GET that does not is a
+      // failure, never an absent file: findLedgerHead would take an older shard for the head.
+      const viaHead = fresh && file.startsWith('ledger/');
+      let etag: string | null = null;
+      if (viaHead) {
+        etag = await apiEtag(file);
+        if (etag === null) return null;
+      }
+      const notFound = (): null => { if (viaHead) throw new HistoryStoreError('unreadable', file); return null; };
       const signal = AbortSignal.timeout(STORE_TIMEOUT_MS);
       let result: Awaited<ReturnType<typeof get>>;
       try {
         result = await blob.get(HISTORY_PREFIX + file, { access: 'private', useCache: !fresh, abortSignal: signal });
       } catch (error) {
-        if (error instanceof BlobNotFoundError) return null;
-        throw new HistoryStoreError(isAbort(error, signal) ? 'timeout' : 'unreadable', file);
+        if (error instanceof BlobNotFoundError) return notFound();
+        throw new HistoryStoreError(readErrorCode(error, signal), file);
       }
-      if (!result || result.statusCode !== 200 || !result.stream) return null;
-      const etag = typeof result.blob?.etag === 'string' ? result.blob.etag : '';
-      return { text: await readBoundedText(result.stream, MAX_FILE_BYTES, file, signal), etag };
+      if (!result || result.statusCode !== 200 || !result.stream) return notFound();
+      const text = await readBoundedText(result.stream, MAX_FILE_BYTES, file, signal);
+      // Otherwise the GET's own ETag: other files are written with allowOverwrite, and a cached ledger read's belongs to its content.
+      return { text, etag: etag ?? (typeof result.blob?.etag === 'string' ? result.blob.etag : '') };
     },
     async write(file, body, condition) {
-      // put() retries a TimeoutError (AbortSignal.timeout) like a network error, with 17-34 min of backoff by
-      // default, and gives up only on an AbortError: an abort without a reason. The abort ends a request in flight;
-      // the race ends the wait when the deadline falls in a backoff sleep, which the SDK ends only at its next attempt.
-      const controller = new AbortController();
-      const signal = controller.signal;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const expired = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { controller.abort(); reject(signal.reason); }, STORE_TIMEOUT_MS);
-        timer.unref?.();
-      });
+      // An empty ifMatch never gets here: writeLedgerSegment refuses it before anything is sent.
       const last = condition.kind === 'overwrite' ? { allowOverwrite: true }
         : condition.kind === 'ifMatch' ? { ifMatch: condition.etag } : { allowOverwrite: false };
-      try {
-        const result = await Promise.race([blob.put(HISTORY_PREFIX + file, body, {
-          access: 'private', addRandomSuffix: false, contentType: 'application/json', cacheControlMaxAge: 60, abortSignal: signal, ...last,
-        }), expired]);
-        return typeof result?.etag === 'string' ? result.etag : '';
-      } catch (error) {
-        throw new HistoryStoreError(putErrorCode(error, signal), file);
-      } finally {
-        clearTimeout(timer);
-      }
+      const result = await withApiDeadline(file, signal => blob.put(HISTORY_PREFIX + file, body, {
+        access: 'private', addRandomSuffix: false, contentType: 'application/json', cacheControlMaxAge: 60, abortSignal: signal, ...last,
+      }), putErrorCode);
+      return typeof result?.etag === 'string' ? result.etag : '';
     },
   });
 }

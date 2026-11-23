@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { companies, searchCompanies, NEWS_CACHE_TTL_MS, type NewsAnalysis } from '../packages/core/src/index.js';
 import { collectNews } from './collect.js';
 import { createGoalClarifier, type GoalClarifier } from './goal-clarify.js';
-import { createHistoryService, parseHistoryMode, type HistoryService } from './history-job.js';
+import { createHistoryService, historyRunLogLine, parseHistoryMode, type HistoryService } from './history-job.js';
 import { createAiClassifier } from './llm.js';
 import { createLlmClients, createLlmJudges } from './llm-judges.js';
 import { createNewsProvider } from './news-provider.js';
@@ -194,6 +194,10 @@ export function createRequestHandler(service?: NewsService, options: HandlerOpti
         const schedule = request.headers['x-vercel-cron-schedule'];
         const ledger = steps[0] === 'ledger' || (typeof schedule === 'string' && HISTORY_LEDGER_SCHEDULES.has(schedule.trim()));
         const summary = await history.run(ledger ? 'ledger' : 'full');
+        // One line per run in the function log (ids, counts and fixed codes only), written before the answer.
+        const line = historyRunLogLine(summary);
+        if (summary.status === 'failed' || summary.status === 'not_configured') console.error(line);
+        else console.log(line);
         return send(response, summary.status === 'not_configured' ? 503 : summary.status === 'failed' ? 500 : 200, summary);
       }
       if (url.pathname === '/api/news') {

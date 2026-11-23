@@ -31,7 +31,8 @@ import { SNAPSHOT_POOL_LIMIT, createBlobSnapshotStore, type CompanySnapshot, typ
 // Daily job for historical news insights (step 4, spec ch. 5). Invariants:
 // - HISTORY_INSIGHTS is enforced by the route; this module never reads it at run time.
 // - runHistoryJob never throws, never logs, and returns a summary whose strings have
-//   every price-key and cron-secret form redacted.
+//   every price-key, cron-secret and Blob-token form redacted. The route logs one
+//   history_run line per run (historyRunLogLine: counts, ids and fixed codes only).
 // - At most DAILY_WRITE_CAP Blob writes per KST day. The count lives in the ledger
 //   head's journal, and every writing run first makes one conditional write on the
 //   head it read (ifMatch; createOnly only when there is none or a new month starts;
@@ -963,7 +964,8 @@ export function createHistoryService(env: NodeJS.ProcessEnv = process.env, overr
           companies: overrides.companies ?? coreCompanies,
           now: overrides.now ?? Date.now,
           randomId: overrides.randomId ?? randomUUID,
-          redactKeys: overrides.redactKeys ?? [env.KR_PRICE_API_KEY, env.US_PRICE_API_KEY, env.CRON_SECRET],
+          // The Blob token is sent to no provider, but a provider answer quoting one would otherwise pass into the summary.
+          redactKeys: overrides.redactKeys ?? [env.KR_PRICE_API_KEY, env.US_PRICE_API_KEY, env.CRON_SECRET, env.BLOB_READ_WRITE_TOKEN],
           ...(overrides.limits ? { limits: overrides.limits } : {}),
         };
       } catch {
@@ -972,4 +974,85 @@ export function createHistoryService(env: NodeJS.ProcessEnv = process.env, overr
       return runHistoryJob(deps, mode);
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Log line
+// ---------------------------------------------------------------------------
+
+/** Longest history_run line; a longer one is shortened by cutting its lists, never its JSON. */
+export const HISTORY_RUN_LOG_MAX_CHARS = 2_000;
+/** Codes, ids and file names are far shorter; a longer text is cut. */
+const LOG_TEXT_MAX = 40;
+/**
+ * A code, id or file name. A character none of them uses prints as '?': whatever reaches a field, the line stays one
+ * line of plain ASCII that JSON.stringify never escapes, so the bound below holds.
+ */
+const logText = (value: unknown): string | null =>
+  typeof value === 'string' ? value.slice(0, LOG_TEXT_MAX).replace(/[^A-Za-z0-9_.:\/-]/g, '?') : null;
+/** A count or time as a finite number, a flag as a boolean; anything else (an object, a text) prints as null. */
+const logCount = (value: unknown): number | null => typeof value === 'number' && Number.isFinite(value) ? value : null;
+const logFlag = (value: unknown): boolean | null => typeof value === 'boolean' ? value : null;
+
+/** What the log line shows of a summary, each list cut to `keep` items. */
+function runLogFields(summary: HistoryJobSummary, keep: number): Record<string, unknown> {
+  let cut = false;
+  const take = <T>(items: readonly T[]): T[] => {
+    if (items.length > keep) cut = true;
+    return items.slice(0, keep);
+  };
+  const { ledger, prices, stats, frozen, shadow, writes } = summary;
+  const statusCounts = new Map<string, number>();
+  for (const status of Object.values(stats?.statuses ?? {})) statusCounts.set(status, (statusCounts.get(status) ?? 0) + 1);
+  const fields = {
+    mode: logText(summary.mode), status: logText(summary.status), errors: take(summary.errors).map(logText), elapsedMs: logCount(summary.elapsedMs),
+    ledger: {
+      head: logText(ledger.head), entries: logCount(ledger.entries), newEntries: logCount(ledger.newEntries),
+      changedEntries: logCount(ledger.changedEntries), rejectedEntries: logCount(ledger.rejectedEntries),
+      snapshotsMissing: logCount(ledger.snapshots.missing.length), snapshotsUnreadable: logCount(ledger.snapshots.unreadable.length),
+      gapsAdded: logCount(ledger.gapsAdded.length), rolledOver: logFlag(ledger.rolledOver),
+    },
+    prices: prices ? {
+      ok: Object.values(prices).filter(item => item?.code === 'ok').length,
+      failed: Object.fromEntries(take(Object.entries(prices).filter(([, item]) => item?.code !== 'ok'))
+        .map(([key, item]) => [logText(key), logText(item?.code)])),
+    } : null,
+    stats: stats ? {
+      computed: logCount(stats.computed.length), failed: take(stats.failed).map(logText),
+      statusCounts: Object.fromEntries(take([...statusCounts]).map(([status, n]) => [logText(status), n])),
+    } : null,
+    frozen: frozen ? {
+      weekly: logCount(frozen.weekly), daily: logCount(frozen.daily), cases: logCount(frozen.cases), casesDeferred: logCount(frozen.casesDeferred),
+    } : null,
+    shadow: shadow ? { recorded: logCount(shadow.recorded), kept: logCount(shadow.kept) } : null,
+    writes: {
+      usedBefore: logCount(writes.usedBefore), allowance: logCount(writes.allowance), done: take(writes.done).map(logText),
+      deferred: take(writes.deferred).map(logText),
+      failed: take(writes.failed).map(item => ({ file: logText(item?.file), code: logText(item?.code) })),
+    },
+  };
+  return cut ? { ...fields, truncated: true } : fields;
+}
+
+/**
+ * The run's one line for the function log: 'history_run ' + JSON of its counts, codes, ids and file names. The summary
+ * is already redacted to those; run id, start and end times and provider text are left out. Whatever the summary holds,
+ * the line has only numbers, booleans, nulls and texts of LOG_TEXT_MAX safe characters, is at most
+ * HISTORY_RUN_LOG_MAX_CHARS long, and is returned without a throw.
+ */
+export function historyRunLogLine(summary: HistoryJobSummary): string {
+  const line = (value: unknown) => `history_run ${JSON.stringify(value)}`;
+  try {
+    for (const keep of [Infinity, 8, 2, 0]) {
+      const text = line(runLogFields(summary, keep));
+      if (text.length <= HISTORY_RUN_LOG_MAX_CHARS) return text;
+    }
+  } catch { /* a malformed summary: the minimal line below */ }
+  try {
+    const partial = summary as Partial<HistoryJobSummary> | null | undefined;
+    return line({ mode: logText(partial?.mode), status: logText(partial?.status), truncated: true });
+  } catch {
+    // Even reading mode or status threw.
+    return line({ mode: null, status: null, truncated: true });
+  }
 }
