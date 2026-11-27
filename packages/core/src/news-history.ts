@@ -448,7 +448,15 @@ export function deriveBaselineSignal(a: Pick<NewsAnalysis, 'status' | 'positiveF
 /** Published time may precede real visibility; this margin is added before placing an article. */
 export const ARTICLE_TIME_MARGIN_MS = 5 * 60 * 1000;
 
-export type OvernightReason = 'conflicting' | 'one_direction' | 'no_overnight_news';
+/**
+ * Every overnight reason. Stored shadow records carry them, so the list only grows and older files keep parsing; code
+ * from before a reason was added rejects a shadow file holding it (that job reports shadow_invalid and adds no record).
+ * all_neutral: related articles in the window, every one neutral (none unclassified); no_overnight_news: nothing else
+ * to say; not_checked: the analysis was made before the window opened, so it has not checked the window (an article
+ * from its last five minutes that the margin places inside is not counted either).
+ */
+export const OVERNIGHT_REASONS = ['conflicting', 'one_direction', 'no_overnight_news', 'all_neutral', 'not_checked'] as const;
+export type OvernightReason = (typeof OVERNIGHT_REASONS)[number];
 export type OvernightEvidence = 'none' | 'low' | 'moderate';
 export interface OvernightSignal {
   signal: Signal;
@@ -458,12 +466,23 @@ export interface OvernightSignal {
   evidence: OvernightEvidence;
 }
 
-/** Day-horizon signal from the articles published while the market was closed. */
+/**
+ * Day-horizon signal from the articles published while the market was closed. `checkedAt` is when the articles were
+ * gathered (the analysis asOf): strictly before the window's start the window has not been checked, which is said
+ * before any other rule, even when the margin places an article from the last five minutes before the start inside.
+ * A checkedAt or window start that does not parse leaves the other rules to decide.
+ */
 export function deriveOvernightSignal(
   articles: ReadonlyArray<Pick<NewsArticle, 'publishedAt' | 'sentiment' | 'aiRelevance'>>,
   window: { start: string; end: string },
+  checkedAt?: string,
 ): OvernightSignal {
+  if (checkedAt !== undefined && Date.parse(checkedAt) < Date.parse(window.start)) {
+    return { signal: 'withheld', reason: 'not_checked', counts: { positive: 0, negative: 0, neutral: 0, ignored: 0 }, evidence: 'none' };
+  }
   const counts = { positive: 0, negative: 0, neutral: 0, ignored: 0 };
+  // Related articles without a sentiment; counted in `ignored` too. Unrelated ones are not news about the company.
+  let unclassified = 0;
   const start = Date.parse(window.start);
   const end = Date.parse(window.end);
   if (Number.isFinite(start) && Number.isFinite(end)) {
@@ -474,7 +493,7 @@ export function deriveOvernightSignal(
       else if (article.sentiment === 'positive') counts.positive += 1;
       else if (article.sentiment === 'negative') counts.negative += 1;
       else if (article.sentiment === 'neutral') counts.neutral += 1;
-      else counts.ignored += 1;
+      else { counts.ignored += 1; unclassified += 1; }
     }
   }
   const directional = counts.positive + counts.negative;
@@ -482,7 +501,11 @@ export function deriveOvernightSignal(
     // Withheld on a conflict: evidence is never shown above low.
     return { signal: 'withheld', reason: 'conflicting', counts, evidence: 'low' };
   }
-  if (directional === 0) return { signal: 'withheld', reason: 'no_overnight_news', counts, evidence: 'none' };
+  if (directional === 0) {
+    // Only a window whose related articles are all neutral says so; an unclassified one could have had a direction.
+    const reason: OvernightReason = counts.neutral > 0 && unclassified === 0 ? 'all_neutral' : 'no_overnight_news';
+    return { signal: 'withheld', reason, counts, evidence: 'none' };
+  }
   return {
     signal: counts.positive > 0 ? 'positive' : 'negative',
     reason: 'one_direction',
@@ -552,6 +575,10 @@ export const HISTORY_SHARE_LABEL = '과거 상승 비중(미래 확률 아님)';
 export const DIFFERENT_HORIZONS_NOTE = '두 전망은 보는 기간과 쓰는 뉴스가 달라 서로 다를 수 있습니다.';
 export const STATS_NOT_PUBLIC_MESSAGE = '과거 사례 통계는 데이터 이용 허가 확인 뒤 공개';
 export const NO_OVERNIGHT_NEWS_MESSAGE = '판단 유보 · 밤사이 새 뉴스 없음';
+/** Day card when the overnight window had related articles and every one was neutral. */
+export const NEUTRAL_OVERNIGHT_NEWS_MESSAGE = '판단 유보 · 밤사이 뉴스는 방향이 뚜렷하지 않음';
+/** Day card when the analysis on screen was made before the overnight window opened (not_checked). */
+export const NOT_CHECKED_OVERNIGHT_MESSAGE = '판단 유보 · 밤사이 뉴스 아직 확인 전';
 export const NO_HISTORY_MESSAGE = '과거 사례 데이터 없음 · 기존 판단 유지';
 export const IDENTITY_UNVERIFIED_MESSAGE = '종목 식별을 확인하지 못해 과거 사례 통계가 없습니다 · 기존 판단 유지';
 export const PRICE_UNAVAILABLE_MESSAGE = '가격 데이터를 받지 못해 과거 사례 통계가 없습니다 · 기존 판단 유지';
@@ -567,7 +594,8 @@ export function integrationMessage(note: IntegrationNote, horizon: Horizon): str
     case 'supports':
       return `같은 방향 뉴스가 있던 ${unit}의 ${span}도 시장 대비 같은 방향이었습니다. 근거 수준은 올리지 않습니다.`;
     case 'no_clear_difference':
-      return `이 종목의 다른 ${unit}과 뚜렷한 차이가 없었습니다.`;
+      // 주 ends in a vowel and takes 와; 날 takes 과.
+      return `이 종목의 다른 ${horizon === 'week' ? '주와' : '날과'} 뚜렷한 차이가 없었습니다.`;
     case 'weakens':
       return `주의: 같은 방향 뉴스가 있던 ${unit}의 ${span}이 이 방향을 뒷받침하지 않았습니다.`;
     case 'contradicts':
@@ -579,9 +607,17 @@ export function integrationMessage(note: IntegrationNote, horizon: Horizon): str
   }
 }
 
-/** One line for the day card: "밤사이 긍정 기사 2건". */
+/**
+ * One line for the day card: "밤사이 긍정 기사 2건". A case per reason and no default, so a reason added to
+ * OVERNIGHT_REASONS does not compile until it has its own line (it would otherwise read as a count of zero).
+ */
 export function overnightSummaryText(result: OvernightSignal): string {
-  if (result.reason === 'no_overnight_news') return '밤사이 새 뉴스 없음';
-  if (result.reason === 'conflicting') return '밤사이 긍정·부정 기사가 섞임';
-  return `밤사이 ${result.signal === 'positive' ? '긍정' : '부정'} 기사 ${result.counts[result.signal === 'positive' ? 'positive' : 'negative']}건`;
+  switch (result.reason) {
+    case 'not_checked': return '밤사이 뉴스 아직 확인 전';
+    case 'no_overnight_news': return '밤사이 새 뉴스 없음';
+    case 'all_neutral': return '밤사이 뉴스는 방향이 뚜렷하지 않음';
+    case 'conflicting': return '밤사이 긍정·부정 기사가 섞임';
+    case 'one_direction':
+      return `밤사이 ${result.signal === 'positive' ? '긍정' : '부정'} 기사 ${result.counts[result.signal === 'positive' ? 'positive' : 'negative']}건`;
+  }
 }

@@ -559,6 +559,7 @@ export const INVESTMENT_NOTICE = '뉴스는 미래 주가의 방향이나 원인
 
 export { createNewsCache, NEWS_CACHE_TTL_MS, NEWS_CACHE_ANALYSIS_VERSION, NEWS_LAST_GOOD_MAX_AGE_MS, type NewsCacheStorage } from './news-cache.js';
 export * from './news-history.js';
+export * from './news-history-view.js';
 export { NEWS_TOPICS, NEWS_TOPIC_KEYS, classifyNewsTopics, isNewsTopicKey, newsTopicLabel, type NewsTopicKey } from './news-topics.js';
 export { COMPANY_NEWS_IDENTITY, matchesCompanyTitle, type CompanyNewsIdentity } from './news-identity.js';
 export {

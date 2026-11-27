@@ -187,3 +187,13 @@
 :root[data-theme="light"] .feature-intro .fi-pending-state { background-image: var(--notice-gradient); }
 :root[data-theme="light"] .factor-grid > .factor-positive { background-image: var(--positive-gradient); }
 :root[data-theme="light"] .factor-grid > .factor-negative { background-image: var(--negative-gradient); }
+
+/* Two-horizon outlook: the shared rules and tokens carry the layout and surfaces; the outlook badges take the light sentiment colours. */
+:root[data-theme="light"] .history-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+:root[data-theme="light"] .history-signal-positive { background: #fceced; color: #b62d32; }
+:root[data-theme="light"] .history-signal-negative { background: #edf3ff; color: #245bb7; }
+:root[data-theme="light"] .history-signal-withheld { background: #eef0ef; color: #4f5755; }
+:root[data-theme="light"] .history-case-list li { background: var(--surface-soft); }
+@media (max-width: 760px) {
+  :root[data-theme="light"] .history-cards { grid-template-columns: 1fr; }
+}

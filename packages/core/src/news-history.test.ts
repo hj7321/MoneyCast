@@ -456,3 +456,141 @@ test('horizonSampleOrigin counts backfilled units and is conservative for anythi
   }
   assert.equal(history.BACKFILL_SAMPLE_NOTE, '과거 데이터 포함 · 시점 미보증');
 });
+
+// --- all-neutral overnight news (step 6) ----------------------------------------
+
+test('overnight signal: related articles that are all neutral give all_neutral, distinct from no news', () => {
+  const neutral = deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T13:00:00.000Z', 'neutral')], window);
+  assert.deepEqual(neutral, {
+    signal: 'withheld', reason: 'all_neutral', evidence: 'none',
+    counts: { positive: 0, negative: 0, neutral: 2, ignored: 0 },
+  });
+  // Unrelated articles are not news about the company, so they do not change it.
+  const withUnrelated = deriveOvernightSignal([
+    at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T12:00:00.000Z', 'positive', 'unrelated'), at('2026-11-09T12:00:00.000Z', 'negative', 'unrelated'),
+  ], window);
+  assert.deepEqual([withUnrelated.signal, withUnrelated.reason, withUnrelated.evidence], ['withheld', 'all_neutral', 'none']);
+  assert.deepEqual(withUnrelated.counts, { positive: 0, negative: 0, neutral: 1, ignored: 2 });
+  // An unclassified related article could have had a direction: still no_overnight_news.
+  const withUnclassified = deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T12:00:00.000Z', 'unclassified')], window);
+  assert.deepEqual([withUnclassified.reason, withUnclassified.evidence], ['no_overnight_news', 'none']);
+  assert.deepEqual(withUnclassified.counts, { positive: 0, negative: 0, neutral: 1, ignored: 1 });
+  assert.equal(deriveOvernightSignal([], window).reason, 'no_overnight_news');
+  assert.equal(deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'unclassified')], window).reason, 'no_overnight_news');
+  assert.equal(deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral', 'unrelated')], window).reason, 'no_overnight_news');
+  // Neutral articles outside the window count for nothing.
+  assert.equal(deriveOvernightSignal([at('2026-11-10T03:00:00.000Z', 'neutral')], window).reason, 'no_overnight_news');
+  // A direction still wins over neutral ones, and the result keeps exactly four counts.
+  const directional = deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T12:00:00.000Z', 'positive')], window);
+  assert.deepEqual([directional.signal, directional.reason], ['positive', 'one_direction']);
+  assert.deepEqual(Object.keys(neutral).sort(), ['counts', 'evidence', 'reason', 'signal']);
+  assert.deepEqual(Object.keys(neutral.counts).sort(), ['ignored', 'negative', 'neutral', 'positive']);
+});
+
+test('overnight summary text and messages for all-neutral and empty windows', () => {
+  const neutral = deriveOvernightSignal([at('2026-11-09T12:00:00.000Z', 'neutral'), at('2026-11-09T13:00:00.000Z', 'neutral')], window);
+  assert.equal(overnightSummaryText(neutral), '밤사이 뉴스는 방향이 뚜렷하지 않음');
+  assert.equal(overnightSummaryText(deriveOvernightSignal([], window)), '밤사이 새 뉴스 없음');
+  assert.equal(history.NEUTRAL_OVERNIGHT_NEWS_MESSAGE, '판단 유보 · 밤사이 뉴스는 방향이 뚜렷하지 않음');
+  assert.equal(history.NO_OVERNIGHT_NEWS_MESSAGE, '판단 유보 · 밤사이 새 뉴스 없음');
+  assert.notEqual(history.NEUTRAL_OVERNIGHT_NEWS_MESSAGE, history.NO_OVERNIGHT_NEWS_MESSAGE);
+});
+
+// --- integration sentence particles (step 6 integration) --------------------------
+
+test('the no-clear-difference sentence takes the particle each unit needs', () => {
+  // 주 ends in a vowel (와), 날 in a consonant (과); the plan's table reads "이 종목의 다른 주와 뚜렷한 차이 없음".
+  assert.equal(integrationMessage('no_clear_difference', 'week'), '이 종목의 다른 주와 뚜렷한 차이가 없었습니다.');
+  assert.equal(integrationMessage('no_clear_difference', 'day'), '이 종목의 다른 날과 뚜렷한 차이가 없었습니다.');
+});
+
+// --- news not checked yet: an analysis made before the overnight window opened (step 6 follow-up) ----
+
+const ZERO_COUNTS = { positive: 0, negative: 0, neutral: 0, ignored: 0 };
+const NOT_CHECKED = { signal: 'withheld', reason: 'not_checked', counts: ZERO_COUNTS, evidence: 'none' };
+
+test('overnight signal: checked strictly before the window opened is not_checked, before any other rule', () => {
+  const start = Date.parse(window.start);
+  const positive = [at('2026-11-09T12:00:00.000Z', 'positive'), at('2026-11-09T13:00:00.000Z', 'positive')];
+  const mixed = [at('2026-11-09T12:00:00.000Z', 'positive'), at('2026-11-09T12:00:00.000Z', 'negative'), at('2026-11-09T12:00:00.000Z', 'neutral')];
+  // One millisecond before the start and earlier: not checked, whatever the articles say, with every count zero.
+  for (const checkedAt of [new Date(start - 1).toISOString(), '2026-11-09T05:00:00.000Z', '2026-11-01T00:00:00.000Z']) {
+    for (const articles of [[], positive, mixed, [at('2026-11-09T12:00:00.000Z', 'neutral')]]) {
+      assert.deepEqual(deriveOvernightSignal(articles, window, checkedAt), NOT_CHECKED, checkedAt);
+    }
+  }
+  // At the start exactly (strictly before only) and later: the other rules decide, exactly as without checkedAt.
+  for (const checkedAt of [window.start, new Date(start + 1).toISOString(), '2026-11-09T20:00:00.000Z', window.end, '2026-11-10T03:00:00.000Z']) {
+    for (const articles of [[], positive, mixed]) {
+      assert.deepEqual(deriveOvernightSignal(articles, window, checkedAt), deriveOvernightSignal(articles, window), checkedAt);
+    }
+    assert.equal(deriveOvernightSignal([], window, checkedAt).reason, 'no_overnight_news', checkedAt);
+  }
+  // The same instants written with an offset compare the same way: 15:59:59.999+09:00 is 06:59:59.999Z.
+  assert.equal(deriveOvernightSignal([], window, '2026-11-09T15:59:59.999+09:00').reason, 'not_checked');
+  assert.equal(deriveOvernightSignal([], window, '2026-11-09T16:00:00+09:00').reason, 'no_overnight_news');
+  // A checkedAt that does not parse, or a window start that does not, leaves the other rules to decide.
+  for (const checkedAt of ['', 'yesterday', 'not a date']) {
+    assert.deepEqual(deriveOvernightSignal(positive, window, checkedAt), deriveOvernightSignal(positive, window), checkedAt);
+  }
+  assert.equal(deriveOvernightSignal(positive, { start: 'x', end: window.end }, '2000-01-01T00:00:00.000Z').reason, 'no_overnight_news');
+  assert.equal(deriveOvernightSignal(positive, window, undefined).reason, 'one_direction');
+});
+
+test('not_checked reads as not checked yet, apart from no news and from neutral news', () => {
+  const notChecked = deriveOvernightSignal([], window, '2026-11-09T05:00:00.000Z');
+  assert.equal(overnightSummaryText(notChecked), '밤사이 뉴스 아직 확인 전');
+  assert.equal(history.NOT_CHECKED_OVERNIGHT_MESSAGE, '판단 유보 · 밤사이 뉴스 아직 확인 전');
+  const messages = [history.NOT_CHECKED_OVERNIGHT_MESSAGE, history.NO_OVERNIGHT_NEWS_MESSAGE, history.NEUTRAL_OVERNIGHT_NEWS_MESSAGE];
+  assert.equal(new Set(messages).size, 3);
+  // Every reason has its own summary line, and none promises, guarantees or uses an arrow.
+  const lines = new Map<string, string>();
+  for (const [articles, checkedAt] of [
+    [[], '2026-11-09T05:00:00.000Z'], [[], undefined], [[at('2026-11-09T12:00:00.000Z', 'neutral')], undefined],
+    [[at('2026-11-09T12:00:00.000Z', 'positive'), at('2026-11-09T12:00:00.000Z', 'negative')], undefined],
+    [[at('2026-11-09T12:00:00.000Z', 'negative')], undefined],
+  ] as const) {
+    const signal = deriveOvernightSignal(articles, window, checkedAt);
+    lines.set(signal.reason, overnightSummaryText(signal));
+  }
+  assert.deepEqual([...lines.keys()].sort(), [...history.OVERNIGHT_REASONS].sort());
+  assert.equal(new Set(lines.values()).size, history.OVERNIGHT_REASONS.length);
+  for (const text of [...lines.values(), history.NOT_CHECKED_OVERNIGHT_MESSAGE]) {
+    assert.doesNotMatch(text, /[↑↓→]/);
+    for (const word of [...FORBIDDEN, '보장', '권유']) assert.ok(!text.includes(word), `"${word}" in "${text}"`);
+  }
+});
+
+test('overnight reasons only grow: the four earlier ones stay, so shadow files written before not_checked keep parsing', () => {
+  assert.deepEqual([...history.OVERNIGHT_REASONS], ['conflicting', 'one_direction', 'no_overnight_news', 'all_neutral', 'not_checked']);
+  for (const earlier of ['conflicting', 'one_direction', 'no_overnight_news', 'all_neutral']) {
+    assert.ok((history.OVERNIGHT_REASONS as readonly string[]).includes(earlier), earlier);
+  }
+});
+
+test('not_checked at the margin: an analysis from the last minutes before the window may hold an article placed inside it, and still has not checked it', () => {
+  // Published 06:58Z, placed at 07:03Z by the five-minute margin: inside the window that opens at 07:00Z.
+  const edge = [at('2026-11-09T06:58:00.000Z', 'positive')];
+  assert.equal(deriveOvernightSignal(edge, window).counts.positive, 1);
+  // Made at 06:59Z, the analysis holds that article but none of the window after it opened: not checked, nothing counted.
+  for (const checkedAt of ['2026-11-09T06:59:00.000Z', '2026-11-09T06:59:59.999Z']) {
+    assert.deepEqual(deriveOvernightSignal(edge, window, checkedAt), NOT_CHECKED, checkedAt);
+  }
+  // From the opening instant on, the same article decides the window exactly as without checkedAt.
+  for (const checkedAt of [window.start, '2026-11-09T07:01:00.000Z']) {
+    const signal = deriveOvernightSignal(edge, window, checkedAt);
+    assert.deepEqual(signal, deriveOvernightSignal(edge, window), checkedAt);
+    assert.deepEqual([signal.signal, overnightSummaryText(signal)], ['positive', '밤사이 긍정 기사 1건'], checkedAt);
+  }
+});
+
+test('every overnight reason has its own summary line, and only one_direction counts articles', () => {
+  const zero = { positive: 0, negative: 0, neutral: 0, ignored: 0 };
+  const signalFor = (reason: history.OvernightReason): history.OvernightSignal => reason === 'one_direction'
+    ? { signal: 'negative', reason, counts: { ...zero, negative: 2 }, evidence: 'moderate' }
+    : { signal: 'withheld', reason, counts: reason === 'conflicting' ? { ...zero, positive: 1, negative: 1 } : zero, evidence: reason === 'conflicting' ? 'low' : 'none' };
+  // In OVERNIGHT_REASONS order: a reason added there fails here until its line is written.
+  assert.deepEqual(history.OVERNIGHT_REASONS.map(reason => overnightSummaryText(signalFor(reason))), [
+    '밤사이 긍정·부정 기사가 섞임', '밤사이 부정 기사 2건', '밤사이 새 뉴스 없음', '밤사이 뉴스는 방향이 뚜렷하지 않음', '밤사이 뉴스 아직 확인 전',
+  ]);
+});

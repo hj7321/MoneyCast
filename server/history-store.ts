@@ -1,6 +1,6 @@
 import { BlobError, BlobNotFoundError, BlobPreconditionFailedError, BlobRequestAbortedError, get, head, put } from '@vercel/blob';
 import {
-  NEWS_HISTORY_VERSION, integrateOutlook, isNewsTopicKey, parseCompanyHistory,
+  NEWS_HISTORY_VERSION, OVERNIGHT_REASONS, integrateOutlook, isNewsTopicKey, parseCompanyHistory,
   type HistoryReadyStatus, type Horizon, type IntegrationNote, type NewsAnalysis, type OvernightEvidence, type OvernightReason,
   type Signal, type Verdict,
 } from '../packages/core/src/index.js';
@@ -509,7 +509,8 @@ function parseShadowRecord(value: unknown): ShadowRecord {
     const item = record(source.overnight);
     const counts = record(item.counts);
     overnight = {
-      reason: oneOf(item.reason, ['conflicting', 'one_direction', 'no_overnight_news'] as const),
+      // Every reason the core knows, so files written before a reason was added keep parsing.
+      reason: oneOf(item.reason, OVERNIGHT_REASONS),
       evidence: oneOf(item.evidence, ['none', 'low', 'moderate'] as const),
       counts: { positive: count(counts.positive), negative: count(counts.negative), neutral: count(counts.neutral), ignored: count(counts.ignored) },
     };
