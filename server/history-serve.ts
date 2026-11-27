@@ -4,7 +4,7 @@ import {
 } from '../packages/core/src/index.js';
 import { parseHistoryMode, type HistoryMode } from './history-job.js';
 import type { CompanyStats } from './history-stats.js';
-import { createBlobHistoryStore, type HistoryStore, type StatsFile } from './history-store.js';
+import { HistoryStoreError, createBlobHistoryStore, type HistoryStore, type StatsFile } from './history-store.js';
 import { CALENDAR_UNVERIFIED, dayTargetWindow, targetSession, weekTargetWindow, type CalendarBasis, type Exchange } from './market-calendar.js';
 import { companyPriceIdentities } from './price-provider.js';
 
@@ -16,6 +16,9 @@ import { companyPriceIdentities } from './price-provider.js';
 // - Target and news windows are computed per request and never stored, so a past session is never
 //   shown as the next one; the CDN keeps an answer at most until the next open or close.
 // - answer() never throws: every failure is { status: 'unavailable' }, kept at the CDN for 60 s.
+// - A stats.json read that fails (no store, a Blob error, an invalid file) writes one console.warn line,
+//   `history_serve <code>`: a fixed code only, never a message, a path or a secret, and at most once per
+//   60 s failure window, since the failure is cached that long. A missing file is no failure.
 // - /api/news never reads stats.json: it only gains the historyAvailable hint (withHistoryHint).
 
 export const HISTORY_STATS_TTL_MS = 3_600_000;
@@ -92,19 +95,41 @@ export function historyCdnCacheControl(exchange: Exchange, nowMs: number): strin
 
 export interface StatsReader { read(): Promise<StatsFile | null> }
 
+/** The fixed codes of a failed stats.json read, the only text its warning line carries. */
+export type HistoryServeWarning = 'store_not_configured' | 'stats_unreadable' | 'stats_timeout' | 'stats_too_large' | 'stats_invalid'
+  | 'stats_unsupported_version';
+
+/** The store's own codes map one to one; anything else (another error, a code a read never has) is stats_unreadable. */
+export function statsReadWarning(error: unknown): HistoryServeWarning {
+  const code = error instanceof HistoryStoreError ? error.code : null;
+  return code === 'timeout' ? 'stats_timeout' : code === 'too_large' ? 'stats_too_large' : code === 'invalid' ? 'stats_invalid'
+    : code === 'unsupported_version' ? 'stats_unsupported_version' : 'stats_unreadable';
+}
+
+export function historyServeLogLine(code: HistoryServeWarning): string {
+  return `history_serve ${code}`;
+}
+
+/** Looked up when called, so a test that replaces console.warn sees the line. */
+const consoleWarn = (line: string): void => { console.warn(line); };
+
 /**
  * stats.json through a memory cache: a file is kept for an hour; a missing file or a failed read is
  * remembered for 60 s and answered with the last good file (null before the first). Concurrent
  * callers share one read. A read is the store's default cached read, never a fresh one.
+ * Each failed read writes one warning line, so at most one per 60 s failure window; a missing file writes none.
  */
-export function createStatsReader(store: () => HistoryStore | null, clock: () => number): StatsReader {
+export function createStatsReader(store: () => HistoryStore | null, clock: () => number,
+  warn: (line: string) => void = consoleWarn): StatsReader {
   let entry: { kind: 'file' | 'missing' | 'failed'; until: number; file: StatsFile | null } | null = null;
   let lastGood: StatsFile | null = null;
   let pending: Promise<StatsFile | null> | null = null;
 
   async function refresh(): Promise<StatsFile | null> {
+    let configured = true;
     try {
       const target = store();
+      configured = target !== null;
       if (!target) throw new Error('no history store');
       const stored = await target.readStats();
       if (stored === null) {
@@ -114,8 +139,10 @@ export function createStatsReader(store: () => HistoryStore | null, clock: () =>
       entry = { kind: 'file', until: clock() + HISTORY_STATS_TTL_MS, file: stored.value };
       lastGood = stored.value;
       return stored.value;
-    } catch {
+    } catch (error) {
       entry = { kind: 'failed', until: clock() + HISTORY_STATS_RETRY_MS, file: null };
+      // Only the code: the error's message may quote a path, a provider answer or a token.
+      try { warn(historyServeLogLine(configured ? statsReadWarning(error) : 'store_not_configured')); } catch { /* logging never fails a read */ }
       return lastGood;
     }
   }
@@ -135,9 +162,9 @@ export interface HistoryServe {
   answer(company: Company): Promise<HistoryAnswer>;
 }
 
-/** No I/O, timers or throws here: api/index.ts builds the handler when the module loads. */
+/** No I/O, timers or throws here: api/index.ts builds the handler when the module loads. `warn` defaults to console.warn. */
 export function createHistoryServe(env: NodeJS.ProcessEnv = process.env,
-  overrides: { store?: HistoryStore | null; clock?: () => number } = {}): HistoryServe {
+  overrides: { store?: HistoryStore | null; clock?: () => number; warn?: (line: string) => void } = {}): HistoryServe {
   const clock = overrides.clock ?? Date.now;
   let resolved = false;
   let blobStore: HistoryStore | null = null;
@@ -149,7 +176,7 @@ export function createHistoryServe(env: NodeJS.ProcessEnv = process.env,
     }
     return blobStore;
   };
-  const reader = createStatsReader(store, clock);
+  const reader = createStatsReader(store, clock, overrides.warn);
 
   return {
     async answer(company) {

@@ -307,6 +307,110 @@ test('no /api/news/history request makes an outside call', async t => {
   assert.deepEqual(outside, []);
 });
 
+// --- step 6 follow-up: a failed stats.json read is visible in the function log --------------------------
+
+const CONSOLE_METHODS = ['log', 'error', 'warn', 'info', 'debug', 'trace'] as const;
+/** Everything written through the console, kept out of the test output until the test ends. */
+function captureConsole(t: test.TestContext): Array<{ stream: string; text: string }> {
+  const lines: Array<{ stream: string; text: string }> = [];
+  for (const stream of CONSOLE_METHODS) {
+    t.mock.method(console, stream, (...args: unknown[]) => { lines.push({ stream, text: args.map(String).join(' ') }); });
+  }
+  return lines;
+}
+
+test('/api/news/history: a failed stats.json read logs one history_serve warning per 60 s window, a fixed code only; success logs nothing', async t => {
+  const { BlobError, BlobNotFoundError } = await import('@vercel/blob');
+  const { createBlobHistoryStore } = await import('./history-store.js');
+  const { HISTORY_STATS_RETRY_MS, HISTORY_STATS_TTL_MS } = await import('./history-serve.js');
+  const lines = captureConsole(t);
+  // Every Blob answer quotes a token, the store's address and the provider's own words.
+  const token = 'vercel_blob_rw_fixturestore_FixtureBlobTokenNeverReal0123';
+  const quoted = `BlobServiceNotAvailable https://fixturestore.private.blob.vercel-storage.com/news-history/v1/stats.json?token=${token}`;
+  let mode: 'down' | 'invalid' | 'ok' = 'down';
+  const blob = {
+    get: async () => {
+      if (mode === 'down') throw new BlobError(`get failed: ${quoted}`);
+      const text = mode === 'invalid' ? `{"version":"${quoted}"` : JSON.stringify(statsFile());
+      return { statusCode: 200, stream: new Response(text).body, blob: { etag: '"stats"' } };
+    },
+    head: async () => { throw new BlobNotFoundError(); },
+    put: async () => { throw new BlobError(`put refused: ${quoted}`); },
+  } as unknown as NonNullable<Parameters<typeof createBlobHistoryStore>[1]>;
+  const env = { HISTORY_INSIGHTS: 'on', HISTORY_PUBLIC_MARKETS: 'KR,US', BLOB_READ_WRITE_TOKEN: token };
+  let now = NOW;
+  const at = () => now;
+  const historyServe = createHistoryServe(env, { store: createBlobHistoryStore(env, blob), clock: at });
+  const base = await listen(t, createApp(fakeNews().service, { staticDirectory: null, env, clock: at, historyServe }));
+  const answers = async () => {
+    const out: Array<[string, string | null]> = [];
+    for (const item of companies) {
+      const response = await fetch(`${base}${historyPath(item.id)}`);
+      out.push([(await response.json()).status, response.headers.get('vercel-cdn-cache-control')]);
+    }
+    return out;
+  };
+  const warnings = () => lines.filter(line => line.stream === 'warn').map(line => line.text);
+
+  // The Blob store is down: every company is unavailable for the window, and one line says why.
+  assert.ok((await answers()).every(([status, cdn]) => status === 'unavailable' && cdn === 'public, s-maxage=60'));
+  assert.deepEqual(warnings(), ['history_serve stats_unreadable']);
+  now = NOW + HISTORY_STATS_RETRY_MS - 1;
+  await answers();
+  assert.deepEqual(warnings(), ['history_serve stats_unreadable'], 'nothing more within the window');
+  now = NOW + HISTORY_STATS_RETRY_MS;
+  await answers();
+  assert.deepEqual(warnings(), ['history_serve stats_unreadable', 'history_serve stats_unreadable'], 'the retry fails: one more line');
+  // An invalid file has its own code.
+  mode = 'invalid';
+  now = NOW + 2 * HISTORY_STATS_RETRY_MS;
+  assert.ok((await answers()).every(([status]) => status === 'unavailable'));
+  assert.deepEqual(warnings().slice(2), ['history_serve stats_invalid']);
+  // A good file: ready answers, and no line then or for the hour it is kept.
+  mode = 'ok';
+  now = NOW + 3 * HISTORY_STATS_RETRY_MS;
+  assert.ok((await answers()).every(([status]) => status === 'ready'));
+  now += HISTORY_STATS_TTL_MS - 1;
+  assert.ok((await answers()).every(([status]) => status === 'ready'));
+  assert.equal(warnings().length, 3);
+  // The refresh after the hour fails: the last good file stays on screen and the failure is still logged, once.
+  mode = 'down';
+  now += 1;
+  assert.ok((await answers()).every(([status]) => status === 'ready'));
+  now += HISTORY_STATS_RETRY_MS - 1;
+  await answers();
+  assert.deepEqual(warnings().slice(3), ['history_serve stats_unreadable']);
+  // Nothing else reached the console, and no line carries the token, the provider's words, a path or an address.
+  assert.deepEqual(lines.map(line => line.stream), ['warn', 'warn', 'warn', 'warn']);
+  for (const text of warnings()) assert.match(text, /^history_serve [a-z_]+$/);
+  const printed = lines.map(line => line.text).join('\n');
+  for (const fragment of [token, 'FixtureBlobToken', 'BlobServiceNotAvailable', 'get failed', 'vercel-storage', 'stats.json', 'news-history/', 'https://']) {
+    assert.equal(printed.includes(fragment), false, fragment);
+  }
+});
+
+test('/api/news/history without a Blob store logs store_not_configured once per window; off and markets without permission log nothing', async t => {
+  const { HISTORY_STATS_RETRY_MS } = await import('./history-serve.js');
+  const lines = captureConsole(t);
+  let now = NOW;
+  const at = () => now;
+  const ask = async (origin: string) => { for (const item of companies) await (await fetch(`${origin}${historyPath(item.id)}`)).json(); };
+  // The default serve with no Blob credentials: there is no store to read.
+  const base = await listen(t, createApp(fakeNews().service, { staticDirectory: null, env: { HISTORY_INSIGHTS: 'on', HISTORY_PUBLIC_MARKETS: 'KR' }, clock: at }));
+  await ask(base);
+  now = NOW + HISTORY_STATS_RETRY_MS - 1;
+  await ask(base);
+  assert.deepEqual(lines, [{ stream: 'warn', text: 'history_serve store_not_configured' }]);
+  now = NOW + HISTORY_STATS_RETRY_MS;
+  await ask(base);
+  assert.equal(lines.length, 2);
+  // Off, collect and no public market never read stats.json, so they never log.
+  for (const env of [{}, { HISTORY_INSIGHTS: 'collect', HISTORY_PUBLIC_MARKETS: 'KR,US' }, { HISTORY_INSIGHTS: 'on' }] as NodeJS.ProcessEnv[]) {
+    await ask(await listen(t, createApp(fakeNews().service, { staticDirectory: null, env, clock: at })));
+  }
+  assert.deepEqual(lines.map(line => line.text), ['history_serve store_not_configured', 'history_serve store_not_configured']);
+});
+
 // --- the serverless entry ----------------------------------------------------------------------
 
 test('the serverless entry routes news/history, on the public and the rewritten URL, with an injected serve too', async t => {

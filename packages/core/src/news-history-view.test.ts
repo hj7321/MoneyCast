@@ -519,3 +519,153 @@ test('no exported string and no function output contains a forbidden word or an 
     for (const word of [...FORBIDDEN, '보장', '권유']) assert.ok(!cleaned.includes(word), `"${word}" in "${text}"`);
   }
 });
+
+// --- step 6 follow-ups: news not checked yet, in-session labels, compact KST times -----------------------
+
+test('KST times: UTC + 9 h as M/D(요일) HH:MM KST, the year only outside the target year, anything else unchanged', () => {
+  const kst = view.formatKstTime;
+  assert.equal(kst('2026-11-20T21:00:00.000Z', 2026), '11/21(토) 06:00 KST');
+  assert.equal(kst('2026-11-23T06:30:00.000Z', 2026), '11/23(월) 15:30 KST');
+  assert.equal(kst('2026-11-24T00:00:00.000Z', 2026), '11/24(화) 09:00 KST');
+  // Hours and minutes keep two digits, month and day none; seconds are dropped, never rounded up.
+  assert.equal(kst('2026-01-04T23:05:59.999Z', 2026), '1/5(월) 08:05 KST');
+  assert.equal(kst('2026-11-20T15:00:00.000Z', 2026), '11/21(토) 00:00 KST', 'KST midnight');
+  assert.equal(kst('2026-11-20T14:59:59.999Z', 2026), '11/20(금) 23:59 KST');
+  // An offset or a short form is the same instant.
+  assert.equal(kst('2026-11-21T06:00:00+09:00', 2026), '11/21(토) 06:00 KST');
+  assert.equal(kst('2026-11-20T16:00:00-05:00', 2026), '11/21(토) 06:00 KST');
+  assert.equal(kst('2026-11-20T21:00Z', 2026), '11/21(토) 06:00 KST');
+  // The year appears only when the KST date's year is not the target window's, on both sides of New Year.
+  assert.equal(kst('2026-12-31T14:59:00.000Z', 2027), '2026/12/31(목) 23:59 KST');
+  assert.equal(kst('2026-12-31T15:00:00.000Z', 2027), '1/1(금) 00:00 KST');
+  assert.equal(kst('2026-12-31T15:00:00.000Z', 2026), '2027/1/1(금) 00:00 KST');
+  assert.equal(kst('2025-11-20T21:00:00.000Z', 2026), '2025/11/21(금) 06:00 KST');
+  assert.equal(kst('2026-11-20T21:00:00.000Z', Number.NaN), '2026/11/21(토) 06:00 KST');
+  // Not an instant with a zone, or a field out of range: unchanged, never a guessed time.
+  for (const bad of [
+    '', 'yesterday', '2026-11-20', '2026-11-20T21:00:00', '2026-11-20 21:00:00Z', ' 2026-11-20T21:00:00Z', '2026-11-20T21:00:00z',
+    '2026-02-30T00:00:00Z', '2026-02-29T00:00:00Z', '2026-13-01T00:00:00Z', '2026-11-20T24:00:00Z', '2026-11-20T23:60:00Z', '2026-11-20T23:59:60Z',
+  ]) assert.equal(kst(bad, 2026), bad, JSON.stringify(bad));
+  assert.equal(kst('2028-02-29T00:00:00Z', 2028), '2/29(화) 09:00 KST', 'a leap day');
+  assert.equal(view.targetYear({ start: '2026-11-24' }), 2026);
+  assert.equal(view.targetYear({ start: '2027-01-04' }), 2027);
+  assert.equal(view.lastNewsCheckLine('2026-11-23T05:00:00.000Z', 2026), '마지막 뉴스 확인 11/23(월) 14:00 KST');
+  assert.equal(view.lastNewsCheckLine('2026-12-30T05:00:00.000Z', 2027), '마지막 뉴스 확인 2026/12/30(수) 14:00 KST');
+  assert.equal(view.LAST_NEWS_CHECK_LABEL, '마지막 뉴스 확인');
+});
+
+test('KST times agree with the runtime\'s Asia/Seoul zone at instants sampled from 2024 to 2027', () => {
+  // The test runtime has full ICU; the formatter itself never uses an Intl time zone (the mobile runtime may lack one).
+  const format = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul', year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  });
+  const weekdays: Record<string, string> = { Sun: '일', Mon: '월', Tue: '화', Wed: '수', Thu: '목', Fri: '금', Sat: '토' };
+  let checked = 0;
+  for (let ms = Date.parse('2024-01-01T00:00:00Z'); ms < Date.parse('2028-01-01T00:00:00Z'); ms += 7 * HOUR + 13 * 60_000 + 17_123) {
+    const parts = Object.fromEntries(format.formatToParts(new Date(ms)).map(part => [part.type, part.value]));
+    const expected = `${parts.year === '2026' ? '' : `${parts.year}/`}${parts.month}/${parts.day}(${weekdays[parts.weekday!]}) ${parts.hour}:${parts.minute} KST`;
+    assert.equal(view.formatKstTime(iso(ms), 2026), expected, iso(ms));
+    checked += 1;
+  }
+  assert.ok(checked > 4_000, String(checked));
+});
+
+test('evidence labels: during the session the day horizon is today\'s session, as on its card; otherwise the horizon label', () => {
+  const day = history().horizons.day.targetWindow;
+  const week = history().horizons.week.targetWindow;
+  assert.equal(view.IN_SESSION_DAY_LABEL, '오늘 장');
+  assert.equal(view.evidenceTitle('day', { ...day, phase: 'in_session' }), '근거 보기 · 오늘 장');
+  assert.equal(outlookSectionTitle('day', { ...day, phase: 'in_session' }), '③ 오늘 장 참고 전망(통합)');
+  assert.equal(horizonTitle('day', { ...day, phase: 'in_session' }), IN_SESSION_DAY_TITLE);
+  assert.ok(IN_SESSION_DAY_TITLE.startsWith(`${view.IN_SESSION_DAY_LABEL} `), 'the card title and the evidence name the same session');
+  for (const phase of ['before_open', 'after_close'] as const) {
+    assert.equal(view.evidenceTitle('day', { ...day, phase }), '근거 보기 · 다음 거래일', phase);
+    assert.equal(outlookSectionTitle('day', { ...day, phase }), '③ 다음 거래일 참고 전망(통합)', phase);
+  }
+  for (const phase of ['before_open', 'in_session', 'after_close'] as const) {
+    assert.equal(view.evidenceTitle('week', { ...week, phase }), '근거 보기 · 다음 주', phase);
+    assert.equal(outlookSectionTitle('week', { ...week, phase }), '③ 다음 주 참고 전망(통합)', phase);
+  }
+  // Without a target, the horizon label as before.
+  assert.equal(view.evidenceTitle('day'), '근거 보기 · 다음 거래일');
+  assert.equal(view.evidenceTitle('week'), '근거 보기 · 다음 주');
+});
+
+test('history view: news gathered before the overnight window opened is not checked yet, and the day card says when it was', () => {
+  // The day window opens at 06:30Z (15:30 KST, the KRX close); this analysis was made at 14:00 KST from older articles.
+  const early = analysis({
+    asOf: '2026-11-23T05:00:00.000Z', positiveFactors: ['실적'],
+    articles: [article('2026-11-23T03:00:00.000Z', 'positive'), article('2026-11-23T04:00:00.000Z', 'positive')],
+  });
+  const v = deriveHistoryView(early, history(), NOW);
+  assert.deepEqual(v.day.overnight, { signal: 'withheld', reason: 'not_checked', counts: { positive: 0, negative: 0, neutral: 0, ignored: 0 }, evidence: 'none' });
+  assert.equal(v.day.baseline, 'withheld');
+  assert.equal(v.day.signalLabel, '판단 유보');
+  assert.equal(v.day.newsLine, core.NOT_CHECKED_OVERNIGHT_MESSAGE);
+  assert.equal(v.day.newsLine, '판단 유보 · 밤사이 뉴스 아직 확인 전');
+  assert.equal(dayNewsLine(v.day.overnight!), '판단 유보 · 밤사이 뉴스 아직 확인 전');
+  assert.equal(v.day.lastCheckLine, '마지막 뉴스 확인 11/23(월) 14:00 KST');
+  assert.equal(v.day.verdict, null);
+  assert.equal(v.day.direction, null);
+  assert.deepEqual(v.day.integrated, { signal: 'withheld', changed: false, note: 'baseline_withheld' });
+  assert.equal(v.day.pastLine, '과거 비슷한 날: 현재 방향이 없어 비교하지 않음');
+  assert.equal(overnightEvidenceLine(v.day.overnight!), '밤사이 기사 근거 수준: 없음');
+  // The week keeps the existing seven-day rule and has no check line.
+  assert.deepEqual([v.week.baseline, v.week.lastCheckLine, v.week.newsLine], ['positive', null, '최근 7일 긍정 기사 2건']);
+  // Made at the window's opening instant or later: checked, the window's own rules, and no check line.
+  for (const asOf of ['2026-11-23T06:30:00.000Z', '2026-11-23T13:00:00.000Z']) {
+    const later = deriveHistoryView(analysis({ asOf }), history(), NOW);
+    assert.deepEqual([later.day.overnight!.reason, later.day.newsLine, later.day.lastCheckLine], ['no_overnight_news', NO_OVERNIGHT_NEWS_MESSAGE, null], asOf);
+  }
+  const counted = deriveHistoryView(analysis({ asOf: '2026-11-23T13:00:00.000Z', articles: twoPositive() }), history(), NOW);
+  assert.deepEqual([counted.day.baseline, counted.day.lastCheckLine], ['positive', null]);
+  // Without a day window there is nothing to compare: not not_checked.
+  const noWindow = deriveHistoryView(early, history({ dayNewsWindow: null }), NOW);
+  assert.deepEqual([noWindow.day.overnight!.reason, noWindow.day.lastCheckLine], ['no_overnight_news', null]);
+  // During the session the window is the one before today's open; news from the previous afternoon has not checked it.
+  const inSession = deriveHistoryView(early, history({ phase: 'in_session' }), NOW);
+  assert.deepEqual([inSession.day.title, inSession.day.overnight!.reason], [IN_SESSION_DAY_TITLE, 'not_checked']);
+  // A target in the next year shows the year of a check made in the old one.
+  const base = history();
+  const yearEnd: ReadyCompanyHistory = {
+    ...base,
+    horizons: {
+      ...base.horizons,
+      day: {
+        ...base.horizons.day, targetWindow: { ...base.horizons.day.targetWindow, start: '2027-01-04', end: '2027-01-04' },
+        newsWindow: { start: '2026-12-30T06:30:00.000Z', end: '2027-01-04T00:00:00.000Z' },
+      },
+    },
+  };
+  const late = deriveHistoryView(analysis({ asOf: '2026-12-30T05:00:00.000Z' }), yearEnd, NOW);
+  assert.equal(late.day.lastCheckLine, '마지막 뉴스 확인 2026/12/30(수) 14:00 KST');
+  for (const text of [v.day.newsLine, v.day.lastCheckLine!, late.day.lastCheckLine!, view.evidenceTitle('day', { ...base.horizons.day.targetWindow, phase: 'in_session' })]) {
+    for (const arrow of ARROWS) assert.ok(!text.includes(arrow), text);
+    for (const word of [...FORBIDDEN, '보장', '권유']) assert.ok(!text.includes(word), `"${word}" in "${text}"`);
+  }
+});
+
+test('day card news line for every overnight reason: the withheld ones name why, the others count or name the mix', () => {
+  const zero = { positive: 0, negative: 0, neutral: 0, ignored: 0 };
+  const signalFor = (reason: core.OvernightReason): core.OvernightSignal => reason === 'one_direction'
+    ? { signal: 'positive', reason, counts: { ...zero, positive: 1 }, evidence: 'low' }
+    : { signal: 'withheld', reason, counts: reason === 'conflicting' ? { ...zero, positive: 1, negative: 1 } : zero, evidence: reason === 'conflicting' ? 'low' : 'none' };
+  // In OVERNIGHT_REASONS order: a reason added there fails here until its card line is chosen.
+  assert.deepEqual(core.OVERNIGHT_REASONS.map(reason => dayNewsLine(signalFor(reason))), [
+    '밤사이 긍정·부정 기사가 섞임', '밤사이 긍정 기사 1건', NO_OVERNIGHT_NEWS_MESSAGE, NEUTRAL_OVERNIGHT_NEWS_MESSAGE, core.NOT_CHECKED_OVERNIGHT_MESSAGE,
+  ]);
+});
+
+test('KST times do not move with US daylight saving time, and a zone written another way is unchanged text', () => {
+  // The US clocks change on 2026-03-08 and 2026-11-01 (Sundays, 2:00 local); KST stays UTC + 9 h on both sides.
+  assert.equal(view.formatKstTime('2026-03-08T06:59:00.000Z', 2026), '3/8(일) 15:59 KST');
+  assert.equal(view.formatKstTime('2026-03-08T07:00:00.000Z', 2026), '3/8(일) 16:00 KST');
+  assert.equal(view.formatKstTime('2026-11-01T05:59:00.000Z', 2026), '11/1(일) 14:59 KST');
+  assert.equal(view.formatKstTime('2026-11-01T06:00:00.000Z', 2026), '11/1(일) 15:00 KST');
+  // The NASDAQ close in each season, written with its New York offset: 16:00 EDT is 05:00 KST, 16:00 EST 06:00 KST.
+  assert.equal(view.formatKstTime('2026-03-09T16:00:00-04:00', 2026), '3/10(화) 05:00 KST');
+  assert.equal(view.formatKstTime('2026-11-02T16:00:00-05:00', 2026), '11/3(화) 06:00 KST');
+  for (const bad of ['2026-11-20T21:00:00+0900', '2026-11-20T21:00:00.Z', '+002026-11-20T21:00:00Z', '2026-11-20t21:00:00Z']) {
+    assert.equal(view.formatKstTime(bad, 2026), bad, bad);
+  }
+});

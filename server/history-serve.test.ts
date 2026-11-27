@@ -509,6 +509,86 @@ test('creation does no I/O; the Blob store is built on the first read only, insi
   assert.equal((await plain.answer(company('krx:000660'))).body.status, 'unavailable');
 });
 
+// --- step 6 follow-up: a failed stats.json read is visible in the function log ------------------------------
+
+test('stats reader warnings: one fixed code per failed read and window, none for a good or missing file, never a thrown read', async () => {
+  const { HistoryStoreError } = await import('./history-store.js');
+  const { historyServeLogLine, statsReadWarning } = await import('./history-serve.js');
+  const lines: string[] = [];
+  const warn = (line: string) => { lines.push(line); };
+  let now = T0;
+  const clock = () => now;
+  // The store's read codes map one to one; a code no read has is stats_unreadable.
+  const expected = {
+    unreadable: 'stats_unreadable', timeout: 'stats_timeout', too_large: 'stats_too_large', invalid: 'stats_invalid',
+    unsupported_version: 'stats_unsupported_version', conflict: 'stats_unreadable', write_failed: 'stats_unreadable',
+  } as const;
+  for (const code of Object.keys(expected) as Array<keyof typeof expected>) {
+    lines.length = 0;
+    const store = storeWith(statsFile(), { failRead: () => code });
+    const reader = createStatsReader(() => store, clock, warn);
+    assert.equal(await reader.read(), null, code);
+    assert.equal(await reader.read(), null, code);
+    assert.deepEqual(lines, [historyServeLogLine(expected[code])], code);
+    assert.equal(statsReadWarning(new HistoryStoreError(code, 'stats.json')), expected[code]);
+  }
+  // Files the store's own checks reject.
+  for (const [text, line] of [
+    ['{"version":', 'history_serve stats_invalid'],
+    [JSON.stringify({ ...statsFile(), version: 'news-history-stats-v2' }), 'history_serve stats_unsupported_version'],
+    [' '.repeat(5 * 1024 * 1024 + 1), 'history_serve stats_too_large'],
+  ] as const) {
+    lines.length = 0;
+    const store = storeWith(null);
+    store.files.set('stats.json', { text, etag: '"bad"' });
+    assert.equal(await createStatsReader(() => store, clock, warn).read(), null, line);
+    assert.deepEqual(lines, [line]);
+  }
+  // Anything that is not the store's own error, whatever its text, is stats_unreadable.
+  for (const error of [new Error('vercel_blob_rw_secret at https://store.blob.vercel-storage.com/news-history/v1/stats.json'), 'text', null, { code: 'timeout' }]) {
+    assert.equal(statsReadWarning(error), 'stats_unreadable');
+  }
+  lines.length = 0;
+  const throwing = { readStats() { throw new Error('vercel_blob_rw_secret'); } } as unknown as HistoryStore;
+  assert.equal(await createStatsReader(() => throwing, clock, warn).read(), null);
+  assert.deepEqual(lines, ['history_serve stats_unreadable']);
+  // No store: store_not_configured, once per 60 s window.
+  lines.length = 0;
+  const none = createStatsReader(() => null, clock, warn);
+  await none.read();
+  now = T0 + HISTORY_STATS_RETRY_MS - 1;
+  await none.read();
+  assert.deepEqual(lines, ['history_serve store_not_configured']);
+  now = T0 + HISTORY_STATS_RETRY_MS;
+  await none.read();
+  assert.deepEqual(lines, ['history_serve store_not_configured', 'history_serve store_not_configured']);
+  // A good file and a missing one write nothing; concurrent readers of a failing store share one read and one line.
+  lines.length = 0;
+  now = T0;
+  for (const file of [statsFile(), null]) await createStatsReader(() => storeWith(file), clock, warn).read();
+  assert.deepEqual(lines, []);
+  const failing = storeWith(statsFile(), { failRead: () => 'unreadable' });
+  const shared = createStatsReader(() => failing, clock, warn);
+  await Promise.all(Array.from({ length: 8 }, () => shared.read()));
+  assert.deepEqual([failing.reads.length, lines], [1, ['history_serve stats_unreadable']]);
+  // A logger that throws changes nothing: the last good file is still served and the failure still cached.
+  let down = false;
+  const flaky = storeWith(statsFile(KR, 'run-good'), { failRead: () => (down ? 'unreadable' : null) });
+  const loud = createStatsReader(() => flaky, clock, () => { throw new Error('log sink down'); });
+  assert.equal((await loud.read())?.runId, 'run-good');
+  down = true;
+  now = T0 + HISTORY_STATS_TTL_MS;
+  assert.equal((await loud.read())?.runId, 'run-good');
+  assert.equal((await loud.read())?.runId, 'run-good');
+  assert.equal(flaky.reads.length, 2);
+  // Through the serve: its warn override receives the line; a market without permission reads nothing.
+  lines.length = 0;
+  const serve = createHistoryServe({ HISTORY_INSIGHTS: 'on', HISTORY_PUBLIC_MARKETS: 'KR' }, { store: null, clock, warn });
+  assert.equal((await serve.answer(company('krx:000660'))).body.status, 'unavailable');
+  assert.equal((await serve.answer(company('nasdaq:AAPL'))).body.status, 'stats_not_public');
+  assert.deepEqual(lines, ['history_serve store_not_configured']);
+});
+
 test('buildCompanyHistory: windows from nowMs, statistics only for a public market, copies of the stats', () => {
   const item = company('krx:000660');
   const stats = companyStats(item);

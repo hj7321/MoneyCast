@@ -1432,3 +1432,68 @@ test('shadow records: neutral-only overnight news is recorded as all_neutral and
     assert.equal(before.find(record => record.horizon === 'day')!.overnight!.reason, 'no_overnight_news');
   }
 });
+
+// ---------------------------------------------------------------------------
+// Step 6 follow-up: news gathered before the overnight window opened
+// ---------------------------------------------------------------------------
+
+const NOT_CHECKED_OVERNIGHT = { reason: 'not_checked', evidence: 'none', counts: { positive: 0, negative: 0, neutral: 0, ignored: 0 } };
+
+test('shadow records: a snapshot made before the overnight window opened is not_checked, as on the screen, and passes the store check', async () => {
+  const { parseShadowFile } = await import('./history-store.js');
+  const computeAtMs = at('2026-11-11T06:20:00Z');
+  for (const [companyId, exchange] of [['krx:005930', 'KRX'], ['nasdaq:AAPL', 'NASDAQ']] as const) {
+    const { newsWindow } = dayTargetWindow(exchange, computeAtMs);
+    const start = Date.parse(newsWindow.start);
+    // Directional articles from before the window, in an analysis made one millisecond before it opened.
+    const pool = [article(companyId, start - 3 * HOUR, 'positive'), article(companyId, start - 2 * HOUR, 'positive')];
+    const records = shadowRecordsFor({ companyId, exchange, snapshot: snapshotOf(companyId, start - 1, pool), stats: null, computeAtMs, previous: [] });
+    const day = records.find(record => record.horizon === 'day')!;
+    assert.deepEqual(day.overnight, NOT_CHECKED_OVERNIGHT, companyId);
+    assert.deepEqual([day.baseline, day.verdict, day.integrated, day.changed, day.note], ['withheld', null, 'withheld', false, 'baseline_withheld']);
+    assert.equal(day.snapshot!.asOf, iso(start - 1));
+    assert.equal(records.find(record => record.horizon === 'week')!.baseline, 'positive', 'the week keeps the seven-day rule');
+    // The same file check every shadow write passes before it reaches the store.
+    const parsed = parseShadowFile({ version: HISTORY_VERSIONS.shadow, year: 2026, writtenAt: iso(computeAtMs), records: json(records) }, 2026);
+    assert.ok(parsed.ok, companyId);
+    assert.deepEqual(parsed.value.records.find(record => record.horizon === 'day')!.overnight, NOT_CHECKED_OVERNIGHT);
+    // Made at the opening instant: checked, so the window's own rules decide (none of these articles is in it).
+    const atStart = shadowRecordsFor({ companyId, exchange, snapshot: snapshotOf(companyId, start, pool), stats: null, computeAtMs, previous: [] });
+    assert.equal(atStart.find(record => record.horizon === 'day')!.overnight!.reason, 'no_overnight_news', companyId);
+  }
+});
+
+test('the full job stores not_checked for snapshots made before their windows opened, and the stored shadow file reads back', async () => {
+  const w = world();
+  // 14:00 KST on 11-10: before the KRX close (06:30Z) and the NASDAQ close (21:00Z) that open the windows of the 06:20Z run on 11-11.
+  refreshSnapshots(w, at('2026-11-10T05:00:00Z'));
+  const first = await w.run('full');
+  assert.deepEqual(first.shadow, { recorded: 16, kept: 0 });
+  const days = (await w.store.readShadow(2026))!.value.records.filter(record => record.horizon === 'day');
+  assert.equal(days.length, companies.length);
+  for (const record of days) {
+    assert.deepEqual(record.overnight, NOT_CHECKED_OVERNIGHT, record.companyId);
+    assert.deepEqual([record.baseline, record.verdict, record.integrated, record.note], ['withheld', null, 'withheld', 'baseline_withheld'], record.companyId);
+    assert.ok(Date.parse(record.snapshot!.asOf) < Date.parse(record.newsWindow!.start), record.companyId);
+  }
+});
+
+test('shadow records: the last news check is the analysis asOf, not the time the snapshot was written', () => {
+  const computeAtMs = at('2026-11-11T06:20:00Z');
+  for (const [companyId, exchange] of [['krx:005930', 'KRX'], ['nasdaq:AAPL', 'NASDAQ']] as const) {
+    const start = Date.parse(dayTargetWindow(exchange, computeAtMs).newsWindow.start);
+    // Published three minutes before the close: the five-minute margin places it inside the window.
+    const pool = [article(companyId, start - 3 * MIN, 'positive')];
+    const dayRecord = (asOfMs: number, updatedMs: number) => shadowRecordsFor({
+      companyId, exchange, snapshot: snapshotOf(companyId, updatedMs, pool, { asOf: iso(asOfMs) }), stats: null, computeAtMs, previous: [],
+    }).find(record => record.horizon === 'day')!;
+    // A refresh that began 30 s before the window opened and was written 20 s after it: not checked, nothing counted.
+    const straddling = dayRecord(start - 30_000, start + 20_000);
+    assert.deepEqual(straddling.overnight, NOT_CHECKED_OVERNIGHT, companyId);
+    assert.deepEqual([straddling.baseline, straddling.snapshot!.asOf, straddling.snapshot!.knownAt],
+      ['withheld', iso(start - 30_000), iso(start + 20_000)], companyId);
+    // One begun 10 s after the window opened: the window's own rules count that article.
+    const checked = dayRecord(start + 10_000, start + 60_000);
+    assert.deepEqual([checked.baseline, checked.overnight!.reason, checked.overnight!.counts.positive], ['positive', 'one_direction', 1], companyId);
+  }
+});

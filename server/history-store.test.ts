@@ -1205,3 +1205,38 @@ test('shadow records: the all_neutral overnight reason parses; an unknown reason
     assert.ok(parseShadowFile(older).ok, reason);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Step 6 follow-up: the not_checked overnight reason
+// ---------------------------------------------------------------------------
+
+test('shadow records: not_checked parses, files written before it parse unchanged, and an unknown reason is still rejected', async () => {
+  const zero = { positive: 0, negative: 0, neutral: 0, ignored: 0 };
+  const notChecked = plain(SHADOW) as unknown as Record<string, any>;
+  Object.assign(notChecked.records[0], {
+    baseline: 'withheld', verdict: null, integrated: 'withheld', changed: false, note: 'baseline_withheld',
+    overnight: { reason: 'not_checked', evidence: 'none', counts: zero },
+  });
+  const parsed = parseShadowFile(notChecked);
+  assert.ok(parsed.ok);
+  assert.deepEqual(parsed.value.records[0]!.overnight, { reason: 'not_checked', evidence: 'none', counts: zero });
+  // Through a store read, as the job and the status command read it.
+  const store = createMemoryHistoryStore();
+  store.files.set('shadow/2026.json', { text: JSON.stringify(notChecked), etag: '"c"' });
+  assert.equal((await store.readShadow(2026))!.value.records[0]!.overnight!.reason, 'not_checked');
+  // A file written before the reason existed parses to the same value, and one holding every reason parses too.
+  const older = parseShadowFile(plain(SHADOW));
+  assert.ok(older.ok);
+  assert.deepEqual(plain(older.value), plain(SHADOW));
+  const reasons = ['conflicting', 'one_direction', 'no_overnight_news', 'all_neutral', 'not_checked'];
+  const mixed = plain(SHADOW) as unknown as Record<string, any>;
+  mixed.records = reasons.map(reason => ({ ...plain(SHADOW.records[0]!), overnight: { ...plain(SHADOW.records[0]!.overnight!), reason } }));
+  const all = parseShadowFile(mixed);
+  assert.ok(all.ok);
+  assert.deepEqual(all.value.records.map(record => record.overnight!.reason), reasons);
+  await mutationTable('shadow/2026.json', notChecked, s => s.readShadow(2026), [
+    ['an unknown reason', v => { v.records[0].overnight.reason = 'not_checked_yet'; }],
+    ['the reason in another case', v => { v.records[0].overnight.reason = 'NOT_CHECKED'; }],
+    ['not_checked on a week record', v => { v.records[1].overnight = plain(v.records[0].overnight); }],
+  ]);
+});

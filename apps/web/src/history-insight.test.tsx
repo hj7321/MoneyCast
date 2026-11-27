@@ -765,8 +765,10 @@ test('an answer that lands after another company was picked is kept for its own 
   const calendar: Calendar = { ...KRX_AFTER_CLOSE, newsWindow: { start: new Date(now - 10 * HOUR).toISOString(), end: new Date(now + HOUR).toISOString() } };
   let land: () => void = () => undefined;
   const landed = new Promise<void>(resolve => { land = resolve; });
+  // Overnight articles inside that window too, so the day card has a direction whatever day the test runs.
+  const overnight = new Date(now - 8 * HOUR).toISOString();
   serve({
-    news: (_call, id) => json(news(id)),
+    news: (_call, id) => json(news(id, { articles: [article('day-1', 'positive', overnight), article('day-2', 'positive', overnight)] })),
     history: async (_call, id) => {
       if (id !== HYNIX) return json(history(id, { status: 'stats_not_public' }));
       await landed;
@@ -795,6 +797,228 @@ test('an answer that lands after another company was picked is kept for its own 
   await settle();
   assert.deepEqual(calls.news, [HYNIX, MSFT, HYNIX]);
   assert.deepEqual(calls.history, [HYNIX, MSFT]);
+});
+
+// ---------------------------------------------------------------------------
+// Step 6 follow-ups: news not checked yet, in-session labels, compact KST times
+// ---------------------------------------------------------------------------
+
+/** KRX near New Year: the next session is in 2027 while the overnight window opens in 2026. */
+const KRX_YEAR_END: Calendar = { exchange: 'KRX', phase: 'after_close', day: '2027-01-04', week: ['2027-01-04', '2027-01-08'],
+  newsWindow: { start: '2026-12-30T06:30:00.000Z', end: '2027-01-04T00:00:00.000Z' } };
+/** Old enough that the statistics always read as old, so the times below never depend on the day the test runs. */
+const FIXED_COMPUTED_AT = '2026-11-23T06:31:00.000Z';
+const cardLines = (card: HTMLElement) => Array.from(card.querySelectorAll('.history-card-line')).map(node => node.textContent);
+
+test('news gathered before the overnight window opened: the day card says it is not checked yet and when the news was last checked', async () => {
+  // 14:00 KST, before KRX closed at 15:30 KST (06:30Z) and the window opened; its articles are older still.
+  const early = news(HYNIX, {
+    asOf: '2026-11-23T05:00:00.000Z',
+    articles: [article('day-1', 'positive', '2026-11-23T03:00:00.000Z'), article('day-2', 'positive', '2026-11-23T04:00:00.000Z')],
+  });
+  serve({ news: () => json(early), history: () => json(history(HYNIX)) });
+  const view = await openCompany(/SK하이닉스/);
+  let section = await readyOutlook();
+  let { day, week } = cards(section);
+  assert.ok(within(day).getByText('판단 유보'));
+  assert.ok(day.querySelector('.history-signal-withheld'));
+  assert.deepEqual(cardLines(day), ['판단 유보 · 밤사이 뉴스 아직 확인 전', '마지막 뉴스 확인 11/23(월) 14:00 KST', '과거 비슷한 날: 현재 방향이 없어 비교하지 않음']);
+  assert.equal(within(day).queryByText('판단 유보 · 밤사이 새 뉴스 없음'), null);
+  // The button's name reads the lines in order.
+  assert.ok(screen.getByRole('button', { name: /밤사이 뉴스 아직 확인 전 마지막 뉴스 확인 11\/23\(월\) 14:00 KST 과거 비슷한 날/ }));
+  // The week keeps the seven-day rule and gets no check line.
+  assert.ok(within(week).getByText('상승 전망'));
+  assert.deepEqual(cardLines(week), ['최근 7일 긍정 기사 2건', '과거 비슷한 주: 지지']);
+  assert.ok(within(section).getByText('밤사이 기사 근거 수준: 없음'));
+  assert.ok(within(section).getByText('기준선 판단 유보 · 통합 판단 유보 · 판정 해당 없음'));
+  assertCleanText(section);
+  view.unmount();
+
+  // Gathered at the window's opening instant: checked, and with nothing in the window yet it is "no news", without a check line.
+  resetHistoryInsightCache();
+  serve({ news: () => json(news(HYNIX, { asOf: '2026-11-23T06:30:00.000Z', articles: early.articles })), history: () => json(history(HYNIX)) });
+  await openCompany(/SK하이닉스/);
+  section = await readyOutlook();
+  ({ day } = cards(section));
+  assert.deepEqual(cardLines(day), ['판단 유보 · 밤사이 새 뉴스 없음', '과거 비슷한 날: 현재 방향이 없어 비교하지 않음']);
+  assert.equal(within(section).queryByText(/^마지막 뉴스 확인/), null);
+});
+
+test('during the session the evidence names today\'s session like the day card; the week, before the open and after the close keep their labels', async () => {
+  serve({ news: () => json(news(HYNIX)), history: () => json(history(HYNIX, { calendar: KRX_IN_SESSION })) });
+  const view = await openCompany(/SK하이닉스/);
+  let section = await readyOutlook();
+  let { day, week } = cards(section);
+  assert.equal(day.querySelector('.history-card-title')?.textContent, '오늘 장 전망 · 장 시작 전 기준');
+  assert.ok(within(section).getByRole('heading', { name: '근거 보기 · 오늘 장' }));
+  assert.ok(within(section).getByRole('heading', { name: '③ 오늘 장 참고 전망(통합)' }));
+  assert.equal(within(section).queryByRole('heading', { name: '근거 보기 · 다음 거래일' }), null);
+  assert.equal(within(section).queryByRole('heading', { name: '③ 다음 거래일 참고 전망(통합)' }), null);
+  fireEvent.click(week);
+  assert.ok(within(section).getByRole('heading', { name: '근거 보기 · 다음 주' }));
+  assert.ok(within(section).getByRole('heading', { name: '③ 다음 주 참고 전망(통합)' }));
+  assert.equal(within(section).queryByRole('heading', { name: /오늘 장/ }), null);
+  fireEvent.click(day);
+  assert.ok(within(section).getByRole('heading', { name: '근거 보기 · 오늘 장' }));
+  assertCleanText(section);
+  view.unmount();
+
+  // After the KRX close and before the NASDAQ open the day horizon is the next trading day.
+  for (const [id, name] of [[HYNIX, /SK하이닉스/], [MSFT, /마이크로소프트/]] as const) {
+    resetHistoryInsightCache();
+    serve({ news: () => json(news(id)), history: () => json(history(id)) });
+    const next = await openCompany(name);
+    section = await readyOutlook();
+    ({ day, week } = cards(section));
+    assert.ok(within(section).getByRole('heading', { name: '근거 보기 · 다음 거래일' }), id);
+    assert.ok(within(section).getByRole('heading', { name: '③ 다음 거래일 참고 전망(통합)' }), id);
+    fireEvent.click(week);
+    assert.ok(within(section).getByRole('heading', { name: '근거 보기 · 다음 주' }), id);
+    assert.ok(within(section).getByRole('heading', { name: '③ 다음 주 참고 전망(통합)' }), id);
+    assert.equal(within(section).queryByRole('heading', { name: /오늘 장/ }), null, id);
+    next.unmount();
+  }
+});
+
+test('every time in the outlook is compact KST, with the year only when it is not the target window\'s year', async () => {
+  serve({ news: () => json(news(HYNIX, { asOf: '2026-11-23T13:00:00.000Z' })), history: () => json(history(HYNIX, { computedAt: FIXED_COMPUTED_AT })) });
+  const view = await openCompany(/SK하이닉스/);
+  let section = await readyOutlook();
+  let block = evidence(section);
+  assert.ok(within(block).getByText('밤사이 뉴스 기준: 11/23(월) 15:30 KST ~ 11/24(화) 09:00 KST'));
+  assert.ok(within(block).getByText('기사 기준 11/23(월) 22:00 KST'));
+  assert.ok(within(block).getByText('통계 계산 11/23(월) 15:31 KST · 오래된 통계'));
+  fireEvent.click(cards(section).week);
+  assert.ok(within(evidence(section)).getByText('기사 기준 11/23(월) 22:00 KST'));
+  // No locale clock (오전·오후), no seconds, and the browser's own formatting never shows up.
+  assert.doesNotMatch(section.textContent ?? '', /오전|오후|\d{1,2}:\d{2}:\d{2}|\d{4}\. \d{1,2}\. /);
+  view.unmount();
+
+  // Around New Year: times in 2026 carry the year when the target is in 2027; those in 2027 do not.
+  resetHistoryInsightCache();
+  serve({
+    news: () => json(news(HYNIX, { asOf: '2026-12-30T05:00:00.000Z', articles: [article('day-1', 'positive', '2026-12-30T03:00:00.000Z')] })),
+    history: () => json(history(HYNIX, { calendar: KRX_YEAR_END, computedAt: FIXED_COMPUTED_AT })),
+  });
+  await openCompany(/SK하이닉스/);
+  section = await readyOutlook();
+  const { day, week } = cards(section);
+  assert.ok(within(day).getByText('다음 거래일 · 1/4(월)'));
+  assert.deepEqual(cardLines(day), ['판단 유보 · 밤사이 뉴스 아직 확인 전', '마지막 뉴스 확인 2026/12/30(수) 14:00 KST', '과거 비슷한 날: 현재 방향이 없어 비교하지 않음']);
+  assert.ok(within(week).getByText('다음 주 · 1/4(월)~1/8(금)'));
+  block = evidence(section);
+  assert.ok(within(block).getByText('밤사이 뉴스 기준: 2026/12/30(수) 15:30 KST ~ 1/4(월) 09:00 KST'));
+  assert.ok(within(block).getByText('기사 기준 2026/12/30(수) 14:00 KST'));
+  assert.ok(within(block).getByText('통계 계산 2026/11/23(월) 15:31 KST · 오래된 통계'));
+  assertCleanText(section);
+});
+
+// ---------------------------------------------------------------------------
+// Step 6 follow-ups, review: both exchanges, every phase, Korean dates of the article record
+// ---------------------------------------------------------------------------
+
+// What the server computes at 2026-11-22T23:00Z (08:00 KST, before the KRX open), on Saturday 2026-11-28 (KRX weekend),
+// at 2026-11-23T15:00Z (10:00 EST, NASDAQ open), at 2026-11-23T22:00Z (17:00 EST, after the NASDAQ close) and on
+// Thanksgiving, 2026-11-26 (NASDAQ closed; the next session is the short Friday).
+const KRX_BEFORE_OPEN: Calendar = { exchange: 'KRX', phase: 'before_open', day: '2026-11-23', week: ['2026-11-23', '2026-11-27'],
+  newsWindow: { start: '2026-11-20T06:30:00.000Z', end: '2026-11-23T00:00:00.000Z' } };
+const KRX_WEEKEND: Calendar = { exchange: 'KRX', phase: 'after_close', day: '2026-11-30', week: ['2026-11-30', '2026-12-04'],
+  newsWindow: { start: '2026-11-27T06:30:00.000Z', end: '2026-11-30T00:00:00.000Z' } };
+const NASDAQ_IN_SESSION: Calendar = { exchange: 'NASDAQ', phase: 'in_session', day: '2026-11-23', week: ['2026-11-24', '2026-12-01'],
+  newsWindow: { start: '2026-11-20T21:00:00.000Z', end: '2026-11-23T14:30:00.000Z' } };
+const NASDAQ_AFTER_CLOSE: Calendar = { exchange: 'NASDAQ', phase: 'after_close', day: '2026-11-24', week: ['2026-11-24', '2026-12-01'],
+  newsWindow: { start: '2026-11-23T21:00:00.000Z', end: '2026-11-24T14:30:00.000Z' } };
+const NASDAQ_HOLIDAY: Calendar = { exchange: 'NASDAQ', phase: 'after_close', day: '2026-11-27', week: ['2026-11-27', '2026-12-03'],
+  newsWindow: { start: '2026-11-25T21:00:00.000Z', end: '2026-11-27T14:30:00.000Z' } };
+// And on Hangul Day, Friday 2026-10-09 (KRX closed), and on Saturday 2026-11-28 for NASDAQ, whose window opens at
+// the 13:00 EST close of the short Friday.
+const KRX_HOLIDAY: Calendar = { exchange: 'KRX', phase: 'after_close', day: '2026-10-12', week: ['2026-10-12', '2026-10-16'],
+  newsWindow: { start: '2026-10-08T06:30:00.000Z', end: '2026-10-12T00:00:00.000Z' } };
+const NASDAQ_WEEKEND: Calendar = { exchange: 'NASDAQ', phase: 'after_close', day: '2026-11-30', week: ['2026-11-30', '2026-12-04'],
+  newsWindow: { start: '2026-11-27T18:00:00.000Z', end: '2026-11-30T14:30:00.000Z' } };
+
+test('on NASDAQ, news gathered before the US close has not checked the overnight window, and the card says when it was gathered in KST', async () => {
+  // 05:00 KST on 11/24 (20:00Z on 11/23), before the NASDAQ close at 06:00 KST that opens the window for the 11/24 session.
+  const early = news(MSFT, { asOf: '2026-11-23T20:00:00.000Z', articles: [article('day-1', 'positive', '2026-11-23T19:00:00.000Z')] });
+  const notPublic = () => json(history(MSFT, { status: 'stats_not_public', calendar: NASDAQ_AFTER_CLOSE }));
+  serve({ news: () => json(early), history: notPublic });
+  const view = await openCompany(/마이크로소프트/);
+  let section = await readyOutlook();
+  const { day, week } = cards(section);
+  assert.equal(day.querySelector('.history-card-title')?.textContent, '다음 거래일 · 11/24(화)');
+  assert.ok(day.querySelector('.history-signal-withheld'));
+  assert.deepEqual(cardLines(day), ['판단 유보 · 밤사이 뉴스 아직 확인 전', '마지막 뉴스 확인 11/24(화) 05:00 KST', STATS_NOT_PUBLIC_MESSAGE]);
+  assert.deepEqual(cardLines(week), ['최근 7일 긍정 기사 1건', STATS_NOT_PUBLIC_MESSAGE]);
+  const block = evidence(section);
+  assert.ok(within(block).getByText('밤사이 뉴스 기준: 11/24(화) 06:00 KST ~ 11/24(화) 23:30 KST'));
+  assert.ok(within(block).getByText('기사 기준 11/24(화) 05:00 KST'));
+  assertCleanText(section);
+  view.unmount();
+
+  // Gathered after the close: checked, and its article from before the close is not overnight news.
+  resetHistoryInsightCache();
+  serve({ news: () => json(news(MSFT, { asOf: '2026-11-23T22:00:00.000Z', articles: early.articles })), history: notPublic });
+  await openCompany(/마이크로소프트/);
+  section = await readyOutlook();
+  assert.deepEqual(cardLines(cards(section).day), ['판단 유보 · 밤사이 새 뉴스 없음', STATS_NOT_PUBLIC_MESSAGE]);
+});
+
+test('in every phase on both exchanges the day horizon has one name on its card and in its evidence, and the week is always the next week', async () => {
+  const phases = [
+    [HYNIX, /SK하이닉스/, KRX_BEFORE_OPEN, '다음 거래일 · 11/23(월)', '다음 주 · 11/23(월)~11/27(금)'],
+    [HYNIX, /SK하이닉스/, KRX_IN_SESSION, '오늘 장 전망 · 장 시작 전 기준', '다음 주 · 11/25(수)~12/1(화)'],
+    [HYNIX, /SK하이닉스/, KRX_AFTER_CLOSE, '다음 거래일 · 11/24(화)', '다음 주 · 11/24(화)~11/30(월)'],
+    [HYNIX, /SK하이닉스/, KRX_WEEKEND, '다음 거래일 · 11/30(월)', '다음 주 · 11/30(월)~12/4(금)'],
+    [HYNIX, /SK하이닉스/, KRX_HOLIDAY, '다음 거래일 · 10/12(월)', '다음 주 · 10/12(월)~10/16(금)'],
+    [MSFT, /마이크로소프트/, NASDAQ_BEFORE_OPEN, '다음 거래일 · 11/23(월)', '다음 주 · 11/23(월)~11/30(월)'],
+    [MSFT, /마이크로소프트/, NASDAQ_IN_SESSION, '오늘 장 전망 · 장 시작 전 기준', '다음 주 · 11/24(화)~12/1(화)'],
+    [MSFT, /마이크로소프트/, NASDAQ_AFTER_CLOSE, '다음 거래일 · 11/24(화)', '다음 주 · 11/24(화)~12/1(화)'],
+    [MSFT, /마이크로소프트/, NASDAQ_HOLIDAY, '다음 거래일 · 11/27(금)', '다음 주 · 11/27(금)~12/3(목)'],
+    [MSFT, /마이크로소프트/, NASDAQ_WEEKEND, '다음 거래일 · 11/30(월)', '다음 주 · 11/30(월)~12/4(금)'],
+  ] as const;
+  for (const [id, name, calendar, dayTitle, weekTitle] of phases) {
+    const where = `${calendar.exchange} ${calendar.phase} ${calendar.day}`;
+    const label = calendar.phase === 'in_session' ? '오늘 장' : '다음 거래일';
+    resetHistoryInsightCache();
+    serve({ news: () => json(news(id)), history: () => json(history(id, { calendar })) });
+    const view = await openCompany(name);
+    const section = await readyOutlook();
+    const { day, week } = cards(section);
+    assert.equal(day.querySelector('.history-card-title')?.textContent, dayTitle, where);
+    assert.equal(week.querySelector('.history-card-title')?.textContent, weekTitle, where);
+    assert.ok(within(section).getByRole('heading', { name: `근거 보기 · ${label}` }), where);
+    assert.ok(within(section).getByRole('heading', { name: `③ ${label} 참고 전망(통합)` }), where);
+    fireEvent.click(week);
+    assert.ok(within(section).getByRole('heading', { name: '근거 보기 · 다음 주' }), where);
+    assert.ok(within(section).getByRole('heading', { name: '③ 다음 주 참고 전망(통합)' }), where);
+    assert.equal(within(section).queryByRole('heading', { name: /오늘 장|다음 거래일/ }), null, where);
+    assertCleanText(section);
+    view.unmount();
+  }
+});
+
+test('the article record period gives Korean dates, so a bound published before 09:00 KST is not shown as the day before', async () => {
+  // 08:35 KST on 11/14 and 07:30 KST on 11/24 are still 11/13 and 11/23 in UTC.
+  const value = readyOf(history(HYNIX));
+  value.dataAsOf = { ...value.dataAsOf, ledgerFrom: '2026-11-13T23:35:00.000Z', ledgerTo: '2026-11-23T22:30:00.000Z' };
+  assert.ok(parseCompanyHistory(JSON.parse(JSON.stringify(value))));
+  serve({ news: () => json(news(HYNIX)), history: () => json(value) });
+  const view = await openCompany(/SK하이닉스/);
+  let section = await readyOutlook();
+  assert.ok(within(evidence(section)).getByText('기사 기록 기간 2026-11-14 ~ 2026-11-24'));
+  fireEvent.click(cards(section).week);
+  assert.ok(within(evidence(section)).getByText('기사 기록 기간 2026-11-14 ~ 2026-11-24'));
+  view.unmount();
+
+  // A calendar date is shown as sent, and the last instant of a KST day keeps that day.
+  resetHistoryInsightCache();
+  const dated = readyOf(history(MSFT));
+  dated.dataAsOf = { ...dated.dataAsOf, ledgerFrom: '2025-01-02', ledgerTo: '2026-11-23T14:59:59.999Z' };
+  assert.ok(parseCompanyHistory(JSON.parse(JSON.stringify(dated))));
+  serve({ news: () => json(news(MSFT)), history: () => json(dated) });
+  await openCompany(/마이크로소프트/);
+  section = await readyOutlook();
+  assert.ok(within(evidence(section)).getByText('기사 기록 기간 2025-01-02 ~ 2026-11-23'));
 });
 
 // ---------------------------------------------------------------------------

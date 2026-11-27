@@ -3,7 +3,8 @@ import type { NewsAnalysis } from './index.js';
 import {
   deriveBaselineSignal, deriveOvernightSignal, integrateOutlook, integrationMessage, overnightSummaryText, validationBadge,
   HISTORY_SHARE_LABEL, HORIZON_LABELS, IDENTITY_UNVERIFIED_MESSAGE, NEUTRAL_OVERNIGHT_NEWS_MESSAGE, NO_HISTORY_MESSAGE,
-  NO_OVERNIGHT_NEWS_MESSAGE, PRICE_UNAVAILABLE_MESSAGE, SIGNAL_LABELS, STATS_NOT_PUBLIC_MESSAGE, VERDICT_LABELS,
+  NO_OVERNIGHT_NEWS_MESSAGE, NOT_CHECKED_OVERNIGHT_MESSAGE, PRICE_UNAVAILABLE_MESSAGE, SIGNAL_LABELS, STATS_NOT_PUBLIC_MESSAGE,
+  VERDICT_LABELS,
   type CaseRef, type CaseStats, type CompanyHistory, type DirectionStats, type HistoryCoverage, type HistorySources, type Horizon,
   type HorizonHistory, type IntegratedOutlook, type OvernightEvidence, type OvernightSignal, type SampleStats, type Signal, type Verdict,
 } from './news-history.js';
@@ -12,6 +13,7 @@ import {
  * What the two-horizon outlook shows, as pure functions of the analysis on screen and one
  * /api/news/history value. Like news-history.ts: no Node or DOM APIs, no time zones and no
  * clock reads (`nowMs` is always an argument), because the mobile runtime loads this file too.
+ * Instants are shown in KST as UTC + 9 h (formatKstTime), never through an Intl time zone.
  * Every sentence the screen shows comes from here; no text promises a direction, names a
  * hit rate or a probability, or uses an arrow.
  */
@@ -35,6 +37,8 @@ export interface HorizonView {
   signalLabel: string;
   validationLabel: string;
   newsLine: string;
+  /** day only, while the overnight news is not checked yet (not_checked): when the news on screen was gathered. */
+  lastCheckLine: string | null;
   pastLine: string;
   integrationLine: string;
   /** Only when past cases lowered the baseline. */
@@ -60,7 +64,10 @@ export const STATS_EXPIRED_AFTER_MS = 14 * 86_400_000;
 
 export const HISTORY_SECTION_TITLE = '전망 한눈에 보기';
 export const IN_SESSION_DAY_TITLE = '오늘 장 전망 · 장 시작 전 기준';
+/** The in-session day horizon's name in the evidence, matching IN_SESSION_DAY_TITLE. */
+export const IN_SESSION_DAY_LABEL = '오늘 장';
 export const EVIDENCE_TITLE = '근거 보기';
+export const LAST_NEWS_CHECK_LABEL = '마지막 뉴스 확인';
 export const CASES_SECTION_TITLE = '② 과거 유사 기사와 이후 실제 주가';
 export const BASIS_SECTION_TITLE = '④ 표본·불확실성·데이터 기준';
 export const HISTORY_LOADING_MESSAGE = '두 기간 전망을 준비하고 있습니다';
@@ -150,6 +157,44 @@ export function formatSessionDate(date: string): string {
   return `${month}/${day}(${WEEKDAYS[utc.getUTCDay()]})`;
 }
 
+const KST_OFFSET_MS = 9 * 3_600_000;
+const INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** A timestamp with a zone whose fields are all in range, else NaN: Date.parse alone rolls '02-30' over and reads '24:00'. */
+function instantMs(value: string): number {
+  const match = INSTANT.exec(value);
+  if (!match) return Number.NaN;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(part => Number(part ?? 0)) as [number, number, number, number, number, number];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day || hour > 23 || minute > 59 || second > 59) return Number.NaN;
+  return Date.parse(value);
+}
+
+/**
+ * An instant as Korean wall-clock time, '2026-11-20T21:00:00.000Z' giving '11/21(토) 06:00 KST'. KST is UTC + 9 h all
+ * year (no daylight saving time), so no Intl time zone is needed. The year is added, '2025/12/31(수) 18:00 KST', only
+ * when it differs from `contextYear` (the target window's year). Text that is not such an instant comes back unchanged.
+ */
+export function formatKstTime(value: string, contextYear: number): string {
+  const ms = instantMs(value);
+  if (!Number.isFinite(ms)) return value;
+  const kst = new Date(ms + KST_OFFSET_MS);
+  const year = kst.getUTCFullYear();
+  const two = (n: number) => String(n).padStart(2, '0');
+  const date = `${kst.getUTCMonth() + 1}/${kst.getUTCDate()}(${WEEKDAYS[kst.getUTCDay()]})`;
+  return `${year === contextYear ? '' : `${year}/`}${date} ${two(kst.getUTCHours())}:${two(kst.getUTCMinutes())} KST`;
+}
+
+/** The year a target window starts in, the context formatKstTime leaves out: '2026-11-24' gives 2026. */
+export function targetYear(target: Pick<HorizonHistory['targetWindow'], 'start'>): number {
+  return Number(target.start.slice(0, 4));
+}
+
+/** '마지막 뉴스 확인 11/23(월) 14:00 KST': the day card's line while the overnight news is not checked yet. */
+export function lastNewsCheckLine(checkedAt: string, contextYear: number): string {
+  return `${LAST_NEWS_CHECK_LABEL} ${formatKstTime(checkedAt, contextYear)}`;
+}
+
 export function horizonTitle(horizon: Horizon, target: HorizonHistory['targetWindow']): string {
   if (horizon === 'day') return target.phase === 'in_session' ? IN_SESSION_DAY_TITLE : `${HORIZON_LABELS.day} · ${formatSessionDate(target.start)}`;
   return `${HORIZON_LABELS.week} · ${formatSessionDate(target.start)}~${formatSessionDate(target.end)}`;
@@ -166,11 +211,19 @@ export function statsAge(computedAt: string, nowMs: number): StatsAge {
 // Card lines
 // ---------------------------------------------------------------------------
 
-/** Day card news line: the withheld cases name why, anything else counts the articles. */
+/**
+ * Day card news line: the withheld cases name why, anything else counts the articles. A case per reason and no
+ * default, so a new reason does not compile until its card line is chosen.
+ */
 export function dayNewsLine(signal: OvernightSignal): string {
-  if (signal.reason === 'no_overnight_news') return NO_OVERNIGHT_NEWS_MESSAGE;
-  if (signal.reason === 'all_neutral') return NEUTRAL_OVERNIGHT_NEWS_MESSAGE;
-  return overnightSummaryText(signal);
+  switch (signal.reason) {
+    case 'not_checked': return NOT_CHECKED_OVERNIGHT_MESSAGE;
+    case 'no_overnight_news': return NO_OVERNIGHT_NEWS_MESSAGE;
+    case 'all_neutral': return NEUTRAL_OVERNIGHT_NEWS_MESSAGE;
+    case 'conflicting':
+    case 'one_direction':
+      return overnightSummaryText(signal);
+  }
 }
 
 /** Week card news line over the related articles of the analysis's seven-day window. */
@@ -221,10 +274,12 @@ export function pastCasesLine(history: ReadyCompanyHistory, horizon: Horizon, ba
 /**
  * Both horizons from the analysis being shown: the day baseline is its overnight signal, the
  * week baseline the existing rule. Past cases may only lower a baseline (integrateOutlook).
+ * The analysis asOf is when its articles were gathered: one made before the overnight window
+ * opened (a browser reuses news for up to six hours) has not checked that window yet.
  */
 export function deriveHistoryView(analysis: NewsAnalysis, history: ReadyCompanyHistory, nowMs: number): HistoryView {
   const age = statsAge(history.dataAsOf.computedAt, nowMs);
-  const overnight = deriveOvernightSignal(analysis.articles, history.horizons.day.newsWindow ?? { start: 'x', end: 'y' });
+  const overnight = deriveOvernightSignal(analysis.articles, history.horizons.day.newsWindow ?? { start: 'x', end: 'y' }, analysis.asOf);
   const build = (horizon: Horizon, baseline: Signal, overnightSignal: OvernightSignal | null): HorizonView => {
     const h = history.horizons[horizon];
     const directional = baseline === 'positive' || baseline === 'negative';
@@ -243,6 +298,7 @@ export function deriveHistoryView(analysis: NewsAnalysis, history: ReadyCompanyH
       signalLabel: SIGNAL_LABELS[integrated.signal],
       validationLabel: validationBadge(h.validation, integrated.signal, analysis.company.region),
       newsLine: overnightSignal ? dayNewsLine(overnightSignal) : weekNewsLine(analysis),
+      lastCheckLine: overnightSignal?.reason === 'not_checked' ? lastNewsCheckLine(analysis.asOf, targetYear(h.targetWindow)) : null,
       pastLine: pastCasesLine(history, horizon, baseline, nowMs),
       integrationLine: integrationMessage(integrated.note, horizon),
       changeLine: integrated.changed ? `기준선 ${SIGNAL_LABELS[baseline]}에서 판단 유보로 낮췄습니다.` : null,
@@ -261,8 +317,21 @@ export function deriveHistoryView(analysis: NewsAnalysis, history: ReadyCompanyH
 // Evidence lines (② ③ ④)
 // ---------------------------------------------------------------------------
 
-export function outlookSectionTitle(horizon: Horizon): string {
-  return `③ ${HORIZON_LABELS[horizon]} 참고 전망(통합)`;
+/**
+ * The horizon's name in the evidence. While the target session is open the day card reads IN_SESSION_DAY_TITLE, so
+ * its evidence speaks of today's session too; any other phase, or no target, keeps the horizon label.
+ */
+export function evidenceHorizonLabel(horizon: Horizon, target?: Pick<HorizonHistory['targetWindow'], 'phase'>): string {
+  return horizon === 'day' && target?.phase === 'in_session' ? IN_SESSION_DAY_LABEL : HORIZON_LABELS[horizon];
+}
+
+/** '근거 보기 · 다음 거래일', '근거 보기 · 다음 주', or '근거 보기 · 오늘 장' during the session. */
+export function evidenceTitle(horizon: Horizon, target?: Pick<HorizonHistory['targetWindow'], 'phase'>): string {
+  return `${EVIDENCE_TITLE} · ${evidenceHorizonLabel(horizon, target)}`;
+}
+
+export function outlookSectionTitle(horizon: Horizon, target?: Pick<HorizonHistory['targetWindow'], 'phase'>): string {
+  return `③ ${evidenceHorizonLabel(horizon, target)} 참고 전망(통합)`;
 }
 
 export function outlookSummaryLine(view: HorizonView, statsPublic: boolean): string {

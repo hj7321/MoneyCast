@@ -328,7 +328,10 @@ export interface ShadowInput {
 /** toISOString text of an instant; text that does not parse is kept (the store check then rejects it). */
 const canonical = (text: string): string => { const ms = Date.parse(text); return Number.isFinite(ms) ? iso(ms) : text; };
 
-/** One record per horizon (day, then week) of what the screen would have shown at computeAt. */
+/**
+ * One record per horizon (day, then week) of what the screen would have shown at computeAt. Like the screen, the day
+ * signal takes the snapshot analysis's asOf as its last news check: one made before the window opened is not_checked.
+ */
 export function shadowRecordsFor(input: ShadowInput): ShadowRecord[] {
   const { snapshot, stats, computeAtMs } = input;
   const recordedAt = iso(computeAtMs);
@@ -341,7 +344,7 @@ export function shadowRecordsFor(input: ShadowInput): ShadowRecord[] {
     let baseline: Signal = 'withheld';
     let overnight: ShadowRecord['overnight'] = null;
     if (analysis && horizon === 'day') {
-      const signal = deriveOvernightSignal(analysis.articles, day.newsWindow);
+      const signal = deriveOvernightSignal(analysis.articles, day.newsWindow, analysis.asOf);
       baseline = signal.signal;
       overnight = { reason: signal.reason, evidence: signal.evidence, counts: { ...signal.counts } };
     } else if (analysis) baseline = deriveBaselineSignal(analysis);

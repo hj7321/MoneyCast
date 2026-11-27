@@ -1,13 +1,13 @@
 import { useEffect, useState, type JSX } from 'react';
 import {
   BACKFILL_SAMPLE_NOTE, BASIS_SECTION_TITLE, CASE_BASIS_NOTE, CASE_DIRECTION_TITLES, CASE_WINDOW_NOTES, CASES_SECTION_TITLE,
-  DIFFERENT_HORIZONS_NOTE, EVIDENCE_TITLE, EXPIRED_STATS_MESSAGE, GDELT_CREDIT, HISTORY_DISCLAIMER, HISTORY_LOADING_MESSAGE,
-  HISTORY_RETRY_LABEL, HISTORY_SECTION_TITLE, HISTORY_UNAVAILABLE_MESSAGE, HORIZON_LABELS, IDENTITY_UNVERIFIED_MESSAGE,
+  DIFFERENT_HORIZONS_NOTE, EXPIRED_STATS_MESSAGE, GDELT_CREDIT, HISTORY_DISCLAIMER, HISTORY_LOADING_MESSAGE,
+  HISTORY_RETRY_LABEL, HISTORY_SECTION_TITLE, HISTORY_UNAVAILABLE_MESSAGE, IDENTITY_UNVERIFIED_MESSAGE,
   MARKETAUX_TOP_NOTE, NEWS_WINDOW_LABEL, NO_HISTORY_MESSAGE, PARTIAL_NEWS_NOTE, PRICE_UNAVAILABLE_MESSAGE, RESULT_DEFINITIONS,
   STALE_STATS_LABEL, STATS_NOT_PUBLIC_MESSAGE,
-  caseListSummary, caseRefLine, caseStatsLines, coverageLine, deriveHistoryView, excludedLines, insufficientReasonLine,
-  outlookSectionTitle, outlookSummaryLine, overnightEvidenceLine, parseCompanyHistory, sampleLine, sourcesLine, targetLine,
-  topicCaseLines,
+  caseListSummary, caseRefLine, caseStatsLines, coverageLine, deriveHistoryView, evidenceTitle, excludedLines, formatKstTime,
+  insufficientReasonLine, outlookSectionTitle, outlookSummaryLine, overnightEvidenceLine, parseCompanyHistory, sampleLine,
+  sourcesLine, targetLine, targetYear, topicCaseLines,
   type CompanyHistory, type HistoryView, type Horizon, type HorizonView, type NewsAnalysis, type NewsTopicKey,
   type ReadyCompanyHistory,
 } from '@moneycast/core';
@@ -20,6 +20,8 @@ export const HISTORY_CACHE_TTL_MS = 10 * 60_000;
 const HORIZONS: readonly Horizon[] = ['day', 'week'];
 const EVIDENCE_ID = 'history-evidence';
 const GDELT_URL = 'https://www.gdeltproject.org';
+/** KST is UTC + 9 h all year (no daylight saving time), as formatKstTime assumes. */
+const KST_OFFSET_MS = 9 * 3_600_000;
 
 // Module state rather than component state: a request belongs to this module,
 // so unmounting a card only ignores the answer, and a remount shares it.
@@ -33,9 +35,6 @@ export function resetHistoryInsightCache(): void {
   pending.clear();
   generation += 1;
 }
-
-// Same format as NewsPanel; importing it from there would be a circular import.
-const formatTime = (value: string) => `${new Date(value).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} KST`;
 
 function cachedHistory(companyId: string): CompanyHistory | null {
   const entry = cache.get(companyId);
@@ -132,7 +131,7 @@ function readyContent(analysis: NewsAnalysis, history: CompanyHistory, selected:
       <div className="history-cards">{HORIZONS.map(horizon => card(view[horizon], horizon === selected, () => select(horizon)))}</div>
       <p className="history-note">{DIFFERENT_HORIZONS_NOTE}</p>
       <div className="history-evidence" id={EVIDENCE_ID}>
-        <h4>{`${EVIDENCE_TITLE} · ${HORIZON_LABELS[selected]}`}</h4>
+        <h4>{evidenceTitle(selected, history.horizons[selected].targetWindow)}</h4>
         {casesBlock(analysis, history, view, selected)}
         {outlookBlock(history, view, selected)}
         {basisBlock(analysis, history, view, selected)}
@@ -155,6 +154,7 @@ function card(item: HorizonView, selected: boolean, onSelect: () => void): JSX.E
       <span className="history-validation">{item.validationLabel}</span>
     </span>{' '}
     <span className="history-card-line">{item.newsLine}</span>{' '}
+    {item.lastCheckLine !== null && <><span className="history-card-line">{item.lastCheckLine}</span>{' '}</>}
     <span className="history-card-line">{item.pastLine}</span>
   </button>;
 }
@@ -204,8 +204,9 @@ function outlookBlock(history: ReadyCompanyHistory, view: HistoryView, horizon: 
   const item = view[horizon];
   const raw = history.horizons[horizon];
   const { direction } = item;
+  const year = targetYear(raw.targetWindow);
   return <div>
-    <h5>{outlookSectionTitle(horizon)}</h5>
+    <h5>{outlookSectionTitle(horizon, raw.targetWindow)}</h5>
     <span className="history-validation">{item.validationLabel}</span>
     <p>{outlookSummaryLine(item, view.statsPublic)}</p>
     {item.changeLine !== null && <p>{item.changeLine}</p>}
@@ -215,23 +216,35 @@ function outlookBlock(history: ReadyCompanyHistory, view: HistoryView, horizon: 
     {view.statsPublic && raw.directions !== null && (!raw.sampleOrigin || raw.sampleOrigin.includesBackfill) && <p>{BACKFILL_SAMPLE_NOTE}</p>}
     {view.partialNews && <p>{PARTIAL_NEWS_NOTE}</p>}
     <p>{targetLine(horizon, raw.targetWindow)}</p>
-    {horizon === 'day' && raw.newsWindow && <p>{`${NEWS_WINDOW_LABEL}: ${formatTime(raw.newsWindow.start)} ~ ${formatTime(raw.newsWindow.end)}`}</p>}
+    {horizon === 'day' && raw.newsWindow && <p>{`${NEWS_WINDOW_LABEL}: ${formatKstTime(raw.newsWindow.start, year)} ~ ${formatKstTime(raw.newsWindow.end, year)}`}</p>}
     {horizon === 'day' && view.day.overnight && <p>{overnightEvidenceLine(view.day.overnight)}</p>}
   </div>;
+}
+
+/**
+ * A ledger bound as a Korean calendar date, like every other time in the outlook. The server sends publication
+ * instants, whose UTC date is the day before for news from 00:00 to 09:00 KST; a bound sent as a date stays as sent.
+ */
+function kstDate(value: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms + KST_OFFSET_MS).toISOString().slice(0, 10) : value.slice(0, 10);
 }
 
 /** ④ Definitions, times and sources. A market without permission shows none of its numbers. */
 function basisBlock(analysis: NewsAnalysis, history: ReadyCompanyHistory, view: HistoryView, horizon: Horizon): JSX.Element {
   const { coverage, dataAsOf, sources } = history;
+  // Every instant in KST; one in the target window's year leaves the year out.
+  const year = targetYear(history.horizons[horizon].targetWindow);
   return <div>
     <h5>{BASIS_SECTION_TITLE}</h5>
     <p>{RESULT_DEFINITIONS[horizon]}</p>
-    <p>{`기사 기준 ${formatTime(analysis.asOf)}`}</p>
+    <p>{`기사 기준 ${formatKstTime(analysis.asOf, year)}`}</p>
     {!view.statsPublic ? <p>{STATS_NOT_PUBLIC_MESSAGE}</p> : <>
       <p>{`가격 기준일 ${dataAsOf.lastPriceDate ?? '없음'}`}</p>
-      <p>{`통계 계산 ${formatTime(dataAsOf.computedAt)}${view.statsAge === 'fresh' ? '' : ` · ${STALE_STATS_LABEL}`}`}</p>
+      <p>{`통계 계산 ${formatKstTime(dataAsOf.computedAt, year)}${view.statsAge === 'fresh' ? '' : ` · ${STALE_STATS_LABEL}`}`}</p>
       {dataAsOf.ledgerFrom !== null && dataAsOf.ledgerTo !== null &&
-        <p>{`기사 기록 기간 ${dataAsOf.ledgerFrom.slice(0, 10)} ~ ${dataAsOf.ledgerTo.slice(0, 10)}`}</p>}
+        <p>{`기사 기록 기간 ${kstDate(dataAsOf.ledgerFrom)} ~ ${kstDate(dataAsOf.ledgerTo)}`}</p>}
       <p>{coverageLine(coverage)}</p>
       {excludedLines(coverage.excluded).map((line, index) => <p key={index}>{line}</p>)}
       <p>{sourcesLine(sources)}</p>
