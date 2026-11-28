@@ -167,6 +167,9 @@ MARKETAUX_API_TOKEN=발급받은_서버_전용_토큰
 | `LLM_PROVIDERS` | 루트 `.env`·Vercel | 비우면 두 모델 모두 사용. `gemini`처럼 하나만 적으면 다른 모델을 끄며, 이때 AI 판단은 모두 잠정으로 남음 |
 | `GOAL_AI_PROVIDERS` | 루트 `.env`·Vercel | 자유 목표 설명 AI 정리. **비우면 꺼짐**(기본). `cloudflare`(권장) 또는 `cloudflare,gemini`처럼 시도 순서대로 적음. 키는 위 AI 키를 함께 씀 |
 | `GOAL_AI_DAILY_LIMIT` | 루트 `.env`·Vercel | 인스턴스당 UTC 하루 목표 정리 모델 호출 수, 기본 100 |
+| `NEWS_ASK_PROVIDERS` | 루트 `.env`·Vercel | 뉴스 화면의 AI 질문 기능("AI에게 물어보기"). **비우면 꺼짐**(기본). `gemini`만 읽고 그 밖의 값은 꺼짐. 금융감독원 문의(계획 A-14) 전까지 운영에서는 비워 둠 |
+| `NEWS_ASK_GEMINI_API_KEY` | 루트 `.env`·Vercel(서버 전용) | 질문 기능 전용 Gemini 키. 기사 분류용 `GEMINI_API_KEY`와 **다른 Google AI Studio 프로젝트**에서 발급(무료 한도가 프로젝트 단위라 같은 프로젝트의 키는 한도를 함께 씀). `GEMINI_API_KEY`로 대신하지 않으며, 없거나 `GEMINI_API_KEY`와 같은 값이면 질문 기능은 꺼짐 |
+| `NEWS_ASK_DAILY_LIMIT` | 루트 `.env`·Vercel | 인스턴스당 한국 시간 하루 질문 수, 기본 100. 질문이 처음 모델을 부를 때 셈(뉴스를 읽지 못했거나 모델이 쉬는 중이라 모델까지 가지 못한 질문은 세지 않음). 질문 1건당 AI 호출은 최대 4회 |
 | `PORT` | 루트 `.env` | API 포트, 기본 8787 |
 | `HOST` | 루트 `.env` | 바인딩 주소, 기본 127.0.0.1 |
 | `EXPO_PUBLIC_API_URL` | `apps/mobile/.env` | 모바일에 공개되는 API 주소만 지정 |

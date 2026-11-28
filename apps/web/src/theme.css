@@ -415,3 +415,49 @@ button, .news-promo { transition: transform .17s; }
   .history-card { padding: 13px 14px; }
   .history-evidence { padding: 14px; }
 }
+
+/* AI questions: a card of its own below the analysis. Every colour is a theme token, so these rules serve both themes. */
+.ask-card { min-width: 0; margin-top: 18px; padding: 22px 24px; }
+.ask-title { color: var(--text-primary); font-size: 20px; line-height: 1.5; overflow-wrap: anywhere; }
+.ask-intro { margin-top: 6px; color: var(--supporting-text); font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
+.ask-thread { display: grid; gap: 12px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.ask-thread:not(:empty) { margin-top: 18px; }
+.ask-item { display: grid; gap: 10px; min-width: 0; padding: 14px 16px; border: 1px solid var(--line-secondary); border-radius: 10px; background: var(--surface-secondary); background-image: var(--panel-gradient); }
+.ask-item > * { min-width: 0; }
+.ask-question { justify-self: start; max-width: 100%; padding: 8px 12px; border-radius: 10px; background: var(--surface-well); color: var(--text-primary); font-size: 15px; font-weight: 650; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-answer-label { justify-self: start; max-width: 100%; padding: 1px 9px; border: 1px solid var(--line-secondary); border-radius: 999px; color: var(--supporting-text); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.ask-answer { color: var(--text-primary); font-size: 16px; line-height: 1.75; overflow-wrap: anywhere; }
+.ask-evidence { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.ask-evidence h3 { color: var(--supporting-text); font-size: 14px; font-weight: 650; line-height: 1.6; }
+.ask-evidence ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ask-evidence li { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.ask-evidence a { color: var(--accent); font-size: 15px; line-height: 1.6; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.ask-evidence span { color: var(--supporting-text); font-size: 14px; line-height: 1.6; }
+.ask-limits { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; color: var(--supporting-text); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.ask-state { color: var(--text-primary); font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; }
+.ask-suggestions { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; margin-top: 16px; }
+.ask-item .ask-suggestions { margin-top: 0; }
+/* A suggestion that needs two lines on a phone breaks between words, not inside one, and becomes a rounded box instead of an oval; one line is still a full pill (36px high, 18px radius). */
+.ask-suggestion { min-width: 0; max-width: 100%; min-height: 36px; margin: 0; padding: 6px 12px; border: 1px solid var(--line-secondary); border-radius: 18px; background: var(--surface-secondary); color: var(--text-primary); font: inherit; font-size: 14px; line-height: 1.5; text-align: left; word-break: keep-all; overflow-wrap: anywhere; cursor: pointer; }
+.ask-suggestion:hover:not(:disabled) { border-color: var(--accent); }
+.ask-suggestion:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ask-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; column-gap: 12px; min-width: 0; margin-top: 18px; }
+.ask-form > label { grid-column: 1; grid-row: 1; min-width: 0; color: var(--text-primary); font-size: 15px; font-weight: 650; line-height: 1.6; }
+.ask-count { grid-column: 2; grid-row: 1; color: var(--supporting-text); font-size: 13px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.ask-input { grid-column: 1 / -1; display: block; width: 100%; box-sizing: border-box; min-width: 0; margin: 6px 0 0; padding: 10px 12px; border: 1px solid var(--line-secondary); border-radius: 8px; background: var(--surface-well); color: var(--text-primary); caret-color: var(--accent); font: inherit; font-size: 16px; line-height: 1.6; resize: vertical; overflow-wrap: anywhere; }
+.ask-input::placeholder { color: var(--supporting-text); opacity: 1; }
+.ask-input:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
+.ask-input[aria-invalid="true"] { border-color: var(--chart-target-text); }
+.ask-privacy { grid-column: 1 / -1; min-width: 0; margin-top: 8px; color: var(--supporting-text); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.ask-error { grid-column: 1 / -1; min-width: 0; color: var(--chart-target-text); font-size: 14px; font-weight: 650; line-height: 1.7; overflow-wrap: anywhere; }
+.ask-error:not(:empty) { margin-top: 6px; }
+.ask-submit { grid-column: 1 / -1; justify-self: start; min-height: 40px; margin-top: 12px; padding: 8px 18px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent); color: var(--surface); font: inherit; font-size: 15px; font-weight: 650; cursor: pointer; }
+.ask-submit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 760px) {
+  .ask-card { padding: 20px 16px; }
+  .ask-item { padding: 12px 13px; }
+  .ask-submit { justify-self: stretch; }
+}
+@media (max-width: 360px) {
+  .ask-card { padding-inline: 13px; }
+}

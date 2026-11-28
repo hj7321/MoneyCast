@@ -378,6 +378,8 @@ export interface NewsAnalysis {
   ai?: AiStatus;
   /** Hint that /api/news/history may hold data for this company; absent keeps the screen as before. */
   historyAvailable?: boolean;
+  /** Hint that /api/news/ask may answer questions about this company; absent keeps the screen as before. */
+  askAvailable?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -560,6 +562,7 @@ export const INVESTMENT_NOTICE = '뉴스는 미래 주가의 방향이나 원인
 export { createNewsCache, NEWS_CACHE_TTL_MS, NEWS_CACHE_ANALYSIS_VERSION, NEWS_LAST_GOOD_MAX_AGE_MS, type NewsCacheStorage } from './news-cache.js';
 export * from './news-history.js';
 export * from './news-history-view.js';
+export * from './news-ask.js';
 export { NEWS_TOPICS, NEWS_TOPIC_KEYS, classifyNewsTopics, isNewsTopicKey, newsTopicLabel, type NewsTopicKey } from './news-topics.js';
 export { COMPANY_NEWS_IDENTITY, matchesCompanyTitle, type CompanyNewsIdentity } from './news-identity.js';
 export {
