@@ -197,7 +197,7 @@ const GUARDED: ReadonlyArray<{ output: RegExp; source?: RegExp }> = [
   { output: /\b(will|likely to|expected to)\s+(rise|fall|gain|drop|surge|climb|decline|rebound)\b/i },
 ];
 
-function guarded(output: string, source: string): boolean {
+export function guarded(output: string, source: string): boolean {
   return GUARDED.some(rule => rule.output.test(output) && !(rule.source && rule.source.test(source)));
 }
 

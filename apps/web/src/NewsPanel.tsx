@@ -4,6 +4,7 @@ import { Icon } from './icons';
 import { CompanyAvatar } from './CompanyAvatar';
 import { loadCachedNews, peekCachedNews, peekLastGoodNews } from './news-cache';
 import { HistoryInsight } from './HistoryInsight';
+import { AskPanel } from './AskPanel';
 
 const sentimentLabels = { positive: '긍정', negative: '부정', neutral: '중립', unclassified: '미분류' };
 const VISIBLE_ARTICLES = 8;
@@ -144,6 +145,7 @@ export function NewsPanel() {
     ? { asOf: shown.asOf, reason: shown === fallback ? error || analysis?.message : shown.message } : null;
   // The outlook pairs with today's own analysis only: never an old result, never without the server's hint.
   const showHistory = !!shown && !stale && shown.company.id === company.id && shown.historyAvailable === true && (shown.status === 'ready' || shown.status === 'insufficient');
+  const showAsk = !!shown && !stale && shown.company.id === company.id && shown.askAvailable === true && (shown.status === 'ready' || shown.status === 'insufficient');
   const marketaux = /marketaux/i.test(`${shown?.provider ?? ''} ${shown?.message ?? ''}`);
   const aiOutput = !!shown?.articles.some(article => article.summary || article.aiJudgements);
   // Articles both models judged unrelated are folded below the list; factors never point at them.
@@ -202,6 +204,7 @@ export function NewsPanel() {
           <span>주간은 달력상 월~금이며 거래소 휴장일은 반영하지 않습니다.</span>
         </div>}
       </section>
+      {showAsk && <AskPanel key={shown.company.id} analysis={shown}/>}
       <div className="investment-notice"><Icon name="info" size={19}/><p>{INVESTMENT_NOTICE}</p></div>
     </div>
   </div>;

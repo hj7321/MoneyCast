@@ -197,3 +197,7 @@
 @media (max-width: 760px) {
   :root[data-theme="light"] .history-cards { grid-template-columns: 1fr; }
 }
+
+/* AI questions: the shared rules carry the layout and take every colour from the light tokens; on the white light card the turns sit on the soft surface and the question box is white like the other light inputs. */
+:root[data-theme="light"] .ask-item { background-color: var(--surface-soft); }
+:root[data-theme="light"] .ask-input { background-color: var(--surface); }

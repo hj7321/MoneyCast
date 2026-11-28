@@ -14,6 +14,7 @@
 | `GET /api/cron/history[?step=ledger]` | 과거 데이터 작업. 인증은 수집과 같음(`CRON_SECRET` 없음 503, 인증 실패 401, GET 외 405). `HISTORY_INSIGHTS`가 `off`면 `{ "status": "off" }`만 반환하고 아무것도 읽거나 쓰지 않음. 그 밖에는 작업 요약(`status`·`errors`·쓰기 내역, 비밀값 없음). 켜져 있을 때 `step`은 `ledger`만 허용(그 외 400). Vercel Cron이 보내는 `x-vercel-cron-schedule`이 장부 단계 시각(`0 23 * * *`·`0 12 * * *`)이면 `step`이 없어도 장부 단계로 돎(Vercel 문서가 cron 경로의 쿼리 전달을 보장하지 않아서). 작업 상태 `failed`는 500, `not_configured`는 503 |
 | `GET /api/goals/clarify` | 자유 목표 설명 AI 정리를 쓸 수 있는지(`enabled`)와 모델 목록. 아래 [목표 설명 AI 정리](#목표-설명-ai-정리선택) 참고 |
 | `POST /api/goals/clarify` | 본문 `{ "text": "설명" }`(JSON, 2KB 이하). 설명에서 찾은 분류·이름·금액·기간·인원·일정 |
+| `GET/POST /api/news/ask` | AI 질문 기능. GET은 쓸 수 있는지(`enabled`)와 제공사(`AskAvailability`), POST는 본문 `{ "companyId": "…", "question": "…" }`(JSON, 4KB 이하, 질문 300자 이내)에 대한 답(`AskAnswer`). 주소당 10분에 5회(429), 인스턴스당 한국 시간 하루 `NEWS_ASK_DAILY_LIMIT`회(기본 100). 꺼져 있으면 POST는 본문을 읽지 않고 503. 응답은 모두 `no-store`. 아래 [AI 질문 기능](#ai-질문-기능선택) 참고 |
 
 회사를 선택하지 않았거나 ID가 일치하지 않으면 400, 지원하지 않는 메서드는 405입니다. 뉴스 상태는 HTTP 200 응답의 `status`로 구분합니다: `not_configured`, `insufficient`, `ready`, `error`, `rate_limited`. 데이터가 없으면 `articles`는 빈 배열입니다. 제공자 오류 응답 원문과 비밀키는 클라이언트로 전달하지 않습니다. 예약 수집 경로는 `CRON_SECRET`이 없으면 503, 인증값이 없거나 다르면 401이며(상수 시간 비교), 응답은 캐시하지 않습니다.
 
@@ -126,6 +127,7 @@ NEWS_API_KEY=your-server-only-key
 | `sources` | 출처별 상태(`skipped`는 예약 수집 때만 조회하는 출처)·기사 수·재시도 시각 |
 | `servedFrom`, `refreshAttemptedAt` | `stale`이면 새로 고침이 실패해 이전 결과를 보여주는 중이며, 실패한 시도 시각을 함께 둠 |
 | `ai` | 모델별 상태(`ok`·`idle`·`not_configured`·`rate_limited`·`error`·`timeout`)와 판단 건수, 두 모델이 모두 관련 없다고 본 기사 수(`unrelatedCount`), 프롬프트 버전 |
+| `askAvailable` | 질문 기능이 켜져 있고(`NEWS_ASK_PROVIDERS`와 전용 키) 결과가 `ready`·`insufficient`의 새 결과(`stale` 아님)일 때만 복사본에 붙는 `true`. 웹은 이 힌트가 있을 때만 `GET /api/news/ask`를 페이지당 한 번 부름. 꺼져 있으면 `/api/news` 응답은 이전과 같음 |
 
 기사에는 선택 필드로 `description`(매체 설명), `rationaleLines`(분류 근거 1~5줄), `topics`(고정 주제 키), `sourceProvider`, `timeKind`(`published`·`seen`), `identity`(`entity_verified`·`name_match`), `alsoReportedBy`, `summary`(AI 요약과 그 기준 `title_description`·`title_only`), `aiJudgements`(모델별 판단), `aiConsensus`(`confirmed`·`provisional`·`withheld`·`pending`), `aiRelevance`(`unrelated`: 두 모델 모두 관련 없음)가 붙습니다. 공용 검증기는 `llm` 분류가 `confirmed`일 때만 방향을 갖도록 하고, `aiRelevance`는 두 모델의 판단이 모두 '관련 없음'일 때만 허용하며, 종합 문장이 관련성 낮은 기사를 뺀 실제 기사 ID만 가리키는지 확인합니다. 이 필드가 없는 v2 응답도 그대로 유효합니다.
 
@@ -195,6 +197,21 @@ Gemini 키나 Cloudflare 키가 있으면 모든 기사를 두 모델이 따로 
 - Vercel Node 런타임(`@vercel/node` 28.0.0에서 확인)은 함수를 부르기 전에 요청 본문을 모두 읽고, `data`·`end` 리스너와 `read()`에만 다시 넘겨 줍니다. 그래서 본문은 `for await`가 아니라 `data`·`end` 이벤트로 읽습니다(`for await`로 읽으면 이미 닫힌 스트림이라 빈 본문이 되어 모든 요청이 400이 됩니다). 이 동작을 흉내 낸 테스트가 `server/goal-clarify.test.ts`에 있습니다.
 - 실제 Preview 확인: Preview는 Vercel 로그인으로 보호되므로, 로그인한 브라우저에서 Preview 주소를 열고 개발자 도구 콘솔에서 `await (await fetch('/api/goals/clarify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: '' }) })).json()`를 실행합니다. `status: 'invalid_input'`이면 본문을 읽은 것이고, `요청 형식이 올바르지 않습니다.`(400)이면 읽지 못한 것입니다. 빈 설명은 모델을 부르기 전에 거절되므로 AI 설정과 관계없이 한도를 쓰지 않습니다. 명령줄에서는 Vercel 프로젝트 설정의 자동화용 보호 우회 토큰을 `x-vercel-protection-bypass` 헤더로 보내 같은 요청을 할 수 있습니다.
 - 평가: `npm run goal:check`가 예시 설명 19건을 같은 프롬프트와 검증으로 모델마다 한 번씩 보내 분류·값 일치와 버린 사유를 집계합니다([루트 README](../README.md) 참고). 아직 실제 키로 실행한 기록은 없습니다.
+
+## AI 질문 기능(선택)
+
+뉴스 화면의 "AI에게 물어보기"가 쓰는 경로입니다(7단계). 선택한 회사의 현재 뉴스와 분류 근거, 과거 사례 통계, 두 기간 전망이 그렇게 나온 이유, 데이터의 기준과 한계, 용어를 화면에 있는 자료로만 설명합니다.
+
+- **기본은 꺼짐**입니다. `NEWS_ASK_PROVIDERS=gemini`이고 질문 기능 전용 키 `NEWS_ASK_GEMINI_API_KEY`가 있을 때만 켜지며, 그 밖의 값(`cloudflare` 포함)은 꺼짐입니다. 운영에서는 금융감독원 문의(계획 A-14) 전까지 비워 둡니다.
+- **별도 키**: 기사 분류용 `GEMINI_API_KEY`와 다른 Google AI Studio 프로젝트의 키로 만든 자기 연결을 씁니다. Gemini 무료 한도는 프로젝트 단위라 같은 프로젝트의 키는 한도를 함께 쓰기 때문입니다. `GEMINI_API_KEY`로 대신하지 않고, 429 뒤에 쉬는 시간도 기사 분류와 따로 셉니다. 모델은 기본값(`gemini-3.5-flash-lite`)이며 `GEMINI_MODEL`을 따르지 않습니다. `NEWS_ASK_GEMINI_API_KEY`가 `GEMINI_API_KEY`와 같은 값이면 한도를 함께 쓰게 되므로 질문 기능은 꺼진 채로 둡니다(다른 프로젝트의 키인지는 서버가 알 수 없어, 값이 같은 경우만 막습니다).
+- **흐름**: 서버가 현재 분석과 두 기간 전망(`get_outlook`), 기사 목록(`get_articles`)을 먼저 붙이고, 모델은 바로 답하거나 읽기 전용 도구(`get_history`·`get_cases`·`explain_term`·`get_data_status` 포함 6개)를 하나씩 고릅니다. 질문 1건당 모델 호출은 최대 4회(도구 최대 3번), 전체 20초(호출 1회 8초) 안이며 남은 시간이 3초보다 적으면 부르지 않습니다. 뉴스와 과거 기록 읽기도 이 20초 안에 들어가며, 읽기가 끝나지 않아 모델을 한 번 부를 시간이 남지 않으면 `unavailable`(`timeout`)로 끝냅니다. 뉴스는 `/api/news`와 같은 경로로, 과거 기록은 `/api/news/history`와 같은 계산으로 질문마다 한 번 읽습니다. 통계 비공개 시장에서는 `get_history`·`get_cases`가 `{ "status": "private" }`만 돌려줍니다.
+- **자리표시자 방식**: 모델은 값을 보지 못하고 `{ "id": "F7", "label": "관련 기사 수" }`처럼 이름만 받습니다. 답에는 숫자를 쓸 수 없고 `{F7}` 같은 토큰만 쓰며, 서버가 모델이 쓴 문장 그대로를 검사한 뒤 코드가 계산한 값으로 채웁니다. 숫자(전각과 다른 문자 체계 포함)와 글로 쓴 숫자(`세 건`·`이십 건` 같은 한글 수사, 한자 숫자, 영어 단위, `ASK_NUMBER_WORDS`), 토큰에 붙인 부호·물결표나 붙여 쓴 토큰(`-{F3}`, `{F1}~{F2}`, `ASK_TOKEN_SIGNS`), 없는 토큰이나 잘못된 중괄호, 300자 초과, 권유·전망 표현(`guarded`)과 질문 기능의 추가 금지어(`ASK_EXTRA_FORBIDDEN`), 쉬운 말로 쓴 사고팔기 권유와 앞으로의 주가 예측(`ASK_ADVICE_WORDS`), 링크와 이메일 주소(`ASK_LINKS`), 전망 이름을 직접 쓰거나 바꿔 쓴 답(`ASK_SIGNAL_WORDS`), 네 번째 호출에서도 도구를 고른 답은 버리고 코드의 정해진 문장으로 답합니다(`by: "template"`). 근거 링크는 모델이 본 기사·사례 id(`A1`·`C1`)로만 고르고 제목을 문장에 넣지 않습니다.
+- **거절**: 사거나 팔지·투자 시점이나 금액, 목표 가격, 개인 사정 상담, 목록의 다른 회사는 코드가 정해진 규칙으로 먼저 거절합니다(`refused`, 모델 호출과 하루 한도를 쓰지 않음). 규칙은 보이지 않는 문자를 지운 질문에 적용합니다. 목록에 없는 회사와 관련 없는 주제는 모델도 거절할 수 있으며, 이때도 거절 코드만 쓰고 모델이 쓴 문장은 버립니다. 화면은 코드마다 정해진 문구를 보여 줍니다.
+- **실패**: 모델 오류·429·시간 초과는 `unavailable`(503)이고 화면에는 "지금은 질문 기능을 쓸 수 없습니다"만 나옵니다. 이때는 정해진 문장으로 대신하지 않습니다. 뉴스가 오류·호출 제한이거나 이전 결과(`stale`)이면 `unavailable`(`news_unavailable`)입니다.
+- **한도**: 질문 300자, 본문 4KB(초과 413), 주소당 10분에 5회(429, 목표 설명 정리와 따로 셈), 인스턴스당 한국 시간 하루 `NEWS_ASK_DAILY_LIMIT`회(기본 100) 질문입니다. 하루 한도는 질문 수를 세므로 인스턴스당 모델 호출은 많아야 하루 400회입니다. 한도는 뉴스를 읽기 전에 확인하고 질문이 처음 모델을 부르기 직전에 셉니다. 뉴스를 읽지 못했거나 모델이 429 뒤 쉬는 중이거나 시간이 모자라 모델까지 가지 못한 질문은 세지 않습니다. 둘 다 인스턴스 메모리 기준이라 서버리스 환경에서는 최선 노력 수준입니다.
+- **개인정보와 로그**: 전화번호·이메일·계좌번호처럼 보이는 내용이 있으면(점·대시·괄호·보이지 않는 문자로 끊어 쓴 번호와 `02-123-4567` 같은 9자리 전화번호 포함, `askHasPersonalData`) 보내지 않고 `invalid_input`(`personal_data`)을 돌려줍니다. 화면은 이전 대화 없이 `{ companyId, question }`만 보내고, 대화는 화면 상태에만 있으며 서버에 저장하지 않습니다. 질문 본문·기사 제목·모델이 쓴 문장·키·오류 메시지는 로그에 남기지 않고, 질문마다 `news_ask status=answered by=ai reason=- calls=2 tools=1 note=-`처럼 정해진 코드와 건수만 한 줄 남깁니다. Gemini 무료 등급은 입력이 Google 제품 개선에 쓰이고 사람이 검토할 수 있어, 화면의 입력란 옆에 질문이 Google로 전송된다는 안내를 둡니다.
+- **응답 코드**: 답·거절·질문 입력 오류(`empty`·`too_long`·`personal_data`)는 200, 형식 오류와 알 수 없는 회사는 400, JSON이 아니면 415, 4KB 초과는 413, 한도는 429, 꺼짐과 사용 불가는 503입니다. 모든 POST 응답 본문은 `AskAnswer`이고 GET·POST 모두 `no-store`이며, 그 밖의 메서드는 405입니다.
+- **점검**: `npm run ask:check -- --live`는 고정 질문 30개(답할 질문 10, 거절 10, 지시 주입 5, 경계 5)를 4초 간격으로 실제 Gemini에 보내고, 질문마다 번호·기대 분류·상태·작성 주체·사유·호출 수만 출력합니다(키와 모델 문장은 출력하지 않음). 뉴스와 가격 제공자는 부르지 않습니다. 실제 AI를 부르므로 승인 뒤에만 실행하며(8단계), `--live` 없이 실행하면 안내만 하고 끝납니다. 아직 실행한 기록은 없습니다.
 
 ## 로컬 연결 확인 명령
 

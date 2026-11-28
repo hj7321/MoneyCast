@@ -1,12 +1,17 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { companies, searchCompanies, NEWS_CACHE_TTL_MS, type NewsAnalysis } from '../packages/core/src/index.js';
+import {
+  ASK_BODY_LIMIT_BYTES, NEWS_ASK_VERSION, companies, searchCompanies, NEWS_CACHE_TTL_MS, type AskProviderId, type NewsAnalysis,
+} from '../packages/core/src/index.js';
 import { collectNews } from './collect.js';
 import { createGoalClarifier, type GoalClarifier } from './goal-clarify.js';
 import { createHistoryService, historyRunLogLine, parseHistoryMode, type HistoryService } from './history-job.js';
 import { createHistoryServe, withHistoryHint, type HistoryServe } from './history-serve.js';
-import { createAiClassifier } from './llm.js';
+import { createAiClassifier, type LlmClient } from './llm.js';
 import { createLlmClients, createLlmJudges } from './llm-judges.js';
+import {
+  ASK_REQUESTS_PER_WINDOW, ASK_WINDOW_MS, askHttpStatus, createAskGeminiClient, createNewsAsk, withAskHint, type NewsAsk,
+} from './news-ask.js';
 import { createNewsProvider } from './news-provider.js';
 import { createNewsService } from './service.js';
 import { createBlobSnapshotStore } from './snapshot-store.js';
@@ -21,6 +26,10 @@ interface HandlerOptions {
   history?: HistoryService | null;
   /** GET /api/news/history. Defaults to the Blob-backed reader, built without I/O and reading only when asked. */
   historyServe?: HistoryServe;
+  /** GET/POST /api/news/ask. Defaults to the service from NEWS_ASK_PROVIDERS with its own Gemini client (NEWS_ASK_GEMINI_API_KEY). */
+  ask?: NewsAsk;
+  /** Test seam: the ask models used when `ask` is not given. */
+  askClients?: Partial<Record<AskProviderId, LlmClient>>;
 }
 
 /**
@@ -57,17 +66,17 @@ export function createDefaultNewsService(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /** Requests per client address within a sliding window, kept in this instance's memory only. */
-function createRequestLimiter(clock: () => number) {
+function createRequestLimiter(clock: () => number, limit = GOAL_REQUESTS_PER_WINDOW, windowMs = GOAL_WINDOW_MS) {
   const hits = new Map<string, number[]>();
   return (key: string): number | null => {
     const now = clock();
-    const recent = (hits.get(key) ?? []).filter(time => time > now - GOAL_WINDOW_MS);
-    if (recent.length >= GOAL_REQUESTS_PER_WINDOW) {
+    const recent = (hits.get(key) ?? []).filter(time => time > now - windowMs);
+    if (recent.length >= limit) {
       hits.set(key, recent);
-      return recent[0]! + GOAL_WINDOW_MS;
+      return recent[0]! + windowMs;
     }
     hits.set(key, [...recent, now]);
-    if (hits.size > 1_000) for (const [address, times] of hits) if (times.every(time => time <= now - GOAL_WINDOW_MS)) hits.delete(address);
+    if (hits.size > 1_000) for (const [address, times] of hits) if (times.every(time => time <= now - windowMs)) hits.delete(address);
     return null;
   };
 }
@@ -85,10 +94,10 @@ function clientAddress(request: IncomingMessage): string {
  * the handler runs and replays the body only to those listeners, so async
  * iteration would see an empty, already destroyed stream there.
  */
-async function readJsonBody(request: IncomingMessage): Promise<{ value: unknown } | { status: 400 | 413 | 415 }> {
+async function readJsonBody(request: IncomingMessage, limitBytes = GOAL_BODY_LIMIT_BYTES): Promise<{ value: unknown } | { status: 400 | 413 | 415 }> {
   if (!/^application\/json\b/i.test(request.headers['content-type'] ?? '')) return { status: 415 };
   const declared = Number(request.headers['content-length']);
-  if (Number.isFinite(declared) && declared > GOAL_BODY_LIMIT_BYTES) {
+  if (Number.isFinite(declared) && declared > limitBytes) {
     request.resume();
     return { status: 413 };
   }
@@ -98,7 +107,7 @@ async function readJsonBody(request: IncomingMessage): Promise<{ value: unknown 
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
       // The rest keeps flowing and is dropped.
-      if (size > GOAL_BODY_LIMIT_BYTES) resolve({ status: 413 });
+      if (size > limitBytes) resolve({ status: 413 });
       else chunks.push(chunk);
     });
     request.on('end', () => resolve({ body: Buffer.concat(chunks) }));
@@ -112,6 +121,14 @@ async function readJsonBody(request: IncomingMessage): Promise<{ value: unknown 
   } catch {
     return { status: 400 };
   }
+}
+
+/** The ask body: two strings within bounds (other keys are ignored); anything else is a bad request. */
+function askBody(value: unknown): { companyId: string; question: string } | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const { companyId, question } = value as Record<string, unknown>;
+  return typeof companyId === 'string' && companyId.length <= 40 && typeof question === 'string' && question.length <= 4_096
+    ? { companyId, question } : null;
 }
 
 /** Vercel Cron sends `Authorization: Bearer <CRON_SECRET>`; compared in constant time. */
@@ -147,7 +164,13 @@ export function createRequestHandler(service?: NewsService, options: HandlerOpti
   const goals = options.goals ?? defaults?.goals ?? createGoalClarifier(createLlmClients(env), env);
   const history = options.history ?? defaults?.history ?? null;
   const historyServe = options.historyServe ?? createHistoryServe(env, options.clock ? { clock: options.clock } : {});
+  // Built without I/O; NEWS_ASK_PROVIDERS and the ask key decide whether it is enabled.
+  const ask = options.ask ?? createNewsAsk({
+    news, historyServe, clients: options.askClients ?? { gemini: createAskGeminiClient(env) }, env, ...(options.clock ? { clock: options.clock } : {}),
+  });
   const limited = createRequestLimiter(options.clock ?? Date.now);
+  // A budget of its own: goal clarification and questions never use up each other's.
+  const askLimited = createRequestLimiter(options.clock ?? Date.now, ASK_REQUESTS_PER_WINDOW, ASK_WINDOW_MS);
   return async (request: IncomingMessage, response: ServerResponse) => {
     try {
       const url = new URL(request.url || '/', 'http://localhost');
@@ -172,6 +195,28 @@ export function createRequestHandler(service?: NewsService, options: HandlerOpti
             retryAt: new Date(retryAt).toISOString(), message: '요청이 많아요. 잠시 후 다시 시도해 주세요.' });
         }
         return send(response, 200, await goals.clarify((body.value as { text: string }).text));
+      }
+      if (url.pathname === '/api/news/ask') {
+        if (request.method === 'GET') return send(response, 200, ask.availability());
+        if (request.method !== 'POST') return send(response, 405, { error: 'GET 또는 POST 요청만 지원합니다.' });
+        // Off: answered before the body is read.
+        if (!ask.availability().enabled) {
+          request.resume();
+          return send(response, 503, { version: NEWS_ASK_VERSION, status: 'not_configured' });
+        }
+        const body = await readJsonBody(request, ASK_BODY_LIMIT_BYTES);
+        if ('status' in body) {
+          return send(response, body.status, { version: NEWS_ASK_VERSION, status: 'invalid_input', reason: body.status === 413 ? 'too_large' : 'bad_request' });
+        }
+        const fields = askBody(body.value);
+        if (!fields) return send(response, 400, { version: NEWS_ASK_VERSION, status: 'invalid_input', reason: 'bad_request' });
+        const retryAt = askLimited(clientAddress(request));
+        if (retryAt !== null) {
+          return send(response, 429, { version: NEWS_ASK_VERSION, status: 'rate_limited', scope: 'ip', retryAt: new Date(retryAt).toISOString() });
+        }
+        // Never throws; every answer is an AskAnswer with its own status code.
+        const answer = await ask.answer(fields);
+        return send(response, askHttpStatus(answer), answer);
       }
       if (request.method !== 'GET') return send(response, 405, { error: 'GET 요청만 지원합니다.' });
       if (url.pathname === '/api/health') return send(response, 200, { status: 'ok', service: 'MoneyCast API' });
@@ -217,8 +262,10 @@ export function createRequestHandler(service?: NewsService, options: HandlerOpti
         const company = companies.find(item => item.id === id);
         if (!company) return send(response, 400, { error: '검색 결과에서 회사와 거래소를 선택해 주세요.' });
         const analysis = await news.getAnalysis(company);
-        // The hint is added to a copy only while HISTORY_INSIGHTS is on; stats.json is never read here.
-        return send(response, 200, withHistoryHint(analysis, parseHistoryMode(env.HISTORY_INSIGHTS)), newsCdnCacheControl(analysis, options.clock?.() ?? Date.now()));
+        // Each hint is added to a copy only while its feature is on (HISTORY_INSIGHTS, the ask service); stats.json is never
+        // read here and no model is called. The CDN lifetime is still the original analysis's.
+        const hinted = withAskHint(withHistoryHint(analysis, parseHistoryMode(env.HISTORY_INSIGHTS)), ask.availability().enabled);
+        return send(response, 200, hinted, newsCdnCacheControl(analysis, options.clock?.() ?? Date.now()));
       }
       return send(response, 404, { error: '요청한 API를 찾을 수 없습니다.' });
     } catch {
